@@ -293,10 +293,10 @@ Current public CI builds are ad-hoc signed. macOS privacy permissions are tied t
 
 ### Linux remote screen shows no image
 
-Release **v0.3.5+** includes the Pillow/Tkinter packaging fix required by the frozen Linux client. If an older client log contains:
+Release **v0.3.6+** includes the Pillow/Tkinter packaging fix required by the frozen Linux client. If an older client log contains:
 
 ```text
 ModuleNotFoundError: No module named 'PIL._tkinter_finder'
 ```
 
-update the Linux client to v0.3.5 or later. This error is local to the Linux renderer; it does not indicate a TLS, password, or macOS Screen Recording failure.
+update the Linux client to v0.3.6 or later. This error is local to the Linux renderer; it does not indicate a TLS, password, or macOS Screen Recording failure.

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.6
+
+- Fixed the Linux GitHub Actions release job falsely failing after a successful PyInstaller build.
+- The frozen-bundle verification now uses `pyi-archive_viewer -r -l`, so it recursively inspects the embedded `PYZ` archive where Python modules such as `PIL._tkinter_finder` are stored.
+- Moved bundle verification into its own CI step with explicit diagnostics, making it clear whether a failure comes from PyInstaller or from the post-build integrity check.
+
 ## 0.3.5
 
 - Fixed the Linux client remote-screen renderer failing with `ModuleNotFoundError: No module named 'PIL._tkinter_finder'` in PyInstaller release builds.
