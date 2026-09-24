@@ -1,3 +1,12 @@
+## 0.6.6
+
+- Fixed the macOS signing preflight failure `Requirement syntax error(s): line 1:1: unexpected token: designated`.
+- `codesign --requirements` still receives an internal requirement set such as `designated => identifier ...`, which is correct when embedding a designated requirement into a signature.
+- `codesign -R` now receives only the single requirement expression (`identifier ...` / `identifier ... and info[...] = ...`) because Apple documents that `-R` does **not** accept requirement-set tags such as `designated =>`.
+- Applied the same split to transport verification, the stable per-Mac DR self-test, and runtime local-signing verification so the bug cannot reappear after CI during an actual Mac update.
+- Added regression assertions that fail if a `designated =>` requirement-set file is passed to `codesign -R`.
+- Kept the v0.6.5 certificate-free/keychain-free explicit-DR architecture unchanged; this release fixes verification syntax, not the identity model.
+
 ## 0.6.5
 
 - Removed the certificate/keychain signing architecture that repeatedly failed on macOS runners with `Unknown critical cert extension` and keychain lookup errors.

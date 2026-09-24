@@ -35,11 +35,17 @@ class LocalIdentity:
         return 'ZorinMacBridge Stable Local Designated Requirement'
 
     @property
-    def requirement(self) -> str:
+    def requirement_expression(self) -> str:
+        """Single requirement expression used by codesign -R (no type tag)."""
         return (
-            f'designated => identifier "{BUNDLE_ID}" '
+            f'identifier "{BUNDLE_ID}" '
             f'and info[{IDENTITY_MARKER_KEY}] = "{self.token}"'
         )
+
+    @property
+    def requirement(self) -> str:
+        """Internal requirement set used while signing with codesign --requirements."""
+        return f'designated => {self.requirement_expression}'
 
 
 def _run(args: list[str], *, check: bool = True, timeout: float = 60.0) -> subprocess.CompletedProcess[str]:
@@ -151,6 +157,12 @@ def _write_requirement(identity: LocalIdentity, directory: Path) -> Path:
     return path
 
 
+def _write_requirement_expression(identity: LocalIdentity, directory: Path) -> Path:
+    path = directory / 'zorinmacbridge-local-expression.req'
+    path.write_text(identity.requirement_expression + '\n', encoding='utf-8')
+    return path
+
+
 def _sign_adhoc(target: Path) -> None:
     _run([
         '/usr/bin/codesign', '--force', '--timestamp=none', '--sign', '-', str(target),
@@ -201,8 +213,8 @@ def verify_app_local_identity(app: Path, identity: LocalIdentity | None = None) 
         raise LocalSigningError('The app does not contain this Mac\'s stable local identity marker.')
     _run(['/usr/bin/codesign', '--verify', '--deep', '--strict', '--verbose=2', str(app)])
     with tempfile.TemporaryDirectory(prefix='zmb-local-verify-') as tmp:
-        req = _write_requirement(identity, Path(tmp))
-        _run(['/usr/bin/codesign', '--verify', '--strict', '--deep', '-R', str(req), str(app)])
+        req_expr = _write_requirement_expression(identity, Path(tmp))
+        _run(['/usr/bin/codesign', '--verify', '--strict', '--deep', '-R', str(req_expr), str(app)])
 
     # Make sure the embedded designated requirement is explicit and does not
     # fall back to the ad-hoc default cdhash requirement.

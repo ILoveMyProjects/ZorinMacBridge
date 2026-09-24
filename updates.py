@@ -396,7 +396,7 @@ def _verify_macos_transport_app(app: Path, progress: ProgressCallback | None) ->
 def _verify_macos_update_identity(current_app: Path | None, new_app: Path, progress: ProgressCallback | None) -> None:
     """Verify that an already locally-signed install keeps the same per-Mac DR.
 
-    v0.6.5 is the migration point for the certificate-free stable DR model. Older
+    v0.6.6 is the migration point for the certificate-free stable DR model. Older
     installs may have build-bound ad-hoc, transport, or experimental local-certificate
     signatures. Every installed update is re-signed with the same explicit per-Mac DR
     *before* replacing the app.

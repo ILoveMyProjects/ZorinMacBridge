@@ -1,6 +1,6 @@
 # macOS signing model
 
-ZorinMacBridge v0.6.5 does **not** require Developer ID, a self-signed certificate, a keychain identity, GitHub signing secrets, or signing setup on the Linux workstation.
+ZorinMacBridge v0.6.6 does **not** require Developer ID, a self-signed certificate, a keychain identity, GitHub signing secrets, or signing setup on the Linux workstation.
 
 ## Why
 
@@ -24,7 +24,7 @@ The installer/updater verifies the downloaded app and checksum first. It then ap
 
 ## Migration
 
-The first v0.6.5 launch from an older build-bound/ad-hoc identity is a one-time identity migration. The app stages and signs a replacement with the stable local DR, asks for administrator authorization only to replace the bundle in `/Applications`, then restarts. Because the old and new DRs are different, macOS can require Screen Recording and Accessibility approval once at that migration boundary. Later v0.6.5+ updates reuse the same DR.
+The first v0.6.6 launch from an older build-bound/ad-hoc identity is a one-time identity migration. The app stages and signs a replacement with the stable local DR, asks for administrator authorization only to replace the bundle in `/Applications`, then restarts. Because the old and new DRs are different, macOS can require Screen Recording and Accessibility approval once at that migration boundary. Later v0.6.6+ updates reuse the same DR.
 
 ## Security trade-off
 

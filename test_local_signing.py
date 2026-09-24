@@ -11,10 +11,16 @@ def main() -> None:
     token = 'ab' * 32
     identity = LocalIdentity(token=token)
     requirement = identity.requirement
+    expression = identity.requirement_expression
+    assert requirement.startswith('designated => ')
+    assert not expression.startswith('designated => ')
     assert f'identifier "{BUNDLE_ID}"' in requirement
+    assert f'identifier "{BUNDLE_ID}"' in expression
     assert f'info[{IDENTITY_MARKER_KEY}] = "{token}"' in requirement
     assert 'certificate leaf' not in requirement
     assert 'cdhash' not in requirement
+    assert 'certificate leaf' not in expression
+    assert 'cdhash' not in expression
 
     with tempfile.TemporaryDirectory() as tmp:
         app = Path(tmp) / APP_NAME
@@ -55,6 +61,17 @@ def main() -> None:
     assert 'KEYCHAIN_PATH' not in local_signing
     assert 'CERT_PATH' not in local_signing
     assert 'P12_PATH' not in local_signing
+
+    # codesign -R accepts a single requirement expression, not a requirement set
+    # prefixed by `designated =>`. Keep separate files/values for signing vs. verification.
+    assert 'LOCAL_EXPR=' in transport
+    assert '-R "$LOCAL_EXPR"' in transport
+    assert 'REQ_EXPR=' in transport
+    assert '-R "$REQ_EXPR"' in transport
+    assert '-R "$LOCAL_REQ"' not in transport
+    assert '-R "$REQ"' not in transport
+    assert '_write_requirement_expression' in local_signing
+    assert "'-R', str(req_expr)" in local_signing
 
     assert "--local-sign-app 'build/local-sign-test/ZorinMacBridge Server.app'" in workflow
     assert "codesign -d -r- 'build/local-sign-test/ZorinMacBridge Server.app'" in workflow

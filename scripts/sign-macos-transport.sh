@@ -60,11 +60,13 @@ if [ "$SELF_TEST" -eq 1 ]; then
 </dict></plist>
 PLIST
   LOCAL_REQ="$TMP/local.req"
+  LOCAL_EXPR="$TMP/local.expr"
   printf '%s\n' 'designated => identifier "com.ilovemyprojects.zorinmacbridge.server" and info[ZMBLocalIdentity] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"' > "$LOCAL_REQ"
+  printf '%s\n' 'identifier "com.ilovemyprojects.zorinmacbridge.server" and info[ZMBLocalIdentity] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"' > "$LOCAL_EXPR"
   codesign --force --timestamp=none --sign - "$TEST_APP/Contents/MacOS/ZorinMacBridge Server"
   codesign --force --deep --options runtime --timestamp=none --sign - --requirements "$LOCAL_REQ" "$TEST_APP"
   codesign --verify --deep --strict --verbose=2 "$TEST_APP"
-  codesign --verify --deep --strict -R "$LOCAL_REQ" "$TEST_APP"
+  codesign --verify --deep --strict -R "$LOCAL_EXPR" "$TEST_APP"
   LOCAL_SHOWN="$(codesign -d -r- "$TEST_APP" 2>&1)"
   printf '%s\n' "$LOCAL_SHOWN" | grep -Fq 'info[ZMBLocalIdentity]'
   if printf '%s\n' "$LOCAL_SHOWN" | grep -Fq 'cdhash '; then
@@ -93,9 +95,11 @@ while IFS= read -r -d '' item; do
 done < <(find "$APP/Contents" -type f \( -name '*.dylib' -o -name '*.so' \) -print0)
 
 REQ="$TMP/app.req"
+REQ_EXPR="$TMP/app.expr"
 printf 'designated => identifier "%s"\n' "$BUNDLE_ID" > "$REQ"
+printf 'identifier "%s"\n' "$BUNDLE_ID" > "$REQ_EXPR"
 echo '[transport-sign] signing application bundle with explicit transport DR'
 codesign --force --deep --options runtime --timestamp=none \
   --sign - --requirements "$REQ" "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
-codesign --verify --deep --strict -R "$REQ" "$APP"
+codesign --verify --deep --strict -R "$REQ_EXPR" "$APP"
