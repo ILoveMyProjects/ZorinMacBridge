@@ -45,7 +45,7 @@ curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/mast
 
 The installer detects Apple Silicon vs Intel, downloads the correct `.dmg`, verifies SHA-256, and installs **ZorinMacBridge Server** into `/Applications`.
 
-Starting with v0.6, installation uses a **persistent per-Mac local code identity**. No GitHub signing secret, Linux certificate setup, or Developer ID is required for this private/internal workflow. The Mac creates the identity automatically and reuses it for future updates.
+Starting with v0.6, installation uses a **persistent per-Mac local code identity**. No GitHub signing secret, Linux certificate setup, or Developer ID is required for this private/internal workflow. The Mac creates the identity automatically and reuses it for future updates. v0.6.4 also validates the macOS code-signing certificate/keychain with a real Mach-O signing probe before release packaging begins.
 
 ## Remote desktop architecture
 

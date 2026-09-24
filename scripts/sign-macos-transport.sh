@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP="${1:?usage: sign-macos-transport.sh /path/to/App.app}"
+MODE="${1:-}"
+SELF_TEST=0
+APP=""
+if [ "$MODE" = "--self-test" ]; then
+  SELF_TEST=1
+elif [ -n "$MODE" ]; then
+  APP="$MODE"
+else
+  echo "usage: sign-macos-transport.sh /path/to/App.app | --self-test" >&2
+  exit 2
+fi
 TMP="${RUNNER_TEMP:-/tmp}/zmb-transport-signing-${RANDOM}-${RANDOM}"
 KEYCHAIN="$TMP/transport.keychain-db"
 KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
@@ -43,9 +53,10 @@ echo '[transport-sign] generating ephemeral code-signing identity'
 openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 30 \
   -keyout "$TMP/key.pem" -out "$TMP/cert.pem" \
   -subj "/CN=$IDENTITY/O=ILoveMyProjects/OU=ZorinMacBridge/" \
-  -addext 'basicConstraints=critical,CA:TRUE' \
-  -addext 'keyUsage=critical,digitalSignature,keyCertSign' \
-  -addext 'extendedKeyUsage=critical,codeSigning' >/dev/null 2>&1
+  -addext 'basicConstraints=critical,CA:FALSE' \
+  -addext 'keyUsage=critical,digitalSignature' \
+  -addext 'extendedKeyUsage=critical,codeSigning' \
+  -addext 'subjectKeyIdentifier=hash' >/dev/null 2>&1
 openssl pkcs12 -export -out "$TMP/identity.p12" -inkey "$TMP/key.pem" -in "$TMP/cert.pem" \
   -name "$IDENTITY" -passout "pass:$P12_PASSWORD"
 
@@ -87,9 +98,19 @@ if ! printf '%s\n' "$IDENTITIES" | grep -Fq "\"$IDENTITY\""; then
   printf '%s\n' "$IDENTITIES" >&2
   exit 1
 fi
-# `find-key -a` is NOT "find all": on macOS `-a` means application-label.
-# Search for a private key explicitly and pass the isolated keychain as the
-# positional keychain argument.
+if printf '%s\n' "$IDENTITIES" | grep -Fq 'Unknown critical cert extension'; then
+  echo 'ERROR: generated code-signing certificate has an invalid critical-extension profile.' >&2
+  printf '%s\n' "$IDENTITIES" >&2
+  exit 1
+fi
+IDENTITY_SHA1="$(printf '%s\n' "$IDENTITIES" | awk -v name="$IDENTITY" '$0 ~ name {print $2; exit}')"
+if [ -z "$IDENTITY_SHA1" ]; then
+  echo 'ERROR: could not determine SHA-1 for the transport signing identity.' >&2
+  printf '%s\n' "$IDENTITIES" >&2
+  exit 1
+fi
+# Search for a private key explicitly. `find-key -a` is not "find all"; `-a`
+# means application-label on macOS.
 if ! security find-key -t private "$KEYCHAIN" >/dev/null 2>&1; then
   echo 'ERROR: transport signing private key is not visible in the isolated keychain.' >&2
   security find-certificate -a -Z -c "$IDENTITY" "$KEYCHAIN" >&2 || true
@@ -98,7 +119,7 @@ fi
 
 sign_one() {
   local target="$1"
-  if ! codesign --force --timestamp=none --sign "$IDENTITY" "$target"; then
+  if ! codesign --force --timestamp=none --keychain "$KEYCHAIN" --sign "$IDENTITY_SHA1" "$target"; then
     echo "ERROR: codesign could not sign: $target" >&2
     echo '--- visible code-signing identities ---' >&2
     security find-identity -v -p codesigning "$KEYCHAIN" >&2 || true
@@ -110,6 +131,26 @@ sign_one() {
   fi
 }
 
+# Prove that this exact certificate/private-key/keychain combination can really
+# sign Mach-O code before touching a release bundle. This catches certificate
+# profile and keychain ACL problems in seconds instead of after a long build.
+echo '[transport-sign] probing codesign with a small Mach-O executable'
+cp /usr/bin/true "$TMP/codesign-probe"
+chmod u+w "$TMP/codesign-probe"
+sign_one "$TMP/codesign-probe"
+codesign --verify --strict --verbose=2 "$TMP/codesign-probe"
+echo '[transport-sign] codesign probe OK'
+
+if [ "$SELF_TEST" -eq 1 ]; then
+  echo '[transport-sign] self-test OK'
+  exit 0
+fi
+
+if [ ! -d "$APP" ]; then
+  echo "ERROR: app bundle not found: $APP" >&2
+  exit 2
+fi
+
 echo '[transport-sign] signing nested native libraries'
 while IFS= read -r -d '' item; do
   sign_one "$item"
@@ -117,7 +158,7 @@ done < <(find "$APP/Contents" -type f \( -name '*.dylib' -o -name '*.so' \) -pri
 
 echo '[transport-sign] signing application bundle'
 codesign --force --deep --options runtime --timestamp=none \
-  --sign "$IDENTITY" "$APP"
+  --keychain "$KEYCHAIN" --sign "$IDENTITY_SHA1" "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 if codesign -dvvv "$APP" 2>&1 | grep -q 'Signature=adhoc'; then
   echo 'ERROR: transport app unexpectedly ended up ad-hoc signed.' >&2

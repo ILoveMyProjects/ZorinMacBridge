@@ -84,6 +84,30 @@ def _load_cert_hashes(cert_pem: bytes) -> tuple[str, str, str]:
     return sha1, sha256, cn
 
 
+def _certificate_profile_is_current(cert_pem: bytes) -> bool:
+    """Return True only for the macOS code-signing profile used by v0.6.4+."""
+    from cryptography import x509
+    from cryptography.x509.oid import ExtensionOID, ExtendedKeyUsageOID
+
+    try:
+        cert = x509.load_pem_x509_certificate(cert_pem)
+        basic = cert.extensions.get_extension_for_oid(ExtensionOID.BASIC_CONSTRAINTS)
+        key_usage = cert.extensions.get_extension_for_oid(ExtensionOID.KEY_USAGE)
+        eku = cert.extensions.get_extension_for_oid(ExtensionOID.EXTENDED_KEY_USAGE)
+    except Exception:
+        return False
+
+    return (
+        basic.critical
+        and basic.value.ca is False
+        and key_usage.critical
+        and key_usage.value.digital_signature
+        and not key_usage.value.key_cert_sign
+        and not key_usage.value.crl_sign
+        and eku.critical
+        and list(eku.value) == [ExtendedKeyUsageOID.CODE_SIGNING]
+    )
+
 
 def _user_keychain_search_list() -> list[str]:
     proc = _run(['/usr/bin/security', 'list-keychains', '-d', 'user'], check=False)
@@ -138,7 +162,7 @@ def _create_identity_files() -> None:
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - _dt.timedelta(days=1))
         .not_valid_after(now + _dt.timedelta(days=3650))
-        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .add_extension(
             x509.KeyUsage(
                 digital_signature=True,
@@ -146,8 +170,8 @@ def _create_identity_files() -> None:
                 key_encipherment=False,
                 data_encipherment=False,
                 key_agreement=False,
-                key_cert_sign=True,
-                crl_sign=True,
+                key_cert_sign=False,
+                crl_sign=False,
                 encipher_only=None,
                 decipher_only=None,
             ),
@@ -214,6 +238,17 @@ def ensure_local_identity() -> LocalIdentity:
 
     required = (KEYCHAIN_PATH, PASSWORD_PATH, P12_PASSWORD_PATH, P12_PATH, CERT_PATH)
     if not all(p.exists() for p in required):
+        _create_identity_files()
+    elif not _certificate_profile_is_current(CERT_PATH.read_bytes()):
+        # v0.6.0-v0.6.3 generated a CA-style certificate with keyCertSign/crlSign.
+        # That profile is not a valid end-entity macOS code-signing identity on
+        # current macOS runners. Recreate it once with the corrected leaf profile.
+        _run(['/usr/bin/security', 'delete-keychain', str(KEYCHAIN_PATH)], check=False)
+        for item in required:
+            try:
+                item.unlink()
+            except OSError:
+                pass
         _create_identity_files()
 
     keychain_password = PASSWORD_PATH.read_text(encoding='utf-8').strip()
@@ -317,17 +352,28 @@ def sign_app_locally(app: Path) -> LocalIdentity:
         for path in contents.rglob('*'):
             if path.is_file() and path.suffix in ('.dylib', '.so'):
                 nested.append(path)
+        # Verify private-key access with a tiny Mach-O before touching the app.
+        with tempfile.TemporaryDirectory(prefix='zmb-local-sign-probe-') as probe_tmp:
+            probe = Path(probe_tmp) / 'codesign-probe'
+            shutil.copy2('/usr/bin/true', probe)
+            _run([
+                '/usr/bin/codesign', '--force', '--timestamp=none',
+                '--keychain', str(identity.keychain), '--sign', identity.cert_sha1, str(probe),
+            ])
+            _run(['/usr/bin/codesign', '--verify', '--strict', '--verbose=2', str(probe)])
+
         for path in sorted(nested, key=lambda p: len(str(p)), reverse=True):
             _run([
                 '/usr/bin/codesign', '--force', '--timestamp=none',
-                '--sign', identity.common_name, str(path),
+                '--keychain', str(identity.keychain), '--sign', identity.cert_sha1, str(path),
             ])
 
         with tempfile.TemporaryDirectory(prefix='zmb-local-sign-') as tmp:
             req = _write_requirement(identity, Path(tmp))
             _run([
                 '/usr/bin/codesign', '--force', '--deep', '--options', 'runtime', '--timestamp=none',
-                '--sign', identity.common_name, '--requirements', str(req), str(app),
+                '--keychain', str(identity.keychain), '--sign', identity.cert_sha1,
+                '--requirements', str(req), str(app),
             ], timeout=180.0)
 
         verify_app_local_identity(app, identity)

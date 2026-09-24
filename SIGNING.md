@@ -6,6 +6,8 @@ ZorinMacBridge does **not** require a Developer ID, a GitHub signing secret, or 
 
 GitHub Actions creates a short-lived **transport signature** for each macOS release artifact. That signature exists only so the downloaded `.app` is structurally signed and older ZorinMacBridge updaters can validate/install the migration release.
 
+Both the transport identity and the per-Mac identity use an end-entity macOS code-signing certificate profile: `CA:FALSE`, critical `digitalSignature` key usage, and critical `codeSigning` extended key usage. The release workflow performs a real `codesign` probe on a small Mach-O executable before starting the long macOS builds.
+
 Before an app is installed on a Mac, ZorinMacBridge creates one **persistent local code-signing identity on that Mac** and re-signs the staged app with it. The private key remains on that Mac under:
 
 ```text
@@ -26,7 +28,7 @@ This prevents each GitHub release build from becoming a new privacy identity on 
 
 ## Migration from v0.5.x
 
-v0.6.3 is the first migration release intended for publication after the macOS CI signing fixes. Older updaters can install its transport-signed app. On the first v0.6.3 launch, if the app in `/Applications` does not yet use the Mac's persistent local identity, ZorinMacBridge automatically:
+v0.6.4 is the migration release intended for publication after the macOS CI certificate-profile fixes. Older updaters can install its transport-signed app. On the first v0.6.4 launch, if the app in `/Applications` does not yet use the Mac's persistent local identity, ZorinMacBridge automatically:
 
 1. creates/reuses the local identity;
 2. stages a copy of the installed app;

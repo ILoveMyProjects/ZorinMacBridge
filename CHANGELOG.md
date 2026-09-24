@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.4
+
+- Fixed the macOS signing certificate profile after v0.6.3 exposed `Unknown critical cert extension` and `codesign` failed on the first nested `.so`.
+- Transport and persistent per-Mac signing certificates are now end-entity code-signing certificates: `CA:FALSE`, critical `digitalSignature` key usage, and critical `codeSigning` EKU; `keyCertSign`/`crlSign` were removed.
+- `codesign` now selects the imported identity by SHA-1 and explicitly scopes lookup to the intended file keychain.
+- Added a real Mach-O signing probe using a copy of `/usr/bin/true` before any release bundle is signed.
+- Added a dedicated `macos-signing-preflight` GitHub Actions job so certificate/keychain failures happen before the long arm64/x86_64 package builds start.
+- Persistent local identities created with the obsolete v0.6.0-v0.6.3 CA-style certificate profile are automatically regenerated once before local signing.
+
 ## 0.6.3
 
 - Fixed the macOS transport-signing validation bug in v0.6.2: `security find-key -a "$KEYCHAIN"` was malformed because `-a` means **application-label**, so the keychain path was being consumed as a label instead of searched as a keychain.

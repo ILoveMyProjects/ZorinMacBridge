@@ -91,7 +91,18 @@ jobs:
           name: linux-amd64
           path: release/*
 
+  macos-signing-preflight:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prove temporary macOS code-signing identity works
+        run: |
+          set -euo pipefail
+          bash -n scripts/sign-macos-transport.sh
+          scripts/sign-macos-transport.sh --self-test
+
   macos-arm64:
+    needs: [macos-signing-preflight]
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -174,6 +185,7 @@ jobs:
           path: release/*
 
   macos-intel:
+    needs: [macos-signing-preflight]
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4

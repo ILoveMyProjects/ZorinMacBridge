@@ -38,6 +38,9 @@ def main() -> None:
     assert 'MACOS_CERTIFICATE_PASSWORD' not in workflow
     assert 'MACOS_SIGNING_IDENTITY' not in workflow
     assert 'scripts/sign-macos-transport.sh' in workflow
+    assert 'macos-signing-preflight:' in workflow
+    assert 'scripts/sign-macos-transport.sh --self-test' in workflow
+    assert 'needs: [macos-signing-preflight]' in workflow
     transport = Path('scripts/sign-macos-transport.sh').read_text(encoding='utf-8')
     local_signing = Path('mac_local_signing.py').read_text(encoding='utf-8')
     assert 'security list-keychains -d user -s "$KEYCHAIN"' in transport
@@ -46,11 +49,21 @@ def main() -> None:
     assert 'security default-keychain -d user -s "$KEYCHAIN"' in transport
     assert 'security find-key -t private "$KEYCHAIN"' in transport
     assert '-t agg -f pkcs12' in transport
-    assert '-t cert -f pkcs12' not in transport
+    assert 'basicConstraints=critical,CA:FALSE' in transport
+    assert 'keyUsage=critical,digitalSignature' in transport
+    assert 'keyCertSign' not in transport
+    assert 'extendedKeyUsage=critical,codeSigning' in transport
+    assert '--self-test' in transport
+    assert 'codesign-probe' in transport
+    assert '--keychain "$KEYCHAIN" --sign "$IDENTITY_SHA1"' in transport
     assert "_ensure_keychain_searchable(KEYCHAIN_PATH)" in local_signing
+    assert 'BasicConstraints(ca=False' in local_signing
+    assert 'key_cert_sign=False' in local_signing
+    assert 'crl_sign=False' in local_signing
+    assert '_certificate_profile_is_current' in local_signing
+    assert "'--keychain', str(identity.keychain), '--sign', identity.cert_sha1" in local_signing
     assert 'security import "$TMP/identity.p12"' in transport
     assert ' -A ' in transport or ' -A \\' in transport
-    assert '--sign "$IDENTITY"' in transport
     assert "'-A'" in local_signing
     assert "'-t', 'agg', '-f', 'pkcs12'" in local_signing
     assert "'-t', 'cert', '-f', 'pkcs12'" not in local_signing
