@@ -22,7 +22,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y python3-tk
           python -m pip install --upgrade pip
-          python -m pip install pyinstaller Pillow==12.3.0 'zeroconf>=0.147,<1' 'pystray>=0.19.5,<1'
+          python -m pip install pyinstaller Pillow==12.3.0 av==18.1.0 keyring==25.6.0 'secretstorage>=3.3,<4' 'zeroconf>=0.147,<1' 'pystray>=0.19.5,<1'
       - name: Run tests
         run: |
           python test_protocol.py
@@ -36,6 +36,10 @@ jobs:
             --add-data 'assets/client.png:assets' \
             --add-data 'VERSION:.' \
             --collect-all PIL \
+            --collect-all av \
+            --collect-all keyring \
+            --collect-all secretstorage \
+            --collect-all jeepney \
             --collect-all zeroconf \
             --collect-all pystray \
             --collect-all Xlib \
@@ -88,6 +92,11 @@ jobs:
             exit 1
           fi
           echo "OK: PIL._tkinter_finder is present in the frozen client."
+          if ! grep -E '(^|[./])av([./]|$)' build/linux-archive-contents.txt >/dev/null; then
+            echo "ERROR: PyAV is missing from the frozen client." >&2
+            exit 1
+          fi
+          echo "OK: PyAV is present in the frozen client."
       - uses: actions/upload-artifact@v4
         with:
           name: linux-amd64
@@ -106,6 +115,17 @@ jobs:
           python -m pip install pyinstaller Pillow==12.3.0 cryptography==50.0.1 'zeroconf>=0.147,<1' 'pystray>=0.19.5,<1'
       - name: Build macOS Apple Silicon server
         run: |
+          mkdir -p build
+          MACOSX_DEPLOYMENT_TARGET=13.0 swiftc -O \
+            -framework ScreenCaptureKit \
+            -framework VideoToolbox \
+            -framework CoreMedia \
+            -framework CoreVideo \
+            -framework AppKit \
+            native/macos/ZMBStreamer.swift \
+            -o build/zmb-macos-streamer
+          test -x build/zmb-macos-streamer
+
           mkdir -p build/AppIcon.iconset
           sips -z 16 16 assets/server.png --out build/AppIcon.iconset/icon_16x16.png >/dev/null
           sips -z 32 32 assets/server.png --out build/AppIcon.iconset/icon_16x16@2x.png >/dev/null
@@ -125,12 +145,14 @@ jobs:
             --icon build/server.icns \
             --add-data 'assets/server.png:assets' \
             --add-data 'VERSION:.' \
+            --add-binary 'build/zmb-macos-streamer:.' \
             --collect-all cryptography \
             --collect-all zeroconf \
             --collect-all pystray \
             --hidden-import pystray._darwin \
             mac_server_gui.py
 
+          /usr/libexec/PlistBuddy -c "Add :NSScreenCaptureUsageDescription string ZorinMacBridge streams this Mac display only to an authenticated LAN client." 'dist/ZorinMacBridge Server.app/Contents/Info.plist' || true
           codesign --force --deep --sign - 'dist/ZorinMacBridge Server.app'
           mkdir -p release build/dmgroot
           cp -R 'dist/ZorinMacBridge Server.app' build/dmgroot/
@@ -157,6 +179,17 @@ jobs:
           python -m pip install pyinstaller Pillow==12.3.0 cryptography==50.0.1 'zeroconf>=0.147,<1' 'pystray>=0.19.5,<1'
       - name: Build macOS Intel server
         run: |
+          mkdir -p build
+          MACOSX_DEPLOYMENT_TARGET=13.0 swiftc -O \
+            -framework ScreenCaptureKit \
+            -framework VideoToolbox \
+            -framework CoreMedia \
+            -framework CoreVideo \
+            -framework AppKit \
+            native/macos/ZMBStreamer.swift \
+            -o build/zmb-macos-streamer
+          test -x build/zmb-macos-streamer
+
           mkdir -p build/AppIcon.iconset
           sips -z 16 16 assets/server.png --out build/AppIcon.iconset/icon_16x16.png >/dev/null
           sips -z 32 32 assets/server.png --out build/AppIcon.iconset/icon_16x16@2x.png >/dev/null
@@ -176,12 +209,14 @@ jobs:
             --icon build/server.icns \
             --add-data 'assets/server.png:assets' \
             --add-data 'VERSION:.' \
+            --add-binary 'build/zmb-macos-streamer:.' \
             --collect-all cryptography \
             --collect-all zeroconf \
             --collect-all pystray \
             --hidden-import pystray._darwin \
             mac_server_gui.py
 
+          /usr/libexec/PlistBuddy -c "Add :NSScreenCaptureUsageDescription string ZorinMacBridge streams this Mac display only to an authenticated LAN client." 'dist/ZorinMacBridge Server.app/Contents/Info.plist' || true
           codesign --force --deep --sign - 'dist/ZorinMacBridge Server.app'
           mkdir -p release build/dmgroot
           cp -R 'dist/ZorinMacBridge Server.app' build/dmgroot/

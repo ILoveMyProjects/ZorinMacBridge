@@ -1,108 +1,61 @@
-# Security Policy and Design
+# Security model
 
-ZorinMacBridge is intentionally designed as a small LAN-first remote desktop bridge. It is an experimental project, not an independently audited enterprise remote-access product.
+ZorinMacBridge is designed for a trusted private LAN. It is not intended to be exposed directly to the public Internet.
 
-## Server lifecycle and persistence
+## Network boundaries
 
-The macOS server is intentionally manual.
+The client and server accept literal private/loopback/link-local addresses only. The project does not configure router forwarding, UPnP, cloud relays, or public rendezvous services.
 
-The project does not install or implement:
+Runtime traffic is split across authenticated TLS connections:
 
-- LaunchAgents or LaunchDaemons;
-- login items;
-- system services;
-- hidden persistence;
-- automatic startup;
-- background update checks.
+- control: mouse, keyboard, clipboard;
+- video: H.264 screen stream;
+- file operations: listing, upload, download, mkdir.
 
-The server socket is created only after the user launches the macOS application and clicks **Start server**. Clicking **Stop server** or exiting the application stops the listener.
+This separation prevents video backpressure from blocking input or file operations.
 
-## Network model
+## TLS and trust
 
-- The remote-desktop server listens only on the literal IP selected by the user.
-- Accepted ranges are RFC1918 IPv4 (`10/8`, `172.16/12`, `192.168/16`), loopback, IPv4 link-local, IPv6 ULA, IPv6 link-local, and IPv6 loopback where supported.
-- Clients arriving from public source addresses are rejected.
-- The client accepts only literal addresses from local/private ranges.
-- The remote-desktop connection does not require DNS, a vendor account, cloud relay, NAT traversal, UPnP, or router port forwarding.
+The macOS server generates a local TLS certificate and private key under:
 
-## Optional LAN discovery
+```text
+~/.zorin-mac-bridge/
+```
 
-When enabled in the server GUI, the running server advertises `_zorinmacbridge._tcp.local.` using mDNS/Bonjour.
+The Linux client pins the SHA-256 certificate fingerprint. LAN discovery does not publish the fingerprint as a trusted value. On first pairing, compare the fingerprint shown by the Mac. The client can remember the verified fingerprint after a successful connection.
 
-Important properties:
+## Password handling
 
-- advertisement exists only while the server is running;
-- traffic is local multicast discovery, not a vendor/cloud discovery service;
-- the advertisement includes basic service identity, private address/port and application version;
-- it does not include the session password, clipboard contents, files, or project data;
-- discovery does not establish trust.
+The server does not need the plaintext session password after configuration. When password persistence is enabled it stores a salted PBKDF2-HMAC-SHA256 verifier with a high iteration count in a mode-0600 settings file.
 
-The Linux client uses discovery only to populate the private IP and port. TLS fingerprint verification remains separate.
+The Linux client can remember the plaintext password in the desktop system keyring. If no usable system keyring backend is available, ZorinMacBridge logs a warning and does not silently fall back to a plaintext password file.
 
-If you do not want the Mac to advertise its presence on the LAN, disable **Advertise this Mac…** and enter the private IP manually.
+Passwords are never written to application logs or mDNS records.
 
-## TLS and authentication
+## File confinement
 
-- Minimum TLS version: TLS 1.2.
-- The server generates a local self-signed certificate under `~/.zorin-mac-bridge/`.
-- The client requires SHA-256 certificate fingerprint pinning.
-- mDNS discovery does not replace or disable fingerprint verification.
-- The session password is transmitted only after TLS is established and the expected certificate fingerprint matches.
-- The session password is not stored by default.
+Remote file operations are constrained to the configured share root (default `~/ZorinMac-Share`). The server rejects absolute paths, `..`, NUL bytes, path escapes, and symlink traversal. Uploads are written to temporary files and atomically renamed on successful completion.
 
-## File access
+## macOS permissions
 
-- The default remote share is `~/ZorinMac-Share`.
-- Remote paths must be relative; absolute paths and `..` traversal are rejected.
-- Resolved paths are checked to prevent escaping the share through symlinks.
-- Symlinks are not listed or downloaded; Linux-side directory uploads skip symlinks.
-- Uploads use a temporary `.part` file and are atomically renamed after the declared byte count is verified.
+Screen Recording and Accessibility are macOS privacy/TCC permissions. ZorinMacBridge does not attempt to bypass or silently grant them.
 
-## Keyboard and clipboard
+Stable permissions across application updates depend on stable macOS code identity. Ad-hoc signed builds may be treated as different code after updates. Production releases should use a stable Developer ID Application identity and notarization.
 
-- Remote mouse and keyboard events are accepted only after authentication.
-- macOS requires explicit Accessibility permission for input injection.
-- Clipboard synchronization is text-only and limited to 2 MiB.
-- Clipboard contents travel through the pinned TLS connection and are not sent to a third-party service.
+Apple also provides the restricted `com.apple.developer.persistent-content-capture` entitlement for VNC applications that need persistent screen-capture access. The entitlement requires Apple approval before it may be used.
 
-## Manual update checks
+## Start at login
 
-The applications do not check for updates at startup or in the background.
+The optional launch-at-login feature creates a **per-user LaunchAgent** under `~/Library/LaunchAgents`. It is disabled by default and can be removed from the server UI. It does not install a root daemon.
 
-When the user explicitly selects **Check for updates**, the application sends an HTTPS request to the public GitHub Releases API for `ILoveMyProjects/ZorinMacBridge`. If the user then explicitly approves installation, the updater downloads the matching release package and checksum file from GitHub, verifies SHA-256, and invokes the operating system's normal administrator-authorization mechanism before replacing the installed package/app.
+The optional auto-start-server setting starts listening when the GUI app launches. These options are intended for a Mac mini or other dedicated development Mac where the user explicitly wants unattended access after login.
 
-The updater never runs at startup or on a timer. It does not install a daemon, service, LaunchAgent, login item, or background updater.
+## Updates
 
-If this behavior is not desired, do not use the update-check command. The remote desktop and file transfer continue to work on an isolated LAN without Internet access.
+There is no background update checker. A GitHub request occurs only after the user explicitly selects **Check for updates** or runs an installer command.
 
-The one-command installation/update scripts also contact GitHub because they download the latest public release package.
+Release packages are verified against published SHA-256 files before installation. For stronger software-supply-chain assurance, production macOS releases should additionally be Developer-ID-signed and notarized.
 
-SHA-256 files protect against accidental corruption or mismatch between downloaded files. They are published in the same GitHub Release as the binaries; they are not a substitute for independent release signing. The current macOS build is ad-hoc signed rather than Developer-ID signed/notarized.
+## Reporting issues
 
-## Tray / menu-bar integration
-
-Tray/menu-bar integration is user-interface functionality only. It does not create a background service. The tray icon exists only while the application process is running. Exiting the application terminates it.
-
-## Deliberately absent features
-
-The project does not implement:
-
-- remote installation;
-- microphone or camera access;
-- Keychain access;
-- whole-disk file browsing;
-- automatic router port opening;
-- UPnP;
-- automatic bidirectional file synchronization;
-- cloud relay or vendor-operated discovery;
-- hidden autostart or persistence.
-
-## Recommended deployment
-
-Use the software only on a trusted LAN/VLAN. Do not expose TCP port `45950` directly to the public Internet.
-
-Where possible, add a host/router/VLAN firewall rule allowing TCP `45950` only from the Linux workstation's private IP.
-
-## Reporting a vulnerability
-
-Please do not publish exploit details in a public issue before a fix can be prepared. If the repository owner enables GitHub private vulnerability reporting, use that channel. Otherwise open a minimal issue asking for a private contact path without including sensitive exploit details.
+Do not include real session passwords, TLS private keys, personal file contents, or other secrets in a public issue. Connection logs intentionally omit the session password.

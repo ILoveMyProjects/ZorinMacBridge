@@ -6,13 +6,13 @@
   <img src="assets/server.png" width="190" alt="ZorinMacBridge Server icon">
 </p>
 
-A LAN-first remote desktop bridge for a **Zorin OS / Linux development workstation → macOS development machine** workflow.
+A LAN-first remote desktop bridge for a **Zorin OS / Linux workstation → macOS development machine** workflow.
 
-Keep Linux as your main workstation for web/app development and open the Mac only when Xcode, the iOS Simulator, signing, or another macOS-only tool is required.
+The intended setup is simple: keep Linux as the main machine for web/app development, and use the Mac only for Xcode, iOS Simulator, signing, builds, or other Apple-only tooling.
 
-The remote desktop session itself does **not** require a cloud account, vendor relay, telemetry service, or Internet connection. Optional LAN discovery uses local mDNS/Bonjour only. GitHub is contacted only when you explicitly install/update the app or manually choose **Check for updates**.
+The remote session does **not** require a vendor cloud, relay, account, telemetry service, or Internet connection. Optional LAN discovery uses local mDNS/Bonjour only. GitHub is contacted only when you explicitly install/update the app or manually select **Check for updates**.
 
-> **Status:** early MVP / experimental. The code is intentionally small and auditable, but it has not received an independent security audit.
+> **Status:** experimental. This project is still under active development and has not received an independent security audit.
 
 ## Install
 
@@ -26,11 +26,9 @@ curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/mast
 
 The installer downloads the latest `.deb`, verifies its published SHA-256 checksum, installs it with `apt`, and adds **ZorinMacBridge Client** to the application menu.
 
-To update later, either use **Help → Check for updates** in the app or run the same command again.
-
 ### macOS — Server
 
-> The Apple machine runs **macOS**, not iOS. iOS is the target platform you build for in Xcode.
+> The Apple computer runs **macOS**. iOS is the target platform you build for in Xcode.
 
 Copy and paste one command on the Mac:
 
@@ -38,73 +36,105 @@ Copy and paste one command on the Mac:
 curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/master/install-macos.sh | bash
 ```
 
-The installer automatically detects Apple Silicon vs Intel, downloads the correct `.dmg`, verifies its published SHA-256 checksum, and installs **ZorinMacBridge Server** into `/Applications`.
+The installer detects Apple Silicon vs Intel, downloads the correct `.dmg`, verifies SHA-256, and installs **ZorinMacBridge Server** into `/Applications`.
 
-**The installer does not start the server.** Open **ZorinMacBridge Server** manually only when you want remote access.
+The public macOS builds are currently ad-hoc signed unless the release workflow is configured with a stable Apple signing identity. See **Stable macOS permissions** below.
 
-The macOS build is currently ad-hoc signed rather than Apple-notarized. On first launch macOS may require **Control-click → Open** and confirmation under **System Settings → Privacy & Security**.
+## What v0.4 changes
 
-The server needs these explicit macOS permissions:
+The old prototype captured individual JPEG screenshots and sent them on the same connection used for mouse and keyboard input. That design could eventually fill the TLS socket buffer and block/disconnect the whole remote session.
 
-- **Screen Recording**
-- **Accessibility**
-
-## Normal workflow
+v0.4 changes the architecture:
 
 ```text
-Zorin OS / Linux                       MacBook / macOS
-main workstation                      Xcode / iOS build machine
+Linux client                         macOS server
 
-┌────────────────────────┐            ┌────────────────────────┐
-│ Browser / IDE / CLI    │            │ Xcode / Simulator      │
-│                        │            │                        │
-│ ZorinMacBridge Client  │◄── LAN ───►│ ZorinMacBridge Server  │
-│                        │            │   manually started      │
-│ Local project files    │◄──────────►│ Shared folder           │
-└────────────────────────┘            └────────────────────────┘
+control TLS socket   ──────────────► mouse / keyboard / clipboard
+video TLS socket     ◄────────────── H.264 stream
+file TLS sockets     ◄─────────────► files / folders
 ```
 
-1. Open **ZorinMacBridge Server** on the Mac.
-2. Choose the Mac LAN IP, shared folder, and a session password.
-3. Click **Start server**.
-4. Open **ZorinMacBridge Client** on Linux.
-5. The client automatically performs a short LAN scan. You can also click **Find Macs**.
-6. Select the discovered Mac or enter its private IP manually.
-7. Compare/paste the TLS SHA-256 fingerprint displayed by the Mac.
-8. Connect.
-9. When finished, click **Stop server** or close the macOS app.
+The video path uses:
 
-## The Mac server is manual — not a service
+- **ScreenCaptureKit** for continuous macOS display capture;
+- **VideoToolbox** for real-time H.264 encoding on the Mac;
+- **PyAV/FFmpeg** for H.264 decoding on Linux;
+- a dedicated TLS video connection so slow video rendering cannot block mouse/keyboard traffic.
 
-ZorinMacBridge deliberately does **not** install or create:
+Default video settings are currently **30 fps**, up to **2560 px wide**, with an **8 Mbit/s H.264 target bitrate**.
 
-- a LaunchAgent;
-- a LaunchDaemon;
-- a login item;
-- a system service;
-- hidden persistence;
-- a background update checker.
+## Normal setup
 
-The server listens only after you manually open the application and click **Start server**. Closing the application stops the server.
+### First setup on the Mac
 
-## LAN auto-discovery
+1. Install **ZorinMacBridge Server**.
+2. Open it locally once.
+3. Grant **Screen Recording** when macOS asks.
+4. Grant **Accessibility** under **System Settings → Privacy & Security → Accessibility** so remote mouse and keyboard events are allowed.
+5. Enter a session password of at least 12 characters.
+6. Keep **Remember password verifier on this Mac** enabled.
+7. Click **Start server**.
 
-When **Advertise this Mac to ZorinMacBridge clients on the local LAN** is enabled, a running server publishes an mDNS/Bonjour service named:
+The Mac stores only a salted PBKDF2 password verifier; it does not store the plaintext session password.
+
+### First connection from Zorin/Linux
+
+1. Open **ZorinMacBridge Client**.
+2. Select the discovered Mac.
+3. Verify/paste the Mac TLS SHA-256 fingerprint once.
+4. Enter the session password.
+5. Keep **Remember this Mac** enabled.
+6. Connect.
+
+After a successful connection, the client stores:
+
+- the trusted TLS fingerprint in its local config;
+- the session password in the Linux desktop system keyring when available;
+- the Mac's persistent random server ID, so credentials are associated with the machine rather than only its current IP address.
+
+On later connections, discovery can restore the saved fingerprint/password automatically.
+
+## Mac mini / unattended user session
+
+By default ZorinMacBridge remains manual.
+
+For a Mac mini that you do not want to walk over to every time, enable these two options in the server window:
+
+- **Launch ZorinMacBridge Server when this macOS user logs in**
+- **Automatically start the server when the app launches**
+
+This creates a **per-user LaunchAgent/login item**, not a system daemon. It only runs inside a logged-in macOS user session.
+
+That distinction matters: screen capture and GUI input control operate on a user desktop session. If the Mac reboots and nobody logs in, there is no normal desktop session for ZorinMacBridge to control. If you require access immediately after reboot, configure the Mac so the intended desktop user session becomes logged in, then let ZorinMacBridge start in that session.
+
+Closing ZorinMacBridge still stops the server. Disabling **Launch at login** removes the user LaunchAgent.
+
+## Stable macOS permissions
+
+macOS controls Screen Recording and Accessibility through its privacy/TCC system. ZorinMacBridge cannot and should not silently grant itself those permissions.
+
+For permissions to survive application updates reliably, macOS needs to recognize the new build as the same application. Public ad-hoc signed test builds do not provide the same stable code identity as a properly Developer-ID-signed release.
+
+For long-term releases, use a stable **Developer ID Application** signing identity and notarization. The project keeps the bundle identifier stable as:
 
 ```text
-_zorinmacbridge._tcp.local.
+com.ilovemyprojects.zorinmacbridge.server
 ```
 
-This advertisement exists only while the server is running. `Stop server` or exiting the app removes it.
+For a true VNC/remote-desktop product, Apple also documents the restricted **Persistent Content Capture** entitlement:
 
-The client scans the local multicast domain and fills in the Mac's **private IP and port**. Discovery does **not** automatically trust the machine and does not replace TLS verification. The TLS certificate fingerprint still has to match the value displayed by the Mac server.
+```text
+com.apple.developer.persistent-content-capture
+```
 
-No cloud discovery server is involved.
+Apple requires explicit approval before an app can use that entitlement. Do not add it to release signing until Apple has approved the entitlement for the developer account.
 
-## Remote desktop controls
+Until releases use a stable signing identity, macOS may treat a newly downloaded build as a different executable and ask for privacy approval again even when a similarly named entry is already enabled in System Settings.
 
-- macOS screen streaming to Linux;
-- mouse movement and clicks;
+## Remote controls
+
+- continuous H.264 macOS screen stream;
+- mouse movement, left/right/middle click, drag and drop;
 - scrolling;
 - keyboard input;
 - Linux-friendly shortcut mapping;
@@ -124,7 +154,7 @@ No cloud discovery server is involved.
 | `Ctrl+Z` | `⌘Z` |
 | `Ctrl+F` | `⌘F` |
 
-This keeps normal Linux desktop muscle memory while preserving the real Control key for terminal work. For example, use **Right Ctrl+C** when you need macOS `Control+C` in Terminal.
+Use **Right Ctrl+C** when you need real macOS `Control+C`, for example to interrupt a process in Terminal.
 
 ## Clipboard
 
@@ -157,82 +187,65 @@ Remote file access is restricted to the configured share root. Symlinks are skip
 
 File transfer is explicit rather than automatic two-way source synchronization. This avoids silently overwriting newer project files when both machines have changed the same path.
 
-## App icons and tray / menu-bar integration
+## LAN auto-discovery
 
-The release packages include dedicated Client and Server icons.
+While the server is running, it can advertise:
 
-- The Linux `.deb` installs the client icon for the application menu/taskbar.
-- The macOS `.app`/`.dmg` embeds the server icon.
-- The applications also attempt to expose a small tray/menu-bar icon with common actions such as show window, discovery/start/stop, update check, and quit.
+```text
+_zorinmacbridge._tcp.local.
+```
 
-Tray support is best-effort because Linux desktop environments differ. If the tray backend is unavailable, the normal application window still works.
+The advertisement contains basic LAN connection metadata and a persistent random server ID. It does **not** publish the session password, TLS private key, clipboard contents, or shared files.
+
+Discovery does not automatically create trust. On first pairing, verify the TLS fingerprint shown by the Mac. After that successful pairing, the Linux client can remember the trusted fingerprint locally.
 
 ## Updates
 
-There is **no automatic or background update check**.
+There is **no background update check**.
 
-Choose **Help → Check for updates** manually. Only then does the app contact the GitHub Releases API. If a newer version exists, the app asks whether you want to install it. After approval it:
+Choose **Help → Check for updates** manually. The app then:
 
-1. downloads the platform-specific release package and matching SHA-256 checksum file;
-2. verifies the package checksum;
-3. asks the operating system for administrator authorization;
-4. installs the update;
-5. offers to restart the application.
+1. checks GitHub Releases;
+2. downloads the correct package and checksum after your approval;
+3. verifies SHA-256;
+4. asks the operating system for administrator authorization;
+5. installs the update;
+6. offers to restart the application.
 
-The updater does **not** open a browser or require the user to find release files manually.
-
-You can also update by re-running the one-command installer:
-
-### Linux
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/master/install-linux.sh | bash
-```
-
-### macOS
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/master/install-macos.sh | bash
-```
-
-The macOS installer updates the app in `/Applications` but **does not start the remote-desktop server automatically**. The in-app updater can reopen the GUI after an update, but the server remains stopped until the user manually selects **Start server**.
+You can also re-run the one-command installer.
 
 ## Security model
 
-- direct LAN connection;
-- literal private IPs only for remote desktop connections;
-- public IPs rejected;
+- LAN/private-address connections only;
 - TLS 1.2+;
-- manual SHA-256 certificate fingerprint pinning;
+- pinned SHA-256 server certificate fingerprint;
 - password authentication after TLS verification;
+- separate video/control/file channels;
 - no cloud relay;
 - no vendor account;
 - no telemetry;
-- no automatic router configuration or UPnP;
+- no UPnP/router configuration;
 - file access constrained to the configured share directory;
-- server runs only when manually started.
+- plaintext server password is not stored on the Mac;
+- remembered Linux passwords use the desktop system keyring when available.
 
-Optional mDNS/Bonjour discovery broadcasts basic service presence on the local network while the server is running. It does not send the session password or clipboard/file contents.
-
-See [SECURITY.md](SECURITY.md) for details.
+See [SECURITY.md](SECURITY.md).
 
 ## Releases
 
-Manual package downloads remain available:
+Manual downloads:
 
 - [Linux amd64 `.deb`](https://github.com/ILoveMyProjects/ZorinMacBridge/releases/latest/download/ZorinMacBridge-Client_linux-amd64.deb)
 - [macOS Apple Silicon `.dmg`](https://github.com/ILoveMyProjects/ZorinMacBridge/releases/latest/download/ZorinMacBridge-Server_macOS-arm64.dmg)
 - [macOS Intel `.dmg`](https://github.com/ILoveMyProjects/ZorinMacBridge/releases/latest/download/ZorinMacBridge-Server_macOS-x86_64.dmg)
 
-GitHub Actions builds these packages automatically for version tags such as `v0.3.0`.
-
 ---
 
 # Build / run from source
 
-Normal users should use the one-command installers above. The steps below are for contributors.
+Normal users should use the installers above.
 
-## Linux client from source
+## Linux client
 
 ```bash
 git clone https://github.com/ILoveMyProjects/ZorinMacBridge.git
@@ -242,12 +255,14 @@ chmod +x scripts/setup-source-linux.sh run_client.sh
 ./run_client.sh
 ```
 
-## macOS server from source
+## macOS server
+
+macOS 13+ and Xcode Command Line Tools are required for the native ScreenCaptureKit/VideoToolbox streamer.
 
 ```bash
 git clone https://github.com/ILoveMyProjects/ZorinMacBridge.git
 cd ZorinMacBridge
-chmod +x scripts/setup-source-macos.sh
+chmod +x scripts/setup-source-macos.sh scripts/build-macos-streamer.sh
 ./scripts/setup-source-macos.sh
 ./.venv/bin/python mac_server_gui.py
 ```
@@ -257,46 +272,25 @@ chmod +x scripts/setup-source-macos.sh
 ```bash
 python test_protocol.py
 python test_support.py
+python test_updater.py
 python -m compileall -q .
+swiftc -frontend -parse native/macos/ZMBStreamer.swift
 ```
+
+The final macOS compilation of the native streamer is performed on the macOS GitHub Actions runners because ScreenCaptureKit and VideoToolbox are macOS frameworks.
+
+## Troubleshooting
+
+The Linux client includes a **Logs** tab. Connection logs show TCP, TLS, fingerprint verification, authentication, control-channel state, H.264 video-channel state, decode errors, and disconnect reasons. Passwords are never written to the logs.
+
+If video works but mouse/keyboard does not, check the Mac server log for:
+
+```text
+Accessibility permission: granted
+```
+
+If it says Accessibility is not granted, enable **ZorinMacBridge Server** under **System Settings → Privacy & Security → Accessibility**, then quit and reopen the application.
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
-
-## Troubleshooting connection failures
-
-The Linux client includes a **Logs** tab. If **Connect** immediately changes to **Disconnected**, open **Logs** and inspect the most recent entries. The log records the TCP connection, TLS handshake, TLS fingerprint verification, authentication result, server-reported session errors, and disconnect reason. Session passwords are never written to the log.
-
-The macOS server window also contains a live log. For a healthy desktop connection it should progress through entries similar to:
-
-```text
-[desktop] connected
-[desktop] initializing CoreGraphics input
-[desktop] CoreGraphics input initialized
-[desktop] initializing screen capture backend
-[desktop] screen capture backend: /usr/sbin/screencapture
-[desktop] capturing first frame
-[desktop] first frame sent: ...
-```
-
-If Screen Recording permission is missing, **Start server** now stops before listening and asks you to enable **ZorinMacBridge Server** in **System Settings → Privacy & Security → Screen Recording** (the label may be **Screen & System Audio Recording** on some macOS versions). Quit and reopen the app after changing this permission. Accessibility permission is also required for remote mouse and keyboard control.
-
-Use **Copy all** in the Linux Logs tab to copy the client log into a bug report, or **Save…** to write it to a local `.log` file.
-
-
-### macOS Screen Recording permission behavior
-
-`Start server` does **not** request Screen Recording permission automatically. It performs a real one-frame capture test instead. If that succeeds, the server starts. If it fails, the app reports the failure once and you change the permission manually in System Settings.
-
-Current public CI builds are ad-hoc signed. macOS privacy permissions are tied to application code identity, so replacing the app with a differently signed build may require granting Screen Recording to that installed build again. Stable permission continuity between releases requires a stable Developer ID signature.
-
-### Linux remote screen shows no image
-
-Release **v0.3.6+** includes the Pillow/Tkinter packaging fix required by the frozen Linux client. If an older client log contains:
-
-```text
-ModuleNotFoundError: No module named 'PIL._tkinter_finder'
-```
-
-update the Linux client to v0.3.6 or later. This error is local to the Linux renderer; it does not indicate a TLS, password, or macOS Screen Recording failure.

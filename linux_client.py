@@ -4,7 +4,6 @@ from __future__ import annotations
 import datetime
 import hashlib
 import hmac
-import io
 import ipaddress
 import os
 import posixpath
@@ -16,6 +15,8 @@ import threading
 import traceback
 import subprocess
 import sys
+
+import av
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -30,10 +31,12 @@ from discovery import discover_servers
 from resources import resource_path, set_tk_icon
 from tray_icon import TrayController
 from updates import check_for_updates, install_update
+from settings import client_record, save_client_record
+from secret_store import get_password as get_saved_password, set_password as save_password_secret
 
 from protocol import (
     AUTH, AUTH_FAIL, AUTH_OK, CLIPBOARD_DATA, CLIPBOARD_GET, CLIPBOARD_SET,
-    DOWNLOAD_BEGIN, DOWNLOAD_CHUNK, DOWNLOAD_END, DOWNLOAD_REQ, ERROR, FRAME,
+    DOWNLOAD_BEGIN, DOWNLOAD_CHUNK, DOWNLOAD_END, DOWNLOAD_REQ, ERROR, VIDEO_H264,
     KEY, LIST_REQ, LIST_RESP, MKDIR_OK, MKDIR_REQ, MOUSE_BUTTON, MOUSE_MOVE,
     PacketReader, SCROLL, TEXT, UPLOAD_BEGIN, UPLOAD_CHUNK, UPLOAD_END,
     pack_json, pack_packet, recv_one_blocking, unpack_json,
@@ -110,11 +113,17 @@ class ClientApp:
         self.linux_shortcuts_var = tk.BooleanVar(value=True)
         self.machine_var = tk.StringVar(value='')
         self.discovered_by_label = {}
+        self.selected_server_id = ''
+        self.selected_server_name = ''
+        self.remember_credentials_var = tk.BooleanVar(value=True)
+        self.remember_credentials_active = True
 
         self.outgoing: queue.Queue[bytes] = queue.Queue(maxsize=1000)
         self.ui_queue: queue.Queue[tuple] = queue.Queue()
         self.stop_event = threading.Event()
         self.net_thread: threading.Thread | None = None
+        self.video_thread: threading.Thread | None = None
+        self.video_frames: queue.Queue[Image.Image] = queue.Queue(maxsize=2)
         self.connected = False
         self.last_photo = None
         self.remote_image_size = (1, 1)
@@ -189,7 +198,7 @@ class ClientApp:
         ttk.Entry(top, textvariable=self.fp_var).grid(row=2, column=2, columnspan=6, sticky='ew', padx=(4, 0), pady=(8, 0))
         ttk.Label(
             top,
-            text='Discovery fills IP/port only. Compare the fingerprint shown by the Mac before connecting.',
+            text='First connection: verify the Mac fingerprint once. Saved Macs reload fingerprint/password automatically.',
         ).grid(row=3, column=0, columnspan=8, sticky='w', pady=(4, 0))
         top.columnconfigure(1, weight=1)
         top.columnconfigure(5, weight=1)
@@ -202,6 +211,8 @@ class ClientApp:
             variable=self.linux_shortcuts_var,
             command=self._shortcut_mode_changed,
         ).pack(side='left')
+        ttk.Checkbutton(options, text='Remember this Mac (fingerprint + password in system keyring)',
+                        variable=self.remember_credentials_var).pack(side='left', padx=(12, 0))
         ttk.Button(options, text='Clipboard Linux → Mac', command=self.push_clipboard).pack(side='right', padx=(4, 0))
         ttk.Button(options, text='Clipboard Mac → Linux', command=self.pull_clipboard).pack(side='right')
 
@@ -328,8 +339,18 @@ class ClientApp:
             return
         self.ip_var.set(server.ip)
         self.port_var.set(str(server.port))
-        self.status_var.set(f'Selected {server.name} at {server.ip}:{server.port}. Verify TLS fingerprint on the Mac.')
-        self._log('INFO', f'Discovery selection: {server.name} at {server.ip}:{server.port}')
+        self.selected_server_id = server.server_id or f'{server.ip}:{server.port}'
+        self.selected_server_name = server.name
+        record = client_record(self.selected_server_id)
+        saved_fp = str(record.get('fingerprint', '')).strip()
+        if saved_fp:
+            self.fp_var.set(saved_fp)
+        saved_password = get_saved_password(self.selected_server_id)
+        if saved_password:
+            self.password_var.set(saved_password)
+        trust = 'Saved identity loaded.' if saved_fp else 'Verify the TLS fingerprint once.'
+        self.status_var.set(f'Selected {server.name} at {server.ip}:{server.port}. {trust}')
+        self._log('INFO', f'Discovery selection: {server.name} at {server.ip}:{server.port}; server_id={self.selected_server_id}')
 
     def discover_macs(self) -> None:
         self.status_var.set('Searching the local network for running Macs…')
@@ -466,6 +487,10 @@ class ClientApp:
             messagebox.showerror('Connection', str(exc))
             return
         self.disconnect_requested = False
+        self.remember_credentials_active = bool(self.remember_credentials_var.get())
+        if not self.selected_server_id:
+            self.selected_server_id = f'{ip}:{port}'
+            self.selected_server_name = ip
         self.stop_event.clear()
         self.status_var.set('Connecting…')
         self._log('INFO', f'Connect requested: {ip}:{port}; expected fingerprint {format_fp(expected_fp)}')
@@ -485,10 +510,23 @@ class ClientApp:
         disconnect_reason = ''
         try:
             sock = self._secure_connect('desktop')
-            sock.settimeout(0.02)
+            if self.remember_credentials_active:
+                try:
+                    ip, port, password, expected_fp = self._connection_params()
+                    save_client_record(self.selected_server_id, name=self.selected_server_name or ip,
+                                       ip=ip, port=port, fingerprint=format_fp(expected_fp))
+                    if password and not save_password_secret(self.selected_server_id, password):
+                        self._log('WARNING', 'Could not store password in the Linux desktop keyring; it will not be remembered.')
+                    else:
+                        self._log('INFO', 'Mac identity remembered; password stored in the Linux system keyring when available.')
+                except Exception as exc:
+                    self._log('WARNING', f'Could not remember credentials: {exc}')
+            sock.settimeout(0.05)
             reader = PacketReader()
             last_server_error = ''
             self.ui_queue.put(('connected',))
+            self.video_thread = threading.Thread(target=self._video_loop, daemon=True)
+            self.video_thread.start()
             while not self.stop_event.is_set():
                 sent = 0
                 while sent < 60:
@@ -505,10 +543,7 @@ class ClientApp:
                             raise ConnectionError(f'Server closed after reporting: {last_server_error}')
                         raise ConnectionError('Server closed the connection')
                     for kind, payload in reader.feed(data):
-                        if kind == FRAME and len(payload) > 8:
-                            width, height = struct.unpack('!II', payload[:8])
-                            self.ui_queue.put(('frame', width, height, payload[8:]))
-                        elif kind == CLIPBOARD_DATA:
+                        if kind == CLIPBOARD_DATA:
                             self.ui_queue.put(('clipboard', payload.decode('utf-8', 'replace')))
                         elif kind == ERROR:
                             server_error = payload.decode('utf-8', 'replace')
@@ -534,15 +569,74 @@ class ClientApp:
                 disconnect_reason = 'Desktop session ended'
             self.ui_queue.put(('disconnected', disconnect_reason))
 
+    def _queue_video_image(self, image: Image.Image) -> None:
+        try:
+            self.video_frames.put_nowait(image)
+        except queue.Full:
+            try:
+                self.video_frames.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self.video_frames.put_nowait(image)
+            except queue.Full:
+                pass
+
+    def _video_loop(self) -> None:
+        sock = None
+        decoder = None
+        frames = 0
+        try:
+            self._log('INFO', 'Opening dedicated H.264 video connection.')
+            sock = self._secure_connect('video')
+            sock.settimeout(5.0)
+            reader = PacketReader()
+            decoder = av.CodecContext.create('h264', 'r')
+            self._log('INFO', 'H.264 decoder initialized (PyAV/FFmpeg).')
+            while not self.stop_event.is_set():
+                data = sock.recv(262144)
+                if not data:
+                    raise ConnectionError('Video connection closed by server')
+                for kind, payload in reader.feed(data):
+                    if kind == VIDEO_H264:
+                        for packet in decoder.parse(payload):
+                            for frame in decoder.decode(packet):
+                                img = frame.to_image().convert('RGB')
+                                self.remote_image_size = (img.width, img.height)
+                                self._queue_video_image(img)
+                                frames += 1
+                                if frames == 1:
+                                    self._log('INFO', f'First H.264 frame decoded: {img.width}x{img.height}.')
+                    elif kind == ERROR:
+                        message = payload.decode('utf-8', 'replace')
+                        raise RuntimeError('Video server error: ' + message)
+        except Exception as exc:
+            if not self.stop_event.is_set():
+                reason = f'{type(exc).__name__}: {exc}'
+                self._log('ERROR', f'Video stream failed: {reason}')
+                self.ui_queue.put(('error', f'Video stream failed: {exc}'))
+                self.stop_event.set()
+        finally:
+            if decoder is not None:
+                try:
+                    for frame in decoder.decode(None):
+                        img = frame.to_image().convert('RGB')
+                        self._queue_video_image(img)
+                except Exception:
+                    pass
+            try:
+                if sock is not None:
+                    sock.close()
+            except Exception:
+                pass
+            self._log('INFO', 'H.264 video connection closed.')
+
     def _process_ui_queue(self) -> None:
-        latest_frame = None
         try:
             while True:
                 item = self.ui_queue.get_nowait()
                 if item[0] == 'log':
                     self._append_log(item[1])
-                elif item[0] == 'frame':
-                    latest_frame = item
                 elif item[0] == 'connected':
                     self.connected = True
                     self.status_var.set('Connected — click the desktop image to control the Mac')
@@ -622,17 +716,16 @@ class ClientApp:
         except queue.Empty:
             pass
 
-        if latest_frame:
-            _, w, h, jpeg = latest_frame
-            try:
-                img = Image.open(io.BytesIO(jpeg)).convert('RGB')
-                self.remote_image_size = (w, h)
-                self._last_image = img
-                self._redraw()
-            except Exception as exc:
-                self.status_var.set(f'Frame error: {exc}')
-                self._log('ERROR', f'Frame decode/render error: {type(exc).__name__}: {exc}')
-        self.root.after(20, self._process_ui_queue)
+        latest_image = None
+        try:
+            while True:
+                latest_image = self.video_frames.get_nowait()
+        except queue.Empty:
+            pass
+        if latest_image is not None:
+            self._last_image = latest_image
+            self._redraw()
+        self.root.after(16, self._process_ui_queue)
 
     def _redraw(self) -> None:
         img = getattr(self, '_last_image', None)

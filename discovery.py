@@ -32,6 +32,7 @@ class DiscoveredServer:
     ip: str
     port: int
     version: str = ''
+    server_id: str = ''
 
     @property
     def label(self) -> str:
@@ -42,10 +43,11 @@ class DiscoveredServer:
 class LanAdvertiser:
     """Advertise the server over LAN mDNS only while this object is running."""
 
-    def __init__(self, ip: str, port: int, version: str) -> None:
+    def __init__(self, ip: str, port: int, version: str, server_id: str = '') -> None:
         self.ip = ip
         self.port = int(port)
         self.version = version
+        self.server_id = server_id
         self._zc = None
         self._info = None
 
@@ -62,6 +64,7 @@ class LanAdvertiser:
             b'app': b'ZorinMacBridge',
             b'platform': b'macOS',
             b'version': self.version.encode('utf-8', 'replace'),
+            b'server_id': self.server_id.encode('ascii', 'ignore'),
         }
         info = ServiceInfo(
             SERVICE_TYPE,
@@ -128,6 +131,7 @@ def discover_servers(timeout: float = 2.5) -> list[DiscoveredServer]:
                     ip=address,
                     port=int(info.port),
                     version=properties.get('version', ''),
+                    server_id=properties.get('server_id', ''),
                 )
                 found[(item.ip, item.port)] = item
         return sorted(found.values(), key=lambda item: (item.name.lower(), item.ip, item.port))

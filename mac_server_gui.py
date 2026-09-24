@@ -11,12 +11,14 @@ from tkinter import filedialog, messagebox, ttk
 
 from mac_server import (
     DEFAULT_SHARE, accessibility_permission_status, ensure_certificate, is_lan_ip,
-    probe_screen_capture, screen_capture_permission_status, serve,
+    screen_capture_permission_status, serve,
 )
 from discovery import LanAdvertiser
 from resources import resource_path, set_tk_icon
 from tray_icon import TrayController
 from updates import check_for_updates, current_version, install_update
+from settings import (PasswordVerifier, load_server_password_verifier, load_server_settings,
+                      persistent_server_id, save_server_password, update_server_settings)
 
 
 def private_ipv4_addresses() -> list[str]:
@@ -40,12 +42,19 @@ class ServerGUI:
         set_tk_icon(root, 'assets/server.png')
 
         ips = private_ipv4_addresses()
-        self.bind_var = tk.StringVar(value=ips[0] if ips else '192.168.1.50')
-        self.port_var = tk.StringVar(value='45950')
-        self.share_var = tk.StringVar(value=str(DEFAULT_SHARE))
+        saved = load_server_settings()
+        default_ip = saved.get('bind') if saved.get('bind') in ips else (ips[0] if ips else '192.168.1.50')
+        self.bind_var = tk.StringVar(value=default_ip)
+        self.port_var = tk.StringVar(value=str(saved.get('port', 45950)))
+        self.share_var = tk.StringVar(value=str(saved.get('share', DEFAULT_SHARE)))
         self.password_var = tk.StringVar()
         self.show_password_var = tk.BooleanVar(value=False)
-        self.advertise_var = tk.BooleanVar(value=True)
+        self.remember_password_var = tk.BooleanVar(value=True)
+        self.advertise_var = tk.BooleanVar(value=bool(saved.get('advertise', True)))
+        self.launch_at_login_var = tk.BooleanVar(value=bool(saved.get('launch_at_login', False)))
+        self.auto_start_var = tk.BooleanVar(value=bool(saved.get('auto_start_server', False)))
+        self.server_id = persistent_server_id()
+        self.saved_password = load_server_password_verifier()
         self.status_var = tk.StringVar(value='Stopped')
         self.fp_var = tk.StringVar(value='')
         self.stop_event: threading.Event | None = None
@@ -72,6 +81,12 @@ class ServerGUI:
             self.fp_var.set(ensure_certificate())
         except Exception as exc:
             self._log(f'Certificate error: {exc}')
+        # Recreate the per-user login item if the saved preference says it
+        # should exist (for example after restoring config onto a new install).
+        if self.launch_at_login_var.get() and not self.launch_agent_path.exists():
+            self._startup_settings_changed()
+        if self.auto_start_var.get():
+            self.root.after(1200, self.start)
 
     def _build_menu(self) -> None:
         menu = tk.Menu(self.root)
@@ -187,16 +202,18 @@ class ServerGUI:
         messagebox.showinfo(
             'About ZorinMacBridge',
             f'ZorinMacBridge Server {current_version()}\n\n'
-            'The server runs only after you manually start it.\n'
-            'There is no daemon, login item, or background update checker.',
+            'LAN-only macOS host with H.264 screen streaming.\n'
+            'Launch-at-login and auto-start are optional and disabled by default.\n'
+            'No system daemon or background update checker is installed.',
         )
 
     def _build(self, ips: list[str]) -> None:
+        self.root.geometry('760x700')
         outer = ttk.Frame(self.root, padding=16)
         outer.pack(fill='both', expand=True)
 
         ttk.Label(outer, text='ZorinMacBridge Server', font=('', 20, 'bold')).grid(row=0, column=0, columnspan=3, sticky='w')
-        ttk.Label(outer, text='LAN-only macOS server for the Zorin/Linux client. No cloud or relay is used at runtime.').grid(row=1, column=0, columnspan=3, sticky='w', pady=(4, 16))
+        ttk.Label(outer, text='LAN-only macOS server with ScreenCaptureKit + H.264 streaming.').grid(row=1, column=0, columnspan=3, sticky='w', pady=(4, 16))
 
         ttk.Label(outer, text='Mac LAN IP').grid(row=2, column=0, sticky='w', pady=4)
         self.ip_box = ttk.Combobox(outer, textvariable=self.bind_var, values=ips, width=28)
@@ -213,40 +230,90 @@ class ServerGUI:
         self.password_entry = ttk.Entry(outer, textvariable=self.password_var, show='•')
         self.password_entry.grid(row=5, column=1, sticky='ew', pady=4)
         ttk.Checkbutton(outer, text='Show', variable=self.show_password_var, command=self.toggle_password).grid(row=5, column=2, padx=(8, 0), pady=4)
+        note = 'Saved verifier available — leave password blank to reuse it.' if self.saved_password else 'Enter once; only a salted verifier is stored on this Mac.'
+        ttk.Label(outer, text=note).grid(row=6, column=1, columnspan=2, sticky='w', pady=(0, 2))
+        ttk.Checkbutton(outer, text='Remember password verifier on this Mac', variable=self.remember_password_var).grid(row=7, column=1, columnspan=2, sticky='w', pady=(0, 6))
 
-        ttk.Label(outer, text='TLS fingerprint').grid(row=6, column=0, sticky='nw', pady=(12, 4))
+        ttk.Label(outer, text='TLS fingerprint').grid(row=8, column=0, sticky='nw', pady=(8, 4))
         fp = ttk.Entry(outer, textvariable=self.fp_var, state='readonly')
-        fp.grid(row=6, column=1, sticky='ew', pady=(12, 4))
-        ttk.Button(outer, text='Copy', command=self.copy_fp).grid(row=6, column=2, padx=(8, 0), pady=(12, 4))
+        fp.grid(row=8, column=1, sticky='ew', pady=(8, 4))
+        ttk.Button(outer, text='Copy', command=self.copy_fp).grid(row=8, column=2, padx=(8, 0), pady=(8, 4))
 
         ttk.Checkbutton(
             outer,
             text='Advertise this Mac to ZorinMacBridge clients on the local LAN while the server is running',
             variable=self.advertise_var,
-        ).grid(row=7, column=0, columnspan=3, sticky='w', pady=(10, 2))
+        ).grid(row=9, column=0, columnspan=3, sticky='w', pady=(8, 2))
+        ttk.Checkbutton(
+            outer, text='Launch ZorinMacBridge Server when this macOS user logs in',
+            variable=self.launch_at_login_var, command=self._startup_settings_changed,
+        ).grid(row=10, column=0, columnspan=3, sticky='w', pady=(2, 2))
+        ttk.Checkbutton(
+            outer, text='Automatically start the server when the app launches',
+            variable=self.auto_start_var, command=self._startup_settings_changed,
+        ).grid(row=11, column=0, columnspan=3, sticky='w', pady=(2, 6))
+
+        perms = ttk.Frame(outer)
+        perms.grid(row=12, column=0, columnspan=3, sticky='w', pady=(2, 6))
+        ttk.Button(perms, text='Screen Recording settings', command=self.open_screen_settings).pack(side='left')
+        ttk.Button(perms, text='Accessibility settings', command=self.open_accessibility_settings).pack(side='left', padx=(8, 0))
 
         buttons = ttk.Frame(outer)
-        buttons.grid(row=8, column=0, columnspan=3, sticky='ew', pady=(8, 8))
+        buttons.grid(row=13, column=0, columnspan=3, sticky='ew', pady=(8, 8))
         self.start_btn = ttk.Button(buttons, text='Start server', command=self.start)
         self.start_btn.pack(side='left')
         self.stop_btn = ttk.Button(buttons, text='Stop server', command=self.stop, state='disabled')
         self.stop_btn.pack(side='left', padx=(8, 0))
         ttk.Label(buttons, textvariable=self.status_var).pack(side='right')
 
-        note = ('macOS permissions required: Privacy & Security → Screen Recording and Accessibility.\n'
-                'The app is manual: closing it stops the server. No service or login item is installed.\n'
+        note = ('Screen Recording is required for video. Accessibility is required for mouse/keyboard control.\n'
+                'Launch-at-login is a per-user login item, not a system daemon. It requires a logged-in macOS session.\n'
                 'Use only on a trusted LAN. Do not expose port 45950 to the public Internet.')
-        ttk.Label(outer, text=note, wraplength=660).grid(row=9, column=0, columnspan=3, sticky='w', pady=(4, 8))
+        ttk.Label(outer, text=note, wraplength=700).grid(row=14, column=0, columnspan=3, sticky='w', pady=(4, 8))
 
         self.log = tk.Text(outer, height=12, wrap='word', state='disabled')
-        self.log.grid(row=10, column=0, columnspan=3, sticky='nsew')
+        self.log.grid(row=15, column=0, columnspan=3, sticky='nsew')
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(10, weight=1)
+        outer.rowconfigure(15, weight=1)
 
         self.root.protocol('WM_DELETE_WINDOW', self.on_close)
 
     def toggle_password(self) -> None:
         self.password_entry.configure(show='' if self.show_password_var.get() else '•')
+
+    @property
+    def launch_agent_path(self) -> Path:
+        return Path.home() / 'Library' / 'LaunchAgents' / 'com.ilovemyprojects.zorinmacbridge.server.plist'
+
+    def _startup_settings_changed(self) -> None:
+        update_server_settings(launch_at_login=bool(self.launch_at_login_var.get()),
+                               auto_start_server=bool(self.auto_start_var.get()))
+        path = self.launch_agent_path
+        if self.launch_at_login_var.get():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            plist = """<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\"><dict>
+<key>Label</key><string>com.ilovemyprojects.zorinmacbridge.server</string>
+<key>ProgramArguments</key><array><string>/usr/bin/open</string><string>-a</string><string>ZorinMacBridge Server</string></array>
+<key>RunAtLoad</key><true/>
+</dict></plist>
+"""
+            path.write_text(plist, encoding='utf-8')
+            os.chmod(path, 0o600)
+            self._log(f'Launch-at-login enabled: {path}')
+        else:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            self._log('Launch-at-login disabled.')
+
+    def open_screen_settings(self) -> None:
+        subprocess.Popen(['/usr/bin/open', 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'])
+
+    def open_accessibility_settings(self) -> None:
+        subprocess.Popen(['/usr/bin/open', 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'])
 
     def choose_share(self) -> None:
         selected = filedialog.askdirectory(initialdir=self.share_var.get() or str(Path.home()))
@@ -273,8 +340,19 @@ class ServerGUI:
         if not is_lan_ip(bind):
             messagebox.showerror('Invalid IP', 'Enter a literal private LAN IP address of this Mac.')
             return
-        if len(password) < 12:
-            messagebox.showerror('Weak password', 'Use a session password with at least 12 characters.')
+        if password:
+            if len(password) < 12:
+                messagebox.showerror('Weak password', 'Use a session password with at least 12 characters.')
+                return
+            auth = save_server_password(password) if self.remember_password_var.get() else PasswordVerifier.from_password(password)
+            if self.remember_password_var.get():
+                self.saved_password = auth
+                self.password_var.set('')
+                self._log('Session password verifier saved; plaintext password is not stored on the Mac.')
+        elif self.saved_password is not None:
+            auth = self.saved_password
+        else:
+            messagebox.showerror('Password required', 'Enter a session password once. It can then be remembered as a salted verifier.')
             return
         try:
             port = int(self.port_var.get())
@@ -282,34 +360,16 @@ class ServerGUI:
             messagebox.showerror('Invalid port', 'Port must be a number.')
             return
 
-        # Do not call CGRequestScreenCaptureAccess() here. Repeated permission
-        # prompts are hostile UX, and ad-hoc packaged builds can have a TCC
-        # identity that does not match an older build even when System Settings
-        # still shows a similarly named entry. A real one-frame capture is the
-        # authoritative test for this exact running build.
+        # Never request Screen Recording automatically from Start Server.
+        # ScreenCaptureKit itself is used by the dedicated video process when a
+        # client opens the video channel. This check is informational only.
         screen_permission = screen_capture_permission_status()
         if screen_permission is True:
             self._log('Screen Recording preflight: granted')
         elif screen_permission is False:
-            self._log('Screen Recording preflight: denied for this running build; testing real capture instead')
+            self._log('WARNING: Screen Recording preflight is not granted for this running build. Video may require one-time approval.')
         else:
-            self._log('Screen Recording preflight API unavailable; testing real capture instead')
-
-        capture_ok, capture_detail = probe_screen_capture()
-        if not capture_ok:
-            self._log(f'ERROR: Screen capture probe failed: {capture_detail}')
-            messagebox.showerror(
-                'Screen capture unavailable',
-                'This running build cannot capture the Mac display. ZorinMacBridge will NOT request '
-                'permission again automatically.\n\n'
-                'Open System Settings → Privacy & Security → Screen Recording '
-                '(or Screen & System Audio Recording) and verify ZorinMacBridge Server. '
-                'If it is already enabled, the entry may belong to an older differently signed build; '
-                'remove/re-add permission for the currently installed app, then quit and reopen it.\n\n'
-                f'Diagnostic: {capture_detail}',
-            )
-            return
-        self._log(f'Screen capture probe: OK ({capture_detail})')
+            self._log('Screen Recording preflight API unavailable; native video channel will report its own status.')
 
         accessibility = accessibility_permission_status()
         if accessibility is False:
@@ -319,6 +379,9 @@ class ServerGUI:
 
         advertise = bool(self.advertise_var.get())
         share = Path(self.share_var.get())
+        update_server_settings(bind=bind, port=port, share=str(share), advertise=advertise,
+                               launch_at_login=bool(self.launch_at_login_var.get()),
+                               auto_start_server=bool(self.auto_start_var.get()))
         self.stop_event = threading.Event()
         self.start_btn.configure(state='disabled')
         self.stop_btn.configure(state='normal')
@@ -329,7 +392,7 @@ class ServerGUI:
             self.root.after(0, lambda: self.status_var.set('Running'))
             if advertise and self.stop_event is not None and not self.stop_event.is_set():
                 try:
-                    self.advertiser = LanAdvertiser(bind, port, current_version())
+                    self.advertiser = LanAdvertiser(bind, port, current_version(), self.server_id)
                     self.advertiser.start()
                     self._log(f'LAN discovery: advertised by mDNS/Bonjour on {bind}:{port}')
                 except Exception as exc:
@@ -337,7 +400,7 @@ class ServerGUI:
 
         def worker() -> None:
             try:
-                serve(bind, port, share, 10.0, 1920, 72, password,
+                serve(bind, port, share, 30.0, 2560, 8_000_000, auth,
                       stop_event=self.stop_event, log=self._log, ready_callback=ready)
             except Exception as exc:
                 self._log(f'ERROR: {exc}')

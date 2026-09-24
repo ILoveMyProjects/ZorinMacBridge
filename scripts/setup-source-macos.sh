@@ -6,4 +6,5 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+./scripts/build-macos-streamer.sh
 printf '\nSource environment ready. Start the macOS server GUI with:\n  ./.venv/bin/python mac_server_gui.py\n'

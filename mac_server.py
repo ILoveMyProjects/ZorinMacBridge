@@ -6,7 +6,6 @@ import ctypes
 import getpass
 import hashlib
 import hmac
-import io
 import ipaddress
 import os
 import platform
@@ -15,6 +14,7 @@ import socket
 import ssl
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -22,11 +22,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
-from PIL import Image
-
 from protocol import (
     AUTH, AUTH_FAIL, AUTH_OK, CLIPBOARD_DATA, CLIPBOARD_GET, CLIPBOARD_SET,
-    DOWNLOAD_BEGIN, DOWNLOAD_CHUNK, DOWNLOAD_END, DOWNLOAD_REQ, ERROR, FRAME,
+    DOWNLOAD_BEGIN, DOWNLOAD_CHUNK, DOWNLOAD_END, DOWNLOAD_REQ, ERROR, VIDEO_H264,
     KEY, LIST_REQ, LIST_RESP, MKDIR_OK, MKDIR_REQ, MOUSE_BUTTON, MOUSE_MOVE,
     PacketReader, SCROLL, TEXT, UPLOAD_BEGIN, UPLOAD_CHUNK, UPLOAD_END,
     pack_json, pack_packet, recv_one_blocking, unpack_json,
@@ -348,112 +346,48 @@ class MacClipboard:
         return data.decode('utf-8', 'replace')
 
 
-class ScreenGrabber:
-    def __init__(self, max_width: int, quality: int) -> None:
-        self.max_width = max_width
-        self.quality = quality
-        preferred = Path('/usr/sbin/screencapture')
-        exe = str(preferred) if preferred.is_file() else shutil.which('screencapture')
-        if not exe:
-            raise RuntimeError('macOS screencapture utility not found (expected /usr/sbin/screencapture)')
-        self.exe = exe
-        self.path = Path(tempfile.gettempdir()) / f'zorin-mac-bridge-{os.getpid()}-{uuid.uuid4().hex}.jpg'
-
-    def close(self) -> None:
-        try:
-            self.path.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-    def capture(self) -> tuple[int, int, bytes]:
-        proc = subprocess.run(
-            [self.exe, '-x', '-m', '-t', 'jpg', str(self.path)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            timeout=5,
+def streamer_executable() -> Path:
+    """Return the bundled native ScreenCaptureKit/VideoToolbox helper."""
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        candidate = Path(getattr(sys, '_MEIPASS')) / 'zmb-macos-streamer'
+    else:
+        candidate = Path(__file__).resolve().parent / 'build' / 'zmb-macos-streamer'
+    if not candidate.is_file():
+        raise RuntimeError(
+            'Native H.264 streaming helper is missing. Release builds must bundle '
+            'zmb-macos-streamer; source builds can compile it with scripts/build-macos-streamer.sh.'
         )
-        if proc.returncode != 0:
-            msg = proc.stderr.decode('utf-8', 'replace').strip()
-            detail = msg or f'exit code {proc.returncode}'
-            raise RuntimeError(
-                'screencapture failed: ' + detail + '. '
-                'Check System Settings → Privacy & Security → Screen Recording (or Screen & System Audio Recording) '
-                'and allow ZorinMacBridge Server, then quit and reopen the app.'
-            )
-        if not self.path.is_file() or self.path.stat().st_size == 0:
-            raise RuntimeError(
-                'screencapture produced no image. Check macOS Screen Recording permission for '
-                'ZorinMacBridge Server, then quit and reopen the app.'
-            )
-        with Image.open(self.path) as im:
-            im = im.convert('RGB')
-            if self.max_width and im.width > self.max_width:
-                h = max(1, round(im.height * self.max_width / im.width))
-                im = im.resize((self.max_width, h), Image.Resampling.LANCZOS)
-            buf = io.BytesIO()
-            im.save(buf, format='JPEG', quality=self.quality, optimize=False)
-            return im.width, im.height, buf.getvalue()
+    return candidate
 
 
+def _read_exact_file(stream, size: int) -> bytes:
+    out = bytearray()
+    while len(out) < size:
+        chunk = stream.read(size - len(out))
+        if not chunk:
+            raise EOFError('native streamer closed its output')
+        out.extend(chunk)
+    return bytes(out)
 
 
-def probe_screen_capture() -> tuple[bool, str]:
-    """Try one real screen capture without requesting macOS permission.
-
-    This is intentionally authoritative for Start Server: the preflight API can
-    disagree with the effective TCC identity of packaged/ad-hoc builds, while
-    the real capture tells us whether this exact process can stream the screen.
-    """
-    grabber = None
-    try:
-        grabber = ScreenGrabber(max_width=320, quality=45)
-        width, height, jpeg = grabber.capture()
-        if width < 1 or height < 1 or not jpeg:
-            return False, 'screen capture returned an empty frame'
-        return True, f'{width}x{height}, {len(jpeg)} bytes'
-    except Exception as exc:
-        return False, f'{type(exc).__name__}: {exc}'
-    finally:
-        if grabber is not None:
-            grabber.close()
-
-
-def send_frame(sock: ssl.SSLSocket, width: int, height: int, jpeg: bytes) -> None:
-    sock.sendall(pack_packet(FRAME, struct.pack('!II', width, height) + jpeg))
-
-
-def recv_available(sock: ssl.SSLSocket, reader: PacketReader) -> list[tuple[int, bytes]]:
-    packets: list[tuple[int, bytes]] = []
-    while True:
-        try:
-            data = sock.recv(65536)
-            if not data:
-                raise ConnectionError('client disconnected')
-            packets.extend(reader.feed(data))
-            if len(data) < 65536:
-                break
-        except (socket.timeout, ssl.SSLWantReadError, BlockingIOError):
-            break
-    return packets
-
-
-def desktop_session(sock: ssl.SSLSocket, fps: float, max_width: int, quality: int, *, log=print) -> None:
-    log('[desktop] connected')
-    log('[desktop] initializing CoreGraphics input')
+def control_session(sock: ssl.SSLSocket, *, log=print) -> None:
+    """Low-latency input/clipboard channel. Video is deliberately separate."""
+    log('[control] connected')
+    log('[control] initializing CoreGraphics input')
     inp = MacInput()
-    log('[desktop] CoreGraphics input initialized')
+    log('[control] CoreGraphics input initialized')
     clipboard = MacClipboard()
-    log('[desktop] initializing screen capture backend')
-    grabber = ScreenGrabber(max_width=max_width, quality=quality)
-    log(f'[desktop] screen capture backend: {grabber.exe}')
     reader = PacketReader()
-    sock.settimeout(0.02)
-    interval = 1.0 / max(1.0, min(float(fps), 20.0))
-    next_frame = 0.0
-    first_frame = True
+    sock.settimeout(0.25)
     try:
         while True:
-            for kind, payload in recv_available(sock, reader):
+            try:
+                data = sock.recv(65536)
+                if not data:
+                    raise ConnectionError('client disconnected')
+            except socket.timeout:
+                continue
+            for kind, payload in reader.feed(data):
                 if kind == MOUSE_MOVE and len(payload) == 8:
                     nx, ny = struct.unpack('!ff', payload)
                     inp.move(nx, ny)
@@ -473,23 +407,71 @@ def desktop_session(sock: ssl.SSLSocket, fps: float, max_width: int, quality: in
                 elif kind == CLIPBOARD_GET:
                     text = clipboard.get_text()
                     sock.sendall(pack_packet(CLIPBOARD_DATA, text.encode('utf-8')))
-
-            now = time.monotonic()
-            if now >= next_frame:
-                if first_frame:
-                    log('[desktop] capturing first frame')
-                width, height, jpeg = grabber.capture()
-                send_frame(sock, width, height, jpeg)
-                if first_frame:
-                    log(f'[desktop] first frame sent: {width}x{height}, {len(jpeg)} bytes')
-                    first_frame = False
-                next_frame = now + interval
-            else:
-                time.sleep(min(0.003, next_frame - now))
     finally:
         inp.release_all()
-        grabber.close()
-        log('[desktop] disconnected')
+        log('[control] disconnected')
+
+
+def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int, *, log=print) -> None:
+    """Stream hardware-encoded H.264 on its own TLS connection.
+
+    Keeping video on a dedicated socket prevents slow rendering from blocking
+    mouse/keyboard input, clipboard traffic, or file transfers.
+    """
+    helper = streamer_executable()
+    cmd = [
+        str(helper),
+        '--fps', str(max(1, min(int(round(fps)), 60))),
+        '--max-width', str(max(640, int(max_width))),
+        '--bitrate', str(max(1_000_000, int(bitrate))),
+    ]
+    log('[video] starting ScreenCaptureKit + VideoToolbox H.264 stream')
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        bufsize=0,
+    )
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+
+    def stderr_worker() -> None:
+        try:
+            for raw in iter(proc.stderr.readline, b''):
+                line = raw.decode('utf-8', 'replace').rstrip()
+                if line:
+                    log('[video/native] ' + line)
+        except Exception:
+            pass
+
+    threading.Thread(target=stderr_worker, daemon=True).start()
+    sock.settimeout(10.0)
+    frames = 0
+    try:
+        while True:
+            header = _read_exact_file(proc.stdout, 4)
+            size = struct.unpack('!I', header)[0]
+            if not (1 <= size <= 16 * 1024 * 1024):
+                raise RuntimeError(f'invalid native H.264 access-unit size: {size}')
+            payload = _read_exact_file(proc.stdout, size)
+            sock.sendall(pack_packet(VIDEO_H264, payload))
+            frames += 1
+            if frames == 1:
+                log(f'[video] first H.264 access unit sent ({len(payload)} bytes)')
+    except EOFError:
+        rc = proc.poll()
+        raise RuntimeError(f'native H.264 streamer exited unexpectedly (code={rc})')
+    finally:
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        log('[video] disconnected')
 
 
 def send_error(sock: ssl.SSLSocket, message: str) -> None:
@@ -626,6 +608,16 @@ def file_session(sock: ssl.SSLSocket, share: Path) -> None:
             current_upload_tmp.unlink(missing_ok=True)
 
 
+
+
+def verify_session_password(expected, supplied: str) -> bool:
+    if hasattr(expected, 'verify'):
+        try:
+            return bool(expected.verify(supplied))
+        except Exception:
+            return False
+    return hmac.compare_digest(str(supplied), str(expected))
+
 def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: str, share: Path, args, log=print) -> None:
     peer_ip = addr[0]
     if not is_lan_ip(peer_ip):
@@ -646,19 +638,21 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
         auth = unpack_json(payload)
         supplied = str(auth.get('password', ''))
         role = str(auth.get('role', ''))
-        if not hmac.compare_digest(supplied, password):
+        if not verify_session_password(password, supplied):
             time.sleep(1.0)
             sock.sendall(pack_packet(AUTH_FAIL, b'bad password'))
             log(f'[auth] failed from {peer_ip}')
             return
-        if role not in {'desktop', 'file'}:
+        if role not in {'desktop', 'video', 'file'}:
             sock.sendall(pack_packet(AUTH_FAIL, b'bad role'))
             log(f'[client {peer_ip}] rejected: bad role {role!r}')
             return
         sock.sendall(pack_json(AUTH_OK, {'role': role, 'server': 'ZorinMac-Bridge'}))
         log(f'[client {peer_ip}] authenticated role={role}')
         if role == 'desktop':
-            desktop_session(sock, args.fps, args.max_width, args.quality, log=log)
+            control_session(sock, log=log)
+        elif role == 'video':
+            video_session(sock, args.fps, args.max_width, args.bitrate, log=log)
         else:
             file_session(sock, share)
     except (ssl.SSLError, ConnectionError, OSError) as exc:
@@ -679,14 +673,14 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
             pass
 
 
-def serve(bind: str, port: int, share: Path, fps: float, max_width: int, quality: int, password: str, *, stop_event=None, log=print, ready_callback=None) -> None:
+def serve(bind: str, port: int, share: Path, fps: float, max_width: int, bitrate: int, password: str, *, stop_event=None, log=print, ready_callback=None) -> None:
     if platform.system() != 'Darwin':
         raise RuntimeError('This server is intended for macOS only.')
     if not is_lan_ip(bind):
         raise ValueError('Bind address must be a literal private/loopback/link-local IP address.')
     if not (1 <= int(port) <= 65535):
         raise ValueError('Invalid port.')
-    quality = min(95, max(25, int(quality)))
+    bitrate = max(1_000_000, min(50_000_000, int(bitrate)))
     share = Path(share).expanduser().resolve()
     share.mkdir(mode=0o700, parents=True, exist_ok=True)
 
@@ -696,7 +690,7 @@ def serve(bind: str, port: int, share: Path, fps: float, max_width: int, quality
     context.load_cert_chain(str(CERT_PATH), str(KEY_PATH))
 
     from types import SimpleNamespace
-    args = SimpleNamespace(fps=float(fps), max_width=int(max_width), quality=quality)
+    args = SimpleNamespace(fps=float(fps), max_width=int(max_width), bitrate=bitrate)
 
     listener = socket.socket(socket.AF_INET6 if ':' in bind else socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -738,7 +732,7 @@ def main() -> None:
     ap.add_argument('--share', type=Path, default=DEFAULT_SHARE)
     ap.add_argument('--fps', type=float, default=10.0)
     ap.add_argument('--max-width', type=int, default=1920)
-    ap.add_argument('--quality', type=int, default=72)
+    ap.add_argument('--bitrate', type=int, default=8_000_000, help='H.264 bitrate in bits/s')
     args = ap.parse_args()
 
     password = os.environ.get('ZORIN_MAC_BRIDGE_PASSWORD')
@@ -752,7 +746,7 @@ def main() -> None:
     print('Ctrl+C stops the server. No autostart is installed.\n')
 
     try:
-        serve(args.bind, args.port, args.share, args.fps, args.max_width, args.quality, password)
+        serve(args.bind, args.port, args.share, args.fps, args.max_width, args.bitrate, password)
     except KeyboardInterrupt:
         print('\nStopping.')
 
