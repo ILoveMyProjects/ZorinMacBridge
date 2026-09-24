@@ -1,13 +1,43 @@
-# ZorinMac-Bridge
+# ZorinMacBridge
 
-A small, LAN-only remote desktop bridge for a **Linux development workstation → macOS machine** workflow.
+A LAN-only remote desktop bridge for a **Zorin/Linux development workstation → macOS machine** workflow.
 
-The project is designed for developers who want to keep Linux (for example Zorin OS) as their primary desktop while using a Mac only when macOS/Xcode is required for iOS development.
+Keep Linux as your main development desktop and use the Mac only when Xcode, the iOS Simulator, signing, or other macOS-only tooling is required.
 
 **No cloud account, relay server, discovery service, telemetry, or Internet connection is required at runtime.**
 
 > Status: early MVP / experimental. The code is intentionally small and auditable, but it is not an independently security-audited remote desktop product.
 
+## Download and run — no Git required
+
+Normal users do **not** need to clone this repository or install Python.
+
+### Zorin OS / Ubuntu — client
+
+**[Download the latest `.deb` installer](https://github.com/ILoveMyProjects/ZorinMacBridge/releases/latest/download/ZorinMacBridge-Client_linux-amd64.deb)**
+
+Then double-click the downloaded `.deb` file and install it with the system package installer, or run:
+
+```bash
+sudo apt install ./ZorinMacBridge-Client_linux-amd64.deb
+```
+
+After installation, launch **ZorinMacBridge Client** from the application menu.
+
+### macOS — server
+
+Choose the build matching the Mac:
+
+- **[Apple Silicon (M1/M2/M3/M4/…)](https://github.com/ILoveMyProjects/ZorinMacBridge/releases/latest/download/ZorinMacBridge-Server_macOS-arm64.dmg)**
+- **[Intel Mac](https://github.com/ILoveMyProjects/ZorinMacBridge/releases/latest/download/ZorinMacBridge-Server_macOS-x86_64.dmg)**
+
+Open the `.dmg`, launch **ZorinMacBridge Server**, choose the Mac's LAN IP and shared folder, enter a session password, then click **Start server**.
+
+The macOS build is currently ad-hoc signed rather than Apple-notarized. On first launch macOS may require **Control-click → Open** and confirmation in Privacy & Security. The server also needs **Screen Recording** and **Accessibility** permissions.
+
+> The download links above become active after the first tagged GitHub Release is built.
+
+---
 ## What it does
 
 - Streams the main macOS display to a Linux GUI client.
@@ -86,7 +116,9 @@ File transfer is explicit rather than automatic two-way synchronization. That is
 
 ---
 
-# Quick start
+# Build / run from source (developers)
+
+The instructions below are for contributors and developers. Normal users should use the installers in **Download and run** above.
 
 ## 1. macOS server
 
@@ -99,7 +131,7 @@ File transfer is explicit rather than automatic two-way synchronization. That is
 Clone the repository:
 
 ```bash
-git clone https://github.com/ILoveMyProjects/zorin-mac-bridge.git
+git clone https://github.com/ILoveMyProjects/ZorinMacBridge.git
 cd zorin-mac-bridge
 ```
 
@@ -153,7 +185,7 @@ sudo apt install -y python3 python3-venv python3-tk git
 Clone and install:
 
 ```bash
-git clone https://github.com/ILoveMyProjects/zorin-mac-bridge.git
+git clone https://github.com/ILoveMyProjects/ZorinMacBridge.git
 cd zorin-mac-bridge
 chmod +x install_linux.sh run_client.sh
 ./install_linux.sh

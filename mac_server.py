@@ -589,6 +589,55 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
             pass
 
 
+def serve(bind: str, port: int, share: Path, fps: float, max_width: int, quality: int, password: str, *, stop_event=None, log=print, ready_callback=None) -> None:
+    if platform.system() != 'Darwin':
+        raise RuntimeError('This server is intended for macOS only.')
+    if not is_lan_ip(bind):
+        raise ValueError('Bind address must be a literal private/loopback/link-local IP address.')
+    if not (1 <= int(port) <= 65535):
+        raise ValueError('Invalid port.')
+    quality = min(95, max(25, int(quality)))
+    share = Path(share).expanduser().resolve()
+    share.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    fingerprint = ensure_certificate()
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(str(CERT_PATH), str(KEY_PATH))
+
+    from types import SimpleNamespace
+    args = SimpleNamespace(fps=float(fps), max_width=int(max_width), quality=quality)
+
+    listener = socket.socket(socket.AF_INET6 if ':' in bind else socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind((bind, int(port)))
+    listener.listen(8)
+    listener.settimeout(0.5)
+
+    log(f'Listening on {bind}:{port}')
+    log(f'Share directory: {share}')
+    log(f'TLS SHA-256: {fingerprint}')
+    log('Runtime: no DNS, cloud, relay, telemetry, or outbound connections')
+    log('Clients: RFC1918/ULA/link-local/loopback only')
+    if ready_callback is not None:
+        ready_callback(fingerprint)
+
+    try:
+        while stop_event is None or not stop_event.is_set():
+            try:
+                raw, addr = listener.accept()
+            except socket.timeout:
+                continue
+            threading.Thread(
+                target=handle_client,
+                args=(raw, addr, context, password, share, args),
+                daemon=True,
+            ).start()
+    finally:
+        listener.close()
+        log('Server stopped.')
+
+
 def main() -> None:
     if platform.system() != 'Darwin':
         raise SystemExit('This server is intended for macOS only.')
@@ -602,52 +651,20 @@ def main() -> None:
     ap.add_argument('--quality', type=int, default=72)
     args = ap.parse_args()
 
-    if not is_lan_ip(args.bind):
-        raise SystemExit('ERROR: --bind must be a literal private/loopback/link-local IP address. Hostnames and public IPs are blocked.')
-    if not (1 <= args.port <= 65535):
-        raise SystemExit('invalid port')
-    args.quality = min(95, max(25, args.quality))
-
     password = os.environ.get('ZORIN_MAC_BRIDGE_PASSWORD')
     if password is None:
         password = getpass.getpass('Session password (not stored): ')
     if len(password) < 12:
         print('WARNING: a session password of at least 12 characters is recommended.')
 
-    args.share = args.share.expanduser().resolve()
-    args.share.mkdir(mode=0o700, parents=True, exist_ok=True)
-
-    fingerprint = ensure_certificate()
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
-    context.load_cert_chain(str(CERT_PATH), str(KEY_PATH))
-
-    listener = socket.socket(socket.AF_INET6 if ':' in args.bind else socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind((args.bind, args.port))
-    listener.listen(8)
-
-    print('\nZorinMac-Bridge server')
-    print(f'  listening:   {args.bind}:{args.port}')
-    print(f'  share dir:   {args.share}')
-    print(f'  TLS SHA-256: {fingerprint}')
-    print('  runtime:     no DNS, cloud, relay, telemetry, or outbound connections')
-    print('  clients:     tylko RFC1918/ULA/link-local/loopback')
-    print('\nmacOS must grant Terminal/Python Screen Recording and Accessibility permissions.')
-    print('Ctrl+C in this terminal stops the server. No autostart is installed.\n')
+    print('\nZorinMacBridge server')
+    print('macOS must grant this app/Terminal Screen Recording and Accessibility permissions.')
+    print('Ctrl+C stops the server. No autostart is installed.\n')
 
     try:
-        while True:
-            raw, addr = listener.accept()
-            threading.Thread(
-                target=handle_client,
-                args=(raw, addr, context, password, args.share, args),
-                daemon=True,
-            ).start()
+        serve(args.bind, args.port, args.share, args.fps, args.max_width, args.quality, password)
     except KeyboardInterrupt:
         print('\nStopping.')
-    finally:
-        listener.close()
 
 
 if __name__ == '__main__':

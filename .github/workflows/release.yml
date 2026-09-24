@@ -1,0 +1,130 @@
+name: Build release installers
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux-amd64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller Pillow==12.3.0
+      - name: Build Linux client
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed \
+            --name ZorinMacBridge-Client linux_client.py
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$VERSION" = "$GITHUB_REF_NAME" ]; then VERSION="$(cat VERSION)"; fi
+          PKG="build/deb"
+          mkdir -p "$PKG/DEBIAN" "$PKG/usr/bin" "$PKG/usr/share/applications" "$PKG/usr/share/icons/hicolor/scalable/apps"
+          install -m 0755 dist/ZorinMacBridge-Client "$PKG/usr/bin/zorinmacbridge"
+          install -m 0644 packaging/linux/zorinmacbridge.desktop "$PKG/usr/share/applications/zorinmacbridge.desktop"
+          install -m 0644 packaging/linux/zorinmacbridge.svg "$PKG/usr/share/icons/hicolor/scalable/apps/zorinmacbridge.svg"
+          cat > "$PKG/DEBIAN/control" <<CTRL
+          Package: zorinmacbridge
+          Version: $VERSION
+          Section: net
+          Priority: optional
+          Architecture: amd64
+          Maintainer: ILoveMyProjects
+          Description: LAN-only Linux client for ZorinMacBridge macOS remote desktop
+          CTRL
+          mkdir -p release
+          dpkg-deb --build "$PKG" "release/ZorinMacBridge-Client_linux-amd64.deb"
+          cp dist/ZorinMacBridge-Client "release/ZorinMacBridge-Client_linux-amd64"
+          chmod +x "release/ZorinMacBridge-Client_linux-amd64"
+          (cd release && sha256sum * > SHA256SUMS-linux.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64
+          path: release/*
+
+  macos-arm64:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build macOS Apple Silicon server
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller Pillow==12.3.0 cryptography==50.0.1
+          pyinstaller --noconfirm --clean --windowed \
+            --name "ZorinMacBridge Server" \
+            --osx-bundle-identifier com.ilovemyprojects.zorinmacbridge.server \
+            --collect-all cryptography \
+            mac_server_gui.py
+          codesign --force --deep --sign - "dist/ZorinMacBridge Server.app"
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$VERSION" = "$GITHUB_REF_NAME" ]; then VERSION="$(cat VERSION)"; fi
+          mkdir -p release
+          hdiutil create -volname "ZorinMacBridge Server" \
+            -srcfolder "dist/ZorinMacBridge Server.app" \
+            -ov -format UDZO "release/ZorinMacBridge-Server_macOS-arm64.dmg"
+          (cd release && shasum -a 256 * > SHA256SUMS-macOS-arm64.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: release/*
+
+  macos-intel:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build macOS Intel server
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller Pillow==12.3.0 cryptography==50.0.1
+          pyinstaller --noconfirm --clean --windowed \
+            --name "ZorinMacBridge Server" \
+            --osx-bundle-identifier com.ilovemyprojects.zorinmacbridge.server \
+            --collect-all cryptography \
+            mac_server_gui.py
+          codesign --force --deep --sign - "dist/ZorinMacBridge Server.app"
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$VERSION" = "$GITHUB_REF_NAME" ]; then VERSION="$(cat VERSION)"; fi
+          mkdir -p release
+          hdiutil create -volname "ZorinMacBridge Server" \
+            -srcfolder "dist/ZorinMacBridge Server.app" \
+            -ov -format UDZO "release/ZorinMacBridge-Server_macOS-x86_64.dmg"
+          (cd release && shasum -a 256 * > SHA256SUMS-macOS-x86_64.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-intel
+          path: release/*
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux-amd64, macos-arm64, macos-intel]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "ZorinMacBridge $GITHUB_REF_NAME" \
+            --generate-notes
