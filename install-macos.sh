@@ -71,20 +71,7 @@ fi
 SIGNED="$STAGE/$APP_NAME"
 ditto "$SOURCE" "$SIGNED"
 
-echo "Preparing this Mac's persistent ZorinMacBridge identity…"
-PREP_OUT="$("$SOURCE/Contents/MacOS/ZorinMacBridge Server" --prepare-local-signing)"
-CERT_PATH="$(printf '%s\n' "$PREP_OUT" | sed -n 's/^CERT_PATH=//p' | tail -n1)"
-TRUSTED="$(printf '%s\n' "$PREP_OUT" | sed -n 's/^TRUSTED=//p' | tail -n1)"
-if [ -z "$CERT_PATH" ] || [ ! -f "$CERT_PATH" ]; then
-  echo "Could not prepare the persistent local code-signing certificate." >&2
-  exit 1
-fi
-if [ "$TRUSTED" != "1" ]; then
-  echo "Authorizing this Mac's one-time local code-signing trust…"
-  sudo /usr/bin/security add-trusted-cert -d -r trustRoot -p codeSign \
-    -k /Library/Keychains/System.keychain "$CERT_PATH"
-fi
-
+echo "Applying this Mac's stable local designated requirement…"
 "$SOURCE/Contents/MacOS/ZorinMacBridge Server" --local-sign-app "$SIGNED"
 codesign --verify --deep --strict --verbose=2 "$SIGNED"
 
@@ -94,7 +81,7 @@ sudo ditto "$SIGNED" "$DEST"
 
 echo
 echo "ZorinMacBridge Server is installed in /Applications."
-echo "This Mac now owns a persistent local code-signing identity for ZorinMacBridge."
-echo "Future in-app updates are re-signed with the same identity before installation."
-echo "No GitHub login, GitHub secret, Developer ID, or Linux signing setup is required."
+echo "This Mac now has a persistent local designated requirement for ZorinMacBridge."
+echo "Future in-app updates are re-signed with the same designated requirement before installation."
+echo "No certificate, keychain setup, GitHub login, Developer ID, or Linux signing setup is required."
 echo "The app was NOT started automatically."

@@ -95,7 +95,7 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Prove temporary macOS code-signing identity works
+      - name: Prove stable explicit designated-requirement signing works
         run: |
           set -euo pipefail
           bash -n scripts/sign-macos-transport.sh
@@ -160,18 +160,15 @@ jobs:
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-streamer-load
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-update-tls
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-permission-apis
-          echo '=== macOS phase: create persistent local identity ==='
+          echo '=== macOS phase: create stable per-Mac designated requirement ==='
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-local-signing-identity
-          LOCAL_CERT="$HOME/Library/Application Support/ZorinMacBridge/CodeSigning/local-signing-cert.pem"
-          test -f "$LOCAL_CERT"
-          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$LOCAL_CERT"
-          echo '=== macOS phase: persistent local-sign round trip ==='
+          echo '=== macOS phase: stable local-DR round trip ==='
           rm -rf 'build/local-sign-test'
           mkdir -p 'build/local-sign-test'
           ditto 'dist/ZorinMacBridge Server.app' 'build/local-sign-test/ZorinMacBridge Server.app'
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --local-sign-app 'build/local-sign-test/ZorinMacBridge Server.app'
           codesign --verify --deep --strict --verbose=2 'build/local-sign-test/ZorinMacBridge Server.app'
-          sudo security remove-trusted-cert -d "$LOCAL_CERT" || true
+          codesign -d -r- 'build/local-sign-test/ZorinMacBridge Server.app' 2>&1 | grep -F 'info[ZMBLocalIdentity]'
           mkdir -p release build/dmgroot
           cp -R 'dist/ZorinMacBridge Server.app' build/dmgroot/
           ln -s /Applications build/dmgroot/Applications
@@ -243,18 +240,15 @@ jobs:
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-streamer-load
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-update-tls
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-permission-apis
-          echo '=== macOS phase: create persistent local identity ==='
+          echo '=== macOS phase: create stable per-Mac designated requirement ==='
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-local-signing-identity
-          LOCAL_CERT="$HOME/Library/Application Support/ZorinMacBridge/CodeSigning/local-signing-cert.pem"
-          test -f "$LOCAL_CERT"
-          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$LOCAL_CERT"
-          echo '=== macOS phase: persistent local-sign round trip ==='
+          echo '=== macOS phase: stable local-DR round trip ==='
           rm -rf 'build/local-sign-test'
           mkdir -p 'build/local-sign-test'
           ditto 'dist/ZorinMacBridge Server.app' 'build/local-sign-test/ZorinMacBridge Server.app'
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --local-sign-app 'build/local-sign-test/ZorinMacBridge Server.app'
           codesign --verify --deep --strict --verbose=2 'build/local-sign-test/ZorinMacBridge Server.app'
-          sudo security remove-trusted-cert -d "$LOCAL_CERT" || true
+          codesign -d -r- 'build/local-sign-test/ZorinMacBridge Server.app' 2>&1 | grep -F 'info[ZMBLocalIdentity]'
           mkdir -p release build/dmgroot
           cp -R 'dist/ZorinMacBridge Server.app' build/dmgroot/
           ln -s /Applications build/dmgroot/Applications

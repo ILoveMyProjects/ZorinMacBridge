@@ -4,20 +4,17 @@ import plistlib
 import tempfile
 from pathlib import Path
 
-from mac_local_signing import APP_NAME, BUNDLE_ID, LocalIdentity, bundle_identifier
+from mac_local_signing import APP_NAME, BUNDLE_ID, IDENTITY_MARKER_KEY, LocalIdentity, bundle_identifier
 
 
 def main() -> None:
-    identity = LocalIdentity(
-        keychain=Path('/tmp/example.keychain-db'),
-        keychain_password='not-used-in-test',
-        cert_sha1='A1' * 20,
-        cert_sha256='B2' * 32,
-        common_name='ZorinMacBridge Local Stable Code Signing',
-    )
+    token = 'ab' * 32
+    identity = LocalIdentity(token=token)
     requirement = identity.requirement
     assert f'identifier "{BUNDLE_ID}"' in requirement
-    assert f'certificate leaf = H"{identity.cert_sha1}"' in requirement
+    assert f'info[{IDENTITY_MARKER_KEY}] = "{token}"' in requirement
+    assert 'certificate leaf' not in requirement
+    assert 'cdhash' not in requirement
 
     with tempfile.TemporaryDirectory() as tmp:
         app = Path(tmp) / APP_NAME
@@ -31,54 +28,47 @@ def main() -> None:
     installer = Path('install-macos.sh').read_text(encoding='utf-8')
     updater = Path('updates.py').read_text(encoding='utf-8')
     server = Path('mac_server_gui.py').read_text(encoding='utf-8')
-
-    # No GitHub signing secret setup remains. Release artifacts are transport-
-    # signed, while installed copies get a persistent per-Mac identity.
-    assert 'MACOS_CERTIFICATE_P12_BASE64' not in workflow
-    assert 'MACOS_CERTIFICATE_PASSWORD' not in workflow
-    assert 'MACOS_SIGNING_IDENTITY' not in workflow
-    assert 'scripts/sign-macos-transport.sh' in workflow
-    assert 'macos-signing-preflight:' in workflow
-    assert 'scripts/sign-macos-transport.sh --self-test' in workflow
-    assert 'needs: [macos-signing-preflight]' in workflow
     transport = Path('scripts/sign-macos-transport.sh').read_text(encoding='utf-8')
     local_signing = Path('mac_local_signing.py').read_text(encoding='utf-8')
-    assert 'security list-keychains -d user -s "$KEYCHAIN"' in transport
-    assert 'mapfile' not in transport
-    assert 'readarray' not in transport
-    assert 'security default-keychain -d user -s "$KEYCHAIN"' in transport
-    assert 'security find-key -t private "$KEYCHAIN"' in transport
-    assert '-t agg -f pkcs12' in transport
-    assert 'basicConstraints=critical,CA:FALSE' in transport
-    assert 'keyUsage=critical,digitalSignature' in transport
-    assert 'keyCertSign' not in transport
-    assert 'extendedKeyUsage=critical,codeSigning' in transport
-    assert '--self-test' in transport
-    assert 'codesign-probe' in transport
-    assert '--keychain "$KEYCHAIN" --sign "$IDENTITY_SHA1"' in transport
-    assert "_ensure_keychain_searchable(KEYCHAIN_PATH)" in local_signing
-    assert 'BasicConstraints(ca=False' in local_signing
-    assert 'key_cert_sign=False' in local_signing
-    assert 'crl_sign=False' in local_signing
-    assert '_certificate_profile_is_current' in local_signing
-    assert "'--keychain', str(identity.keychain), '--sign', identity.cert_sha1" in local_signing
-    assert 'security import "$TMP/identity.p12"' in transport
-    assert ' -A ' in transport or ' -A \\' in transport
-    assert "'-A'" in local_signing
-    assert "'-t', 'agg', '-f', 'pkcs12'" in local_signing
-    assert "'-t', 'cert', '-f', 'pkcs12'" not in local_signing
-    assert "'find-key', '-t', 'private', str(KEYCHAIN_PATH)" in local_signing
+
+    # No certificate/keychain/GitHub-secret signing setup remains.
+    for forbidden in (
+        'MACOS_CERTIFICATE_P12_BASE64', 'MACOS_CERTIFICATE_PASSWORD', 'MACOS_SIGNING_IDENTITY',
+        'security create-keychain', 'security import', 'security add-trusted-cert',
+        'set-key-partition-list', 'find-identity', 'find-key -t private',
+    ):
+        assert forbidden not in transport
+    assert 'scripts/sign-macos-transport.sh --self-test' in workflow
+    assert 'macos-signing-preflight:' in workflow
+    assert 'needs: [macos-signing-preflight]' in workflow
+
+    # CI transport and the installed copy use explicit DRs rather than the
+    # build-bound default ad-hoc cdhash requirement.
+    assert '--sign -' in transport
+    assert '--requirements "$REQ"' in transport
+    assert 'stable per-Mac explicit DR shape' in transport
+    assert 'info[ZMBLocalIdentity]' in transport
+    assert "'--sign', '-', '--requirements', str(req)" in local_signing
+    assert 'ZMBLocalIdentity' in local_signing
+    assert 'TOKEN_PATH' in local_signing
+    assert 'certificate leaf' not in local_signing
+    assert 'KEYCHAIN_PATH' not in local_signing
+    assert 'CERT_PATH' not in local_signing
+    assert 'P12_PATH' not in local_signing
+
     assert "--local-sign-app 'build/local-sign-test/ZorinMacBridge Server.app'" in workflow
-    assert 'security add-trusted-cert -d -r trustRoot -p codeSign' in workflow
+    assert "codesign -d -r- 'build/local-sign-test/ZorinMacBridge Server.app'" in workflow
+    assert 'security add-trusted-cert' not in workflow
     assert 'setup-stable-signing-linux.sh' not in workflow
 
     assert '--local-sign-app' in installer
+    assert 'security add-trusted-cert' not in installer
     assert "stage_and_sign(source_app, stage_root)" in updater
     assert "bootstrap_installed_app_identity()" in server
     assert 'gh auth login' not in installer
-    assert 'No GitHub login, GitHub secret, Developer ID, or Linux signing setup is required.' in installer
+    assert 'No certificate, keychain setup, GitHub login, Developer ID, or Linux signing setup is required.' in installer
 
-    print('local signing architecture tests: OK')
+    print('local stable-DR architecture tests: OK')
 
 
 if __name__ == '__main__':

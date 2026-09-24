@@ -26,7 +26,7 @@ Remote file operations are constrained to the configured share root. Path valida
 
 Screen Recording is required for video and Accessibility/Core Graphics event permission is required for remote keyboard/mouse control. ZorinMacBridge does not edit the TCC database or bypass macOS consent.
 
-Starting with v0.6.0, installed Mac copies use a persistent **per-Mac local code-signing identity**. The private key is generated and kept on that Mac under the user's Application Support directory; it is not uploaded to GitHub and is not stored in the public repository. Before an update replaces the installed app, the verified release artifact is staged and re-signed with the same local identity. The resulting designated requirement is bound to the fixed bundle identifier and that local certificate.
+Starting with v0.6.5, installed Mac copies use a persistent **per-Mac explicit designated requirement (DR)**. No private signing key or certificate exists. A random local marker is stored under the user's Application Support directory, injected into the staged app's `Info.plist`, and included in the explicit DR together with the fixed bundle identifier. Before an update replaces the installed app, the verified release artifact is staged and re-signed ad-hoc with that same DR.
 
 This design is intended to stop normal app updates from changing the code identity associated with existing Screen Recording and input-control grants. The one-time migration from pre-v0.6 builds can still require a fresh grant because the identity genuinely changes at that migration boundary.
 

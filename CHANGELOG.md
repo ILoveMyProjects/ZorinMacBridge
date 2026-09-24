@@ -1,3 +1,12 @@
+## 0.6.5
+
+- Removed the certificate/keychain signing architecture that repeatedly failed on macOS runners with `Unknown critical cert extension` and keychain lookup errors.
+- GitHub release transport signing is now purely ad-hoc and uses an explicit transport designated requirement; no ephemeral certificate, private key, keychain, trust mutation, or GitHub secret is involved.
+- Installed macOS copies now use a stable explicit per-Mac designated requirement: fixed bundle identifier plus a random local `ZMBLocalIdentity` marker stored under Application Support.
+- Every update injects the same marker into the staged app and ad-hoc signs it with the same explicit DR before replacing `/Applications`, eliminating certificate/keychain churn entirely.
+- Added a fast macOS CI preflight that signs and verifies both a Mach-O probe and a minimal `.app` using the exact explicit-DR shape, and fails if the signature falls back to a build-bound `cdhash` DR.
+- Removed all `security create-keychain`, PKCS#12 import, trust-root, private-key ACL, and local certificate code from the update/install path.
+
 # Changelog
 
 ## 0.6.4

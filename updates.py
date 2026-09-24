@@ -396,26 +396,27 @@ def _verify_macos_transport_app(app: Path, progress: ProgressCallback | None) ->
 def _verify_macos_update_identity(current_app: Path | None, new_app: Path, progress: ProgressCallback | None) -> None:
     """Verify that an already locally-signed install keeps the same per-Mac DR.
 
-    v0.6.0 is the migration point. Older installs may have ad-hoc or release-transport
-    signatures. Once a local persistent identity exists, every installed update is
-    re-signed with that same identity *before* replacing the app.
+    v0.6.5 is the migration point for the certificate-free stable DR model. Older
+    installs may have build-bound ad-hoc, transport, or experimental local-certificate
+    signatures. Every installed update is re-signed with the same explicit per-Mac DR
+    *before* replacing the app.
     """
     from mac_local_signing import app_has_local_identity, verify_app_local_identity
 
     verify_app_local_identity(new_app)
     if current_app is None or not current_app.is_dir():
-        _emit(progress, 'Persistent local code identity verified for the new installation.')
+        _emit(progress, 'Stable local designated requirement verified for the new installation.')
         return
 
     if not app_has_local_identity(current_app):
-        _emit(progress, 'One-time migration: current app uses the old code identity; new app uses this Mac\'s persistent local identity.')
+        _emit(progress, 'One-time migration: current app uses the old build-bound identity; new app uses this Mac\'s stable local designated requirement.')
         return
 
     old_req = _designated_requirement(current_app)
     new_req = _designated_requirement(new_app)
     _verify_requirement(new_app, old_req, 'New application')
     _verify_requirement(current_app, new_req, 'Current application')
-    _emit(progress, 'Persistent code identity verified: privacy permissions remain attached to the same app identity.')
+    _emit(progress, 'Stable designated requirement verified: privacy permissions remain attached to the same app identity.')
 
 
 def _install_macos(package_path: Path, progress: ProgressCallback | None) -> None:
@@ -454,7 +455,7 @@ def _install_macos(package_path: Path, progress: ProgressCallback | None) -> Non
         _verify_macos_transport_app(source_app, progress)
         _emit(progress, 'Applying this Mac\'s persistent local code identity…')
         signed_app, identity = stage_and_sign(source_app, stage_root)
-        _emit(progress, f'Local identity ready: {identity.cert_sha256[:16]}…')
+        _emit(progress, f'Stable local DR ready: {identity.cert_sha256[:16]}…')
         _verify_macos_update_identity(_current_macos_app(), signed_app, progress)
 
         _emit(progress, 'Waiting for the macOS administrator-password prompt…')
@@ -475,7 +476,7 @@ def _install_macos(package_path: Path, progress: ProgressCallback | None) -> Non
         if completed.returncode != 0:
             output = (completed.stdout or '').strip()
             raise RuntimeError('macOS application installation failed:\n' + (output or f'osascript exited with code {completed.returncode}'))
-        _emit(progress, 'macOS application installed with the persistent local identity.')
+        _emit(progress, 'macOS application installed with the stable local designated requirement.')
     finally:
         if mounted:
             subprocess.run(

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime as _dt
 import hashlib
 import os
 import plistlib
@@ -13,13 +12,9 @@ from pathlib import Path
 
 BUNDLE_ID = 'com.ilovemyprojects.zorinmacbridge.server'
 APP_NAME = 'ZorinMacBridge Server.app'
+IDENTITY_MARKER_KEY = 'ZMBLocalIdentity'
 SIGNING_DIR = Path.home() / 'Library' / 'Application Support' / 'ZorinMacBridge' / 'CodeSigning'
-KEYCHAIN_PATH = SIGNING_DIR / 'local-signing.keychain-db'
-PASSWORD_PATH = SIGNING_DIR / 'local-signing.keychain.password'
-P12_PATH = SIGNING_DIR / 'local-signing-identity.p12'
-P12_PASSWORD_PATH = SIGNING_DIR / 'local-signing-identity.p12.password'
-CERT_PATH = SIGNING_DIR / 'local-signing-cert.pem'
-IDENTITY_LABEL = 'ZorinMacBridge Local Stable Code Signing'
+TOKEN_PATH = SIGNING_DIR / 'local-identity-token'
 
 
 class LocalSigningError(RuntimeError):
@@ -28,17 +23,22 @@ class LocalSigningError(RuntimeError):
 
 @dataclass(frozen=True)
 class LocalIdentity:
-    keychain: Path
-    keychain_password: str
-    cert_sha1: str
-    cert_sha256: str
-    common_name: str
+    token: str
+
+    @property
+    def cert_sha256(self) -> str:
+        """Compatibility name used by existing UI/logging; this is an identity hash, not a certificate hash."""
+        return hashlib.sha256(self.token.encode('utf-8')).hexdigest().upper()
+
+    @property
+    def common_name(self) -> str:
+        return 'ZorinMacBridge Stable Local Designated Requirement'
 
     @property
     def requirement(self) -> str:
         return (
             f'designated => identifier "{BUNDLE_ID}" '
-            f'and certificate leaf = H"{self.cert_sha1}"'
+            f'and info[{IDENTITY_MARKER_KEY}] = "{self.token}"'
         )
 
 
@@ -59,9 +59,8 @@ def _run(args: list[str], *, check: bool = True, timeout: float = 60.0) -> subpr
 def _require_macos_tools() -> None:
     if os.uname().sysname != 'Darwin':
         raise LocalSigningError('Local macOS signing is only available on macOS.')
-    for tool in ('/usr/bin/security', '/usr/bin/codesign'):
-        if not Path(tool).exists():
-            raise LocalSigningError(f'Required macOS tool is missing: {tool}')
+    if not Path('/usr/bin/codesign').exists():
+        raise LocalSigningError('Required macOS tool is missing: /usr/bin/codesign')
 
 
 def _chmod_private(path: Path) -> None:
@@ -71,243 +70,37 @@ def _chmod_private(path: Path) -> None:
         pass
 
 
-def _load_cert_hashes(cert_pem: bytes) -> tuple[str, str, str]:
-    from cryptography import x509
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.x509.oid import NameOID
-
-    cert = x509.load_pem_x509_certificate(cert_pem)
-    sha1 = cert.fingerprint(hashes.SHA1()).hex().upper()
-    sha256 = cert.fingerprint(hashes.SHA256()).hex().upper()
-    attrs = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
-    cn = attrs[0].value if attrs else IDENTITY_LABEL
-    return sha1, sha256, cn
-
-
-def _certificate_profile_is_current(cert_pem: bytes) -> bool:
-    """Return True only for the macOS code-signing profile used by v0.6.4+."""
-    from cryptography import x509
-    from cryptography.x509.oid import ExtensionOID, ExtendedKeyUsageOID
-
-    try:
-        cert = x509.load_pem_x509_certificate(cert_pem)
-        basic = cert.extensions.get_extension_for_oid(ExtensionOID.BASIC_CONSTRAINTS)
-        key_usage = cert.extensions.get_extension_for_oid(ExtensionOID.KEY_USAGE)
-        eku = cert.extensions.get_extension_for_oid(ExtensionOID.EXTENDED_KEY_USAGE)
-    except Exception:
-        return False
-
-    return (
-        basic.critical
-        and basic.value.ca is False
-        and key_usage.critical
-        and key_usage.value.digital_signature
-        and not key_usage.value.key_cert_sign
-        and not key_usage.value.crl_sign
-        and eku.critical
-        and list(eku.value) == [ExtendedKeyUsageOID.CODE_SIGNING]
-    )
-
-
-def _user_keychain_search_list() -> list[str]:
-    proc = _run(['/usr/bin/security', 'list-keychains', '-d', 'user'], check=False)
-    if proc.returncode != 0:
-        return []
-    result: list[str] = []
-    for raw in (proc.stdout or '').splitlines():
-        value = raw.strip().strip('"')
-        if value:
-            result.append(value)
-    return result
-
-
-def _ensure_keychain_searchable(keychain: Path) -> None:
-    """Put the app-owned keychain in the user's search list exactly once.
-
-    codesign may report errSecItemNotFound for a perfectly valid identity in a
-    custom keychain when that keychain is not in the user's search list.  Keep
-    the normal login/system entries and prepend only our private keychain.
-    """
-    current = _user_keychain_search_list()
-    wanted = str(keychain)
-    if wanted in current:
-        return
-    _run(['/usr/bin/security', 'list-keychains', '-d', 'user', '-s', wanted, *current])
-
-
-def _create_identity_files() -> None:
-    from cryptography import x509
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.hazmat.primitives.serialization import pkcs12
-    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
-
-    SIGNING_DIR.mkdir(parents=True, exist_ok=True)
-    SIGNING_DIR.chmod(0o700)
-
-    keychain_password = secrets.token_urlsafe(36)
-    p12_password = secrets.token_urlsafe(36)
-    key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
-    now = _dt.datetime.now(_dt.timezone.utc)
-    subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, IDENTITY_LABEL),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, 'ILoveMyProjects'),
-        x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, 'ZorinMacBridge'),
-    ])
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(issuer)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now - _dt.timedelta(days=1))
-        .not_valid_after(now + _dt.timedelta(days=3650))
-        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        .add_extension(
-            x509.KeyUsage(
-                digital_signature=True,
-                content_commitment=False,
-                key_encipherment=False,
-                data_encipherment=False,
-                key_agreement=False,
-                key_cert_sign=False,
-                crl_sign=False,
-                encipher_only=None,
-                decipher_only=None,
-            ),
-            critical=True,
-        )
-        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CODE_SIGNING]), critical=True)
-        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
-        .sign(key, hashes.SHA256())
-    )
-
-    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
-    p12 = pkcs12.serialize_key_and_certificates(
-        IDENTITY_LABEL.encode('utf-8'),
-        key,
-        cert,
-        None,
-        serialization.BestAvailableEncryption(p12_password.encode('utf-8')),
-    )
-
-    PASSWORD_PATH.write_text(keychain_password, encoding='utf-8')
-    P12_PASSWORD_PATH.write_text(p12_password, encoding='utf-8')
-    CERT_PATH.write_bytes(cert_pem)
-    P12_PATH.write_bytes(p12)
-    for path in (PASSWORD_PATH, P12_PASSWORD_PATH, CERT_PATH, P12_PATH):
-        _chmod_private(path)
-
-    if KEYCHAIN_PATH.exists():
-        try:
-            KEYCHAIN_PATH.unlink()
-        except OSError:
-            pass
-    _run(['/usr/bin/security', 'create-keychain', '-p', keychain_password, str(KEYCHAIN_PATH)])
-    _run(['/usr/bin/security', 'set-keychain-settings', '-lut', '600', str(KEYCHAIN_PATH)])
-    _run(['/usr/bin/security', 'unlock-keychain', '-p', keychain_password, str(KEYCHAIN_PATH)])
-    # Use an isolated app-owned keychain. On macOS 15,
-    # `security set-key-partition-list` can fail with errSecItemNotFound even
-    # immediately after a successful PKCS#12 import. Importing with `-A` avoids
-    # that brittle mutation. The keychain is private (0700 directory / 0600
-    # files), unlocked only when signing is needed, and never leaves this Mac.
-    _run([
-        '/usr/bin/security', 'import', str(P12_PATH), '-k', str(KEYCHAIN_PATH),
-        '-P', p12_password, '-A', '-T', '/usr/bin/codesign', '-T', '/usr/bin/security',
-        '-t', 'agg', '-f', 'pkcs12',
-    ])
-    _ensure_keychain_searchable(KEYCHAIN_PATH)
-    private_key = _run(
-        ['/usr/bin/security', 'find-key', '-t', 'private', str(KEYCHAIN_PATH)],
-        check=False,
-    )
-    if private_key.returncode != 0:
-        raise LocalSigningError('The persistent signing private key was not imported into its keychain.')
-
-
 def ensure_local_identity() -> LocalIdentity:
-    """Create or reuse one per-user code-signing identity on this Mac.
+    """Create or reuse one stable per-Mac designated-requirement token.
 
-    The private key never leaves this Mac. No GitHub credentials or developer
-    account are involved. Future app updates are re-signed locally with this same
-    identity before they replace the installed app.
+    No certificate, keychain, Developer ID, GitHub secret, or external account is
+    involved.  The token is injected into the staged app's Info.plist and the app
+    is ad-hoc signed with an explicit DR containing the bundle identifier plus
+    this token.  Reusing the same token makes the explicit DR identical across
+    updates on this Mac.
     """
     _require_macos_tools()
     SIGNING_DIR.mkdir(parents=True, exist_ok=True)
-    SIGNING_DIR.chmod(0o700)
+    try:
+        SIGNING_DIR.chmod(0o700)
+    except OSError:
+        pass
 
-    required = (KEYCHAIN_PATH, PASSWORD_PATH, P12_PASSWORD_PATH, P12_PATH, CERT_PATH)
-    if not all(p.exists() for p in required):
-        _create_identity_files()
-    elif not _certificate_profile_is_current(CERT_PATH.read_bytes()):
-        # v0.6.0-v0.6.3 generated a CA-style certificate with keyCertSign/crlSign.
-        # That profile is not a valid end-entity macOS code-signing identity on
-        # current macOS runners. Recreate it once with the corrected leaf profile.
-        _run(['/usr/bin/security', 'delete-keychain', str(KEYCHAIN_PATH)], check=False)
-        for item in required:
-            try:
-                item.unlink()
-            except OSError:
-                pass
-        _create_identity_files()
+    token = ''
+    if TOKEN_PATH.exists():
+        try:
+            token = TOKEN_PATH.read_text(encoding='ascii').strip().lower()
+        except Exception:
+            token = ''
+    if len(token) != 64 or any(ch not in '0123456789abcdef' for ch in token):
+        token = secrets.token_hex(32)
+        tmp = TOKEN_PATH.with_suffix('.tmp')
+        tmp.write_text(token + '\n', encoding='ascii')
+        _chmod_private(tmp)
+        os.replace(tmp, TOKEN_PATH)
+        _chmod_private(TOKEN_PATH)
+    return LocalIdentity(token=token)
 
-    keychain_password = PASSWORD_PATH.read_text(encoding='utf-8').strip()
-    if not keychain_password:
-        raise LocalSigningError('Local signing keychain password file is empty.')
-    cert_pem = CERT_PATH.read_bytes()
-    cert_sha1, cert_sha256, common_name = _load_cert_hashes(cert_pem)
-
-    unlock = _run(
-        ['/usr/bin/security', 'unlock-keychain', '-p', keychain_password, str(KEYCHAIN_PATH)],
-        check=False,
-    )
-    if unlock.returncode != 0:
-        # The files may have been partially restored. Recreate exactly once only
-        # when the keychain cannot be unlocked with its matching saved password.
-        for p in required:
-            try:
-                p.unlink()
-            except OSError:
-                pass
-        _create_identity_files()
-        keychain_password = PASSWORD_PATH.read_text(encoding='utf-8').strip()
-        cert_pem = CERT_PATH.read_bytes()
-        cert_sha1, cert_sha256, common_name = _load_cert_hashes(cert_pem)
-        _run(['/usr/bin/security', 'unlock-keychain', '-p', keychain_password, str(KEYCHAIN_PATH)])
-
-    _ensure_keychain_searchable(KEYCHAIN_PATH)
-
-    cert_listing = _run(
-        ['/usr/bin/security', 'find-certificate', '-a', '-Z', '-c', common_name, str(KEYCHAIN_PATH)]
-    ).stdout or ''
-    normalized = cert_listing.replace(' ', '').upper()
-    if cert_sha1 not in normalized:
-        raise LocalSigningError(
-            'The persistent ZorinMacBridge signing certificate is not available in its private keychain.'
-        )
-
-    return LocalIdentity(
-        keychain=KEYCHAIN_PATH,
-        keychain_password=keychain_password,
-        cert_sha1=cert_sha1,
-        cert_sha256=cert_sha256,
-        common_name=common_name,
-    )
-
-
-
-def identity_is_trusted(identity: LocalIdentity | None = None) -> bool:
-    identity = identity or ensure_local_identity()
-    proc = _run(
-        ['/usr/bin/security', 'verify-cert', '-c', str(CERT_PATH), '-p', 'codeSign', '-k', str(identity.keychain)],
-        check=False,
-    )
-    return proc.returncode == 0
-
-
-def local_certificate_path() -> Path:
-    ensure_local_identity()
-    return CERT_PATH
 
 def bundle_identifier(app: Path) -> str:
     info = app / 'Contents' / 'Info.plist'
@@ -319,10 +112,49 @@ def bundle_identifier(app: Path) -> str:
     return str(data.get('CFBundleIdentifier', ''))
 
 
+def _identity_marker(app: Path) -> str:
+    info = app / 'Contents' / 'Info.plist'
+    try:
+        with info.open('rb') as fh:
+            data = plistlib.load(fh)
+    except Exception as exc:
+        raise LocalSigningError(f'Cannot read {info}: {exc}') from exc
+    return str(data.get(IDENTITY_MARKER_KEY, ''))
+
+
+def _inject_identity_marker(app: Path, identity: LocalIdentity) -> None:
+    info = app / 'Contents' / 'Info.plist'
+    try:
+        raw = info.read_bytes()
+        data = plistlib.loads(raw)
+    except Exception as exc:
+        raise LocalSigningError(f'Cannot read {info}: {exc}') from exc
+    if data.get('CFBundleIdentifier') != BUNDLE_ID:
+        raise LocalSigningError(f'Refusing to modify unexpected bundle identifier: {data.get("CFBundleIdentifier")!r}')
+    data[IDENTITY_MARKER_KEY] = identity.token
+    fmt = plistlib.FMT_BINARY if raw.startswith(b'bplist00') else plistlib.FMT_XML
+    tmp = info.with_name('Info.plist.zmbtmp')
+    try:
+        with tmp.open('wb') as fh:
+            plistlib.dump(data, fh, fmt=fmt, sort_keys=False)
+        os.replace(tmp, info)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def _write_requirement(identity: LocalIdentity, directory: Path) -> Path:
     path = directory / 'zorinmacbridge-local.req'
     path.write_text(identity.requirement + '\n', encoding='utf-8')
     return path
+
+
+def _sign_adhoc(target: Path) -> None:
+    _run([
+        '/usr/bin/codesign', '--force', '--timestamp=none', '--sign', '-', str(target),
+    ])
 
 
 def sign_app_locally(app: Path) -> LocalIdentity:
@@ -333,62 +165,52 @@ def sign_app_locally(app: Path) -> LocalIdentity:
         raise LocalSigningError(f'Refusing to sign unexpected bundle identifier: {bundle_identifier(app)!r}')
 
     identity = ensure_local_identity()
-    if not identity_is_trusted(identity):
-        raise LocalSigningError(
-            'The persistent local signing certificate is not yet trusted for code signing. '
-            'The installer/migration must authorize that one-time trust step before signing.'
-        )
-    _run(['/usr/bin/security', 'unlock-keychain', '-p', identity.keychain_password, str(identity.keychain)])
-    try:
-        # Remove a stale quarantine marker from the staged copy. The transport DMG is
-        # still integrity-checked before this point; this prevents the locally signed
-        # copy from inheriting a release-download quarantine identity that no longer
-        # matches its new local signature.
-        if Path('/usr/bin/xattr').exists():
-            _run(['/usr/bin/xattr', '-dr', 'com.apple.quarantine', str(app)], check=False)
+    _inject_identity_marker(app, identity)
 
-        nested: list[Path] = []
-        contents = app / 'Contents'
-        for path in contents.rglob('*'):
-            if path.is_file() and path.suffix in ('.dylib', '.so'):
-                nested.append(path)
-        # Verify private-key access with a tiny Mach-O before touching the app.
-        with tempfile.TemporaryDirectory(prefix='zmb-local-sign-probe-') as probe_tmp:
-            probe = Path(probe_tmp) / 'codesign-probe'
-            shutil.copy2('/usr/bin/true', probe)
-            _run([
-                '/usr/bin/codesign', '--force', '--timestamp=none',
-                '--keychain', str(identity.keychain), '--sign', identity.cert_sha1, str(probe),
-            ])
-            _run(['/usr/bin/codesign', '--verify', '--strict', '--verbose=2', str(probe)])
+    # The release DMG is checksum-verified before this point. The locally signed
+    # copy gets its own explicit DR, so it must not inherit a quarantine identity
+    # from the downloaded transport copy.
+    if Path('/usr/bin/xattr').exists():
+        _run(['/usr/bin/xattr', '-dr', 'com.apple.quarantine', str(app)], check=False)
 
-        for path in sorted(nested, key=lambda p: len(str(p)), reverse=True):
-            _run([
-                '/usr/bin/codesign', '--force', '--timestamp=none',
-                '--keychain', str(identity.keychain), '--sign', identity.cert_sha1, str(path),
-            ])
+    nested: list[Path] = []
+    contents = app / 'Contents'
+    for path in contents.rglob('*'):
+        if path.is_file() and path.suffix in ('.dylib', '.so'):
+            nested.append(path)
+    for path in sorted(nested, key=lambda p: len(str(p)), reverse=True):
+        _sign_adhoc(path)
 
-        with tempfile.TemporaryDirectory(prefix='zmb-local-sign-') as tmp:
-            req = _write_requirement(identity, Path(tmp))
-            _run([
-                '/usr/bin/codesign', '--force', '--deep', '--options', 'runtime', '--timestamp=none',
-                '--keychain', str(identity.keychain), '--sign', identity.cert_sha1,
-                '--requirements', str(req), str(app),
-            ], timeout=180.0)
+    with tempfile.TemporaryDirectory(prefix='zmb-local-sign-') as tmp:
+        req = _write_requirement(identity, Path(tmp))
+        _run([
+            '/usr/bin/codesign', '--force', '--deep', '--options', 'runtime', '--timestamp=none',
+            '--sign', '-', '--requirements', str(req), str(app),
+        ], timeout=180.0)
 
-        verify_app_local_identity(app, identity)
-        return identity
-    finally:
-        _run(['/usr/bin/security', 'lock-keychain', str(identity.keychain)], check=False)
+    verify_app_local_identity(app, identity)
+    return identity
 
 
 def verify_app_local_identity(app: Path, identity: LocalIdentity | None = None) -> None:
     app = Path(app).resolve()
     identity = identity or ensure_local_identity()
+    if bundle_identifier(app) != BUNDLE_ID:
+        raise LocalSigningError(f'Unexpected bundle identifier: {bundle_identifier(app)!r}')
+    if _identity_marker(app) != identity.token:
+        raise LocalSigningError('The app does not contain this Mac\'s stable local identity marker.')
     _run(['/usr/bin/codesign', '--verify', '--deep', '--strict', '--verbose=2', str(app)])
     with tempfile.TemporaryDirectory(prefix='zmb-local-verify-') as tmp:
         req = _write_requirement(identity, Path(tmp))
-        _run(['/usr/bin/codesign', '--verify', '--strict', '-R', str(req), str(app)])
+        _run(['/usr/bin/codesign', '--verify', '--strict', '--deep', '-R', str(req), str(app)])
+
+    # Make sure the embedded designated requirement is explicit and does not
+    # fall back to the ad-hoc default cdhash requirement.
+    shown = _run(['/usr/bin/codesign', '-d', '-r-', str(app)], check=False).stdout or ''
+    if 'designated =>' not in shown or 'cdhash ' in shown:
+        raise LocalSigningError('The app does not have the expected stable explicit designated requirement.')
+    if IDENTITY_MARKER_KEY not in shown:
+        raise LocalSigningError('The explicit designated requirement is missing the local identity marker.')
 
 
 def app_has_local_identity(app: Path) -> bool:
@@ -428,12 +250,11 @@ def running_app_bundle() -> Path | None:
 
 
 def bootstrap_installed_app_identity() -> None:
-    """One-time migration for installs upgraded from pre-v0.6.0 releases.
+    """One-time migration from the old build-bound/ad-hoc identity.
 
-    The old updater can install the v0.6 transport-signed app. Before the normal
-    GUI starts, migrate /Applications to this Mac's persistent local identity.
-    Trusting the local certificate, signing the staged app, and replacing the
-    installed bundle are performed under one macOS administrator authorization.
+    The running transport app stages a copy, applies this Mac's stable explicit
+    designated requirement, then asks for administrator authorization only to
+    replace the bundle in /Applications. There is no certificate trust step.
     """
     import shlex
     import sys
@@ -446,27 +267,19 @@ def bootstrap_installed_app_identity() -> None:
         same_location = app.resolve() == expected.resolve()
     except Exception:
         same_location = str(app) == str(expected)
-    if not same_location:
-        return
-    if app_has_local_identity(app):
+    if not same_location or app_has_local_identity(app):
         return
 
-    identity = ensure_local_identity()
-    user_home = str(Path.home())
-    executable = str(Path(sys.executable).resolve())
-
+    ensure_local_identity()
     with tempfile.TemporaryDirectory(prefix='zmb-identity-migration-') as tmp:
         stage_root = Path(tmp) / 'stage'
         stage_root.mkdir(parents=True, exist_ok=True)
         stage_app = stage_root / APP_NAME
         _run(['/usr/bin/ditto', str(app), str(stage_app)], timeout=180.0)
+        sign_app_locally(stage_app)
 
-        # One administrator authorization covers the one-time certificate trust,
-        # local signing of the staged app, and replacement in /Applications.
         q = shlex.quote
         shell = ' && '.join([
-            f'/usr/bin/security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain {q(str(CERT_PATH))}',
-            f'/usr/bin/env HOME={q(user_home)} {q(executable)} --local-sign-app {q(str(stage_app))}',
             f'/bin/rm -rf {q(str(expected))}',
             f'/usr/bin/ditto {q(str(stage_app))} {q(str(expected))}',
         ])
@@ -478,7 +291,7 @@ def bootstrap_installed_app_identity() -> None:
         proc = _run(['/usr/bin/osascript', '-e', script, shell], check=False, timeout=300.0)
         if proc.returncode != 0:
             raise LocalSigningError(
-                'Could not migrate the installed app to its persistent local code identity.\n'
+                'Could not migrate the installed app to its stable local designated requirement.\n'
                 + (proc.stdout or '').strip()
             )
 
@@ -496,4 +309,3 @@ def bootstrap_installed_app_identity() -> None:
         close_fds=True,
     )
     os._exit(0)
-

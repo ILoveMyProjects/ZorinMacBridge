@@ -374,7 +374,7 @@ class ServerGUI:
         try:
             from mac_local_signing import app_has_local_identity, identity_summary
             if app_has_local_identity(app):
-                return 'local stable identity · ' + identity_summary()
+                return 'stable local DR · ' + identity_summary()
         except Exception:
             pass
         try:
@@ -384,7 +384,7 @@ class ServerGUI:
             )
             text = proc.stdout or ''
             if 'Signature=adhoc' in text:
-                return 'legacy ad-hoc'
+                return 'transport/legacy ad-hoc'
             for line in text.splitlines():
                 if line.startswith('Authority='):
                     return 'release transport · ' + line.split('Authority=', 1)[1].strip()
@@ -585,11 +585,10 @@ class ServerGUI:
 def main() -> None:
     if '--prepare-local-signing' in sys.argv:
         try:
-            from mac_local_signing import ensure_local_identity, local_certificate_path, identity_is_trusted
+            from mac_local_signing import ensure_local_identity
             identity = ensure_local_identity()
-            print(f'CERT_PATH={local_certificate_path()}')
-            print(f'CERT_SHA256={identity.cert_sha256}')
-            print(f'TRUSTED={1 if identity_is_trusted(identity) else 0}')
+            print(f'IDENTITY_SHA256={identity.cert_sha256}')
+            print(f'REQUIREMENT={identity.requirement}')
             raise SystemExit(0)
         except Exception as exc:
             print(f'LOCAL SIGNING PREP FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)
@@ -600,7 +599,7 @@ def main() -> None:
             target = Path(sys.argv[idx + 1])
             from mac_local_signing import sign_app_locally
             identity = sign_app_locally(target)
-            print(f'LOCAL SIGN OK: {target} · {identity.cert_sha256}')
+            print(f'LOCAL SIGN OK: {target} · stable DR {identity.cert_sha256}')
             raise SystemExit(0)
         except Exception as exc:
             print(f'LOCAL SIGN FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)
@@ -609,7 +608,7 @@ def main() -> None:
         try:
             from mac_local_signing import ensure_local_identity
             identity = ensure_local_identity()
-            print(f'SELFTEST OK: persistent local signing identity available: {identity.cert_sha256}')
+            print(f'SELFTEST OK: stable local designated requirement available: {identity.cert_sha256}')
             raise SystemExit(0)
         except Exception as exc:
             print(f'SELFTEST FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)

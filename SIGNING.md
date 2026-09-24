@@ -1,47 +1,31 @@
-# macOS code identity in ZorinMacBridge
+# macOS signing model
 
-ZorinMacBridge does **not** require a Developer ID, a GitHub signing secret, or a certificate created on the Linux workstation for the private/internal workflow used by this project.
+ZorinMacBridge v0.6.5 does **not** require Developer ID, a self-signed certificate, a keychain identity, GitHub signing secrets, or signing setup on the Linux workstation.
 
-## How v0.6+ works
+## Why
 
-GitHub Actions creates a short-lived **transport signature** for each macOS release artifact. That signature exists only so the downloaded `.app` is structurally signed and older ZorinMacBridge updaters can validate/install the migration release.
+macOS tracks privacy grants using the app's designated requirement (DR). The default DR of ad-hoc signed code is build-bound, so it changes after every rebuild. ZorinMacBridge therefore signs with an **explicit DR** instead of accepting the default ad-hoc DR.
 
-Both the transport identity and the per-Mac identity use an end-entity macOS code-signing certificate profile: `CA:FALSE`, critical `digitalSignature` key usage, and critical `codeSigning` extended key usage. The release workflow performs a real `codesign` probe on a small Mach-O executable before starting the long macOS builds.
+Each Mac creates one random 256-bit local marker in:
 
-Before an app is installed on a Mac, ZorinMacBridge creates one **persistent local code-signing identity on that Mac** and re-signs the staged app with it. The private key remains on that Mac under:
+`~/Library/Application Support/ZorinMacBridge/CodeSigning/local-identity-token`
 
-```text
-~/Library/Application Support/ZorinMacBridge/CodeSigning/
-```
+Before an app is installed, ZorinMacBridge copies the verified release app to staging, adds `ZMBLocalIdentity=<local marker>` to the staged `Info.plist`, and signs the staged bundle with:
 
-Future in-app updates are downloaded and checksum-verified, copied to a staging directory, re-signed with the same local identity, checked for the expected bundle ID and designated requirement, and only then installed into `/Applications`.
+`designated => identifier "com.ilovemyprojects.zorinmacbridge.server" and info[ZMBLocalIdentity] = "<local marker>"`
 
-The designated requirement is pinned to both:
+The same marker is reused for future updates on that Mac, so the explicit DR remains the same across versions. No certificate or keychain is involved.
 
-```text
-com.ilovemyprojects.zorinmacbridge.server
-```
+## Release transport
 
-and the certificate belonging to that Mac's persistent local identity.
+GitHub Actions uses ad-hoc signing only for transport integrity after the bundle is modified during packaging. The release workflow runs a fast macOS preflight which signs a small Mach-O and a minimal app with explicit DRs, verifies them with `codesign`, and rejects any fallback to a `cdhash`-based DR before the long arm64/x86_64 builds start.
 
-This prevents each GitHub release build from becoming a new privacy identity on that Mac.
+The installer/updater verifies the downloaded app and checksum first. It then applies the Mac-local DR to a staged copy before replacing `/Applications/ZorinMacBridge Server.app`.
 
-## Migration from v0.5.x
+## Migration
 
-v0.6.4 is the migration release intended for publication after the macOS CI certificate-profile fixes. Older updaters can install its transport-signed app. On the first v0.6.4 launch, if the app in `/Applications` does not yet use the Mac's persistent local identity, ZorinMacBridge automatically:
+The first v0.6.5 launch from an older build-bound/ad-hoc identity is a one-time identity migration. The app stages and signs a replacement with the stable local DR, asks for administrator authorization only to replace the bundle in `/Applications`, then restarts. Because the old and new DRs are different, macOS can require Screen Recording and Accessibility approval once at that migration boundary. Later v0.6.5+ updates reuse the same DR.
 
-1. creates/reuses the local identity;
-2. stages a copy of the installed app;
-3. signs the staged copy with the persistent local identity;
-4. asks macOS for administrator authorization to replace the app in `/Applications`;
-5. restarts the freshly signed app.
+## Security trade-off
 
-Because this changes from the old v0.5.x identity to the new persistent per-Mac identity, macOS can require Screen Recording and mouse/keyboard authorization **once at this migration point**. Future v0.6+ updates on that Mac reuse the same identity.
-
-## Important
-
-Do not delete the `CodeSigning` directory above if you want that Mac to retain the same ZorinMacBridge code identity. Deleting it causes a new identity to be created later, which can require privacy permissions again.
-
-There is no `setup-stable-signing-linux.sh` in v0.6+. No `gh auth login`, GitHub secret upload, SSH-key modification, or Developer ID setup is part of this workflow.
-
-For public third-party distribution, Apple Developer ID signing and notarization are still the conventional deployment mechanism. The per-Mac local identity described here is intended for this project's private/internal machines.
+This is an internal/private distribution design, not a substitute for Developer ID and notarization. An explicit ad-hoc DR gives stable local identity semantics but does not cryptographically prove a public publisher. Public third-party distribution should use Developer ID and notarization.
