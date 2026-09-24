@@ -31,6 +31,7 @@ from linux_client import (
     MAX_CLIPBOARD,
     MODIFIER_KEYS,
     SPECIAL_KEYS,
+    VIDEO_QUALITY_PRESETS,
     format_fp,
     human_size,
     normalize_fp,
@@ -96,6 +97,8 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.remote_path_var = ValueVar('/')
         self.linux_shortcuts_var = ValueVar(True)
         self.capture_input_var = ValueVar(False)
+        self.auto_reconnect_var = ValueVar(True)
+        self.quality_var = ValueVar('Balanced')
         self.machine_var = ValueVar('')
         self.remember_credentials_var = ValueVar(True)
 
@@ -123,6 +126,9 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self._last_texture = None
         self._last_pixbuf = None
         self._file_rows = {}
+        self._reconnect_source = 0
+        self._reconnect_attempt = 0
+        self._last_disconnect_reason = ''
 
         self._build_native_ui()
         self._install_css()
@@ -168,6 +174,14 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         .zmb-muted { opacity: 0.68; }
         .zmb-file-row { padding: 7px 9px; }
         .zmb-status { font-weight: 600; }
+        .zmb-fullscreen-bar {
+            background: alpha(#111318, 0.88);
+            border-radius: 12px;
+            padding: 8px 10px;
+            margin: 10px;
+            color: white;
+        }
+        .zmb-fullscreen-bar label { color: white; }
         '''
         provider = Gtk.CssProvider()
         provider.load_from_data(css)
@@ -248,6 +262,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.shortcut_switch = self._switch_item(opts, 'Linux shortcuts', self.linux_shortcuts_var, self._shortcut_mode_changed)
         self.remember_switch = self._switch_item(opts, 'Remember Mac', self.remember_credentials_var, None)
         self.capture_switch = self._switch_item(opts, 'Capture keyboard & mouse', self.capture_input_var, self._capture_input_changed)
+        self.reconnect_switch = self._switch_item(opts, 'Auto reconnect', self.auto_reconnect_var, self._auto_reconnect_changed)
         opts.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
         push = Gtk.Button(label='Clipboard → Mac')
         push.connect('clicked', lambda *_: self.push_clipboard())
@@ -255,6 +270,21 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         pull = Gtk.Button(label='Mac → Clipboard')
         pull.connect('clicked', lambda *_: self.pull_clipboard())
         opts.append(pull)
+
+        video_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.connection_card.append(video_row)
+        quality_label = Gtk.Label(label='Video quality', xalign=0)
+        quality_label.set_width_chars(12)
+        video_row.append(quality_label)
+        self.quality_model = Gtk.StringList.new(list(VIDEO_QUALITY_PRESETS))
+        self.quality_dropdown = Gtk.DropDown(model=self.quality_model)
+        self.quality_dropdown.set_selected(list(VIDEO_QUALITY_PRESETS).index('Balanced'))
+        self.quality_dropdown.connect('notify::selected', self._quality_dropdown_changed)
+        video_row.append(self.quality_dropdown)
+        self.quality_description = Gtk.Label(label=self._quality_description_text('Balanced'), xalign=0)
+        self.quality_description.add_css_class('zmb-muted')
+        self.quality_description.set_hexpand(True)
+        video_row.append(self.quality_description)
 
         status_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         page.append(status_box)
@@ -264,7 +294,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.status_label.add_css_class('zmb-status')
         self.status_label.set_hexpand(True)
         status_box.append(self.status_label)
-        hint = Gtk.Label(label='Double-click the desktop for full screen · Alt+Esc to exit', xalign=1)
+        hint = Gtk.Label(label='Double-click desktop to enter full screen · Alt+Esc exits', xalign=1)
         hint.add_css_class('zmb-muted')
         status_box.append(hint)
 
@@ -321,6 +351,10 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         return sw
 
     def _build_desktop_page(self) -> Gtk.Widget:
+        overlay = Gtk.Overlay()
+        overlay.set_hexpand(True)
+        overlay.set_vexpand(True)
+
         frame = Gtk.Frame()
         frame.add_css_class('zmb-remote')
         frame.set_hexpand(True)
@@ -332,7 +366,34 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.picture.set_content_fit(Gtk.ContentFit.CONTAIN)
         self.picture.set_focusable(True)
         frame.set_child(self.picture)
-        return frame
+        overlay.set_child(frame)
+
+        self.fullscreen_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.fullscreen_bar.add_css_class('zmb-fullscreen-bar')
+        self.fullscreen_bar.set_halign(Gtk.Align.FILL)
+        self.fullscreen_bar.set_valign(Gtk.Align.START)
+        self.fullscreen_bar.set_visible(False)
+        self.fs_status_icon = Gtk.Image.new_from_icon_name('network-offline-symbolic')
+        self.fullscreen_bar.append(self.fs_status_icon)
+        self.fs_status_label = Gtk.Label(label='Disconnected', xalign=0)
+        self.fs_status_label.set_hexpand(True)
+        self.fullscreen_bar.append(self.fs_status_label)
+        self.fs_quality_label = Gtk.Label(label='Balanced', xalign=0)
+        self.fullscreen_bar.append(self.fs_quality_label)
+        self.fs_input_label = Gtk.Label(label='Input: view only', xalign=0)
+        self.fullscreen_bar.append(self.fs_input_label)
+        exit_hint = Gtk.Label(label='Double-click this bar or press Alt+Esc to exit', xalign=1)
+        exit_hint.add_css_class('zmb-muted')
+        self.fullscreen_bar.append(exit_hint)
+        exit_btn = Gtk.Button(label='Exit Full Screen')
+        exit_btn.connect('clicked', lambda *_: self._exit_fullscreen())
+        self.fullscreen_bar.append(exit_btn)
+        overlay.add_overlay(self.fullscreen_bar)
+
+        bar_click = Gtk.GestureClick(button=1)
+        bar_click.connect('pressed', self._fullscreen_bar_pressed)
+        self.fullscreen_bar.add_controller(bar_click)
+        return overlay
 
     def _build_files_page(self) -> Gtk.Widget:
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -434,7 +495,71 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         if hasattr(self, 'status_label'):
             self.status_label.set_text(str(value))
             connected = str(value).startswith('Connected')
-            self.status_icon.set_from_icon_name('network-transmit-receive-symbolic' if connected else 'network-offline-symbolic')
+            icon = 'network-transmit-receive-symbolic' if connected else 'network-offline-symbolic'
+            self.status_icon.set_from_icon_name(icon)
+            if hasattr(self, 'fs_status_icon'):
+                self.fs_status_icon.set_from_icon_name(icon)
+            if hasattr(self, 'fs_status_label'):
+                self.fs_status_label.set_text(str(value))
+            self._refresh_fullscreen_bar()
+
+    @staticmethod
+    def _quality_description_text(name: str) -> str:
+        profile = VIDEO_QUALITY_PRESETS.get(name, VIDEO_QUALITY_PRESETS['Balanced'])
+        return f"up to {profile['max_width']} px · {profile['fps']} FPS · {profile['bitrate'] // 1_000_000} Mbit/s"
+
+    def _quality_dropdown_changed(self, _widget, _pspec) -> None:
+        idx = self.quality_dropdown.get_selected()
+        names = list(VIDEO_QUALITY_PRESETS)
+        if idx == Gtk.INVALID_LIST_POSITION or idx >= len(names):
+            return
+        name = names[idx]
+        self.quality_var.set(name)
+        self.quality_description.set_text(self._quality_description_text(name))
+        self._refresh_fullscreen_bar()
+        self._log('INFO', f'Video quality selected: {name} ({self._quality_description_text(name)}).')
+        if self.connected:
+            self.status_var.set(f'Connected — {name} quality selected; reconnect to apply it')
+
+    def _refresh_fullscreen_bar(self) -> None:
+        if hasattr(self, 'fs_quality_label'):
+            self.fs_quality_label.set_text(f'Quality: {self.quality_var.get()}')
+        if hasattr(self, 'fs_input_label'):
+            self.fs_input_label.set_text(
+                'Input: keyboard & mouse' if self.capture_input_var.get() else 'Input: view only'
+            )
+
+    def _auto_reconnect_changed(self) -> None:
+        enabled = bool(self.auto_reconnect_var.get())
+        self._log('INFO', f'Auto reconnect {"enabled" if enabled else "disabled"}.')
+        if not enabled and self._reconnect_source:
+            try:
+                GLib.source_remove(self._reconnect_source)
+            except Exception:
+                pass
+            self._reconnect_source = 0
+            self._reconnect_attempt = 0
+
+    def _schedule_auto_reconnect(self, reason: str) -> None:
+        if not self.auto_reconnect_var.get() or self.disconnect_requested or self._reconnect_source:
+            return
+        self._reconnect_attempt += 1
+        delay = min(10.0, 1.0 * (2 ** min(self._reconnect_attempt - 1, 4)))
+        self._last_disconnect_reason = reason
+        self.status_var.set(f'Disconnected — reconnecting in {delay:g}s')
+        self._log('INFO', f'Unexpected disconnect ({reason}); auto reconnect attempt {self._reconnect_attempt} in {delay:g}s.')
+        self._reconnect_source = GLib.timeout_add(int(delay * 1000), self._run_auto_reconnect)
+
+    def _run_auto_reconnect(self):
+        self._reconnect_source = 0
+        if not self.auto_reconnect_var.get() or self.disconnect_requested or self.connected:
+            return GLib.SOURCE_REMOVE
+        if self.net_thread is not None and self.net_thread.is_alive():
+            self._reconnect_source = GLib.timeout_add(300, self._run_auto_reconnect)
+            return GLib.SOURCE_REMOVE
+        self._log('INFO', f'Auto reconnect attempt {self._reconnect_attempt} starting.')
+        self.connect_remote()
+        return GLib.SOURCE_REMOVE
 
     def _dialog(self, heading: str, body: str, *, destructive=False) -> None:
         dlg = Adw.MessageDialog(transient_for=self, heading=heading, body=body)
@@ -501,6 +626,12 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
     def connect_remote(self) -> None:
         if self.connected or (self.net_thread is not None and self.net_thread.is_alive()):
             return
+        if self._reconnect_source:
+            try:
+                GLib.source_remove(self._reconnect_source)
+            except Exception:
+                pass
+            self._reconnect_source = 0
         try:
             ip, port, _password, expected_fp = self._connection_params()
         except Exception as exc:
@@ -521,6 +652,13 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.net_thread.start()
 
     def disconnect_remote(self) -> None:
+        if self._reconnect_source:
+            try:
+                GLib.source_remove(self._reconnect_source)
+            except Exception:
+                pass
+            self._reconnect_source = 0
+        self._reconnect_attempt = 0
         if self.fullscreen_active:
             self._exit_fullscreen()
         self._release_remote_input_state()
@@ -531,15 +669,31 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self._log('INFO', 'Disconnect requested by user.')
 
     def _restart_after_update(self) -> None:
-        pid = os.getpid()
-        command = f'while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; exec /usr/bin/zorinmacbridge'
+        # A normal GTK application quit can be delayed by tray/backend teardown,
+        # which made GNOME show a misleading "not responding" dialog after a
+        # successful package update. For this explicit restart action, launch a
+        # detached helper first and then terminate the old process deterministically.
+        exe = '/usr/bin/zorinmacbridge'
+        command = 'sleep 0.8; exec "$1"'
         subprocess.Popen(
-            ['/bin/sh', '-c', command],
+            ['/bin/sh', '-c', command, 'zorinmacbridge-restart', exe],
             start_new_session=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            close_fds=True,
         )
-        self.on_close()
+        try:
+            self.disconnect_remote()
+        except Exception:
+            pass
+        try:
+            self.set_visible(False)
+        except Exception:
+            pass
+        self._log('INFO', 'Restarting after update using a detached helper.')
+        # Do not wait for GTK/pystray shutdown here; the user explicitly chose
+        # Restart now and all persistent state has already been written.
+        os._exit(0)
 
     # ---------- Queue / video ----------
 
@@ -565,14 +719,18 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                     self._append_log(item[1])
                 elif kind == 'connected':
                     self.connected = True
+                    self._reconnect_attempt = 0
                     self.status_var.set('Connected — view only; enable Capture keyboard & mouse to control the Mac')
                     self._log('INFO', 'Desktop session connected.')
+                    self._refresh_fullscreen_bar()
                     self.refresh_files()
                 elif kind == 'disconnected':
                     self.connected = False
                     reason = item[1] if len(item) > 1 else 'Session ended'
                     self.status_var.set('Disconnected' if reason == 'Disconnected by user' else f'Disconnected — {reason}')
                     self._log('INFO', f'Desktop session disconnected: {reason}')
+                    if reason != 'Disconnected by user' and not self.disconnect_requested:
+                        self._schedule_auto_reconnect(reason)
                 elif kind == 'error':
                     self.status_var.set(f'Error: {item[1]}')
                     self._log('ERROR', item[1])
@@ -667,7 +825,10 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
 
     def _gtk_pressed(self, gesture, n_press, x, y):
         button = int(gesture.get_current_button())
-        if button == 1 and n_press == 2:
+        # Double-click on the remote image only ENTERS full screen. Once full
+        # screen, double-clicks belong to the remote Mac; exiting is intentionally
+        # moved to the top status bar (or Alt+Esc) so remote double-click remains usable.
+        if button == 1 and n_press == 2 and not self.fullscreen_active:
             self._toggle_fullscreen()
             return
         if not self.capture_input_var.get():
@@ -756,6 +917,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
 
     def _capture_input_changed(self) -> None:
         enabled = bool(self.capture_input_var.get())
+        self._refresh_fullscreen_bar()
         if not enabled:
             self._release_remote_input_state()
             if self.connected:
@@ -776,22 +938,29 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
 
     def _toggle_fullscreen(self, event=None):
         if self.fullscreen_active:
-            return self._exit_fullscreen(event)
+            return True
         self._release_remote_input_state()
         self.fullscreen_active = True
         self.stack.set_visible_child_name('desktop')
         self.header.set_visible(False)
         self.connection_card.set_visible(False)
         self.stack_switcher.set_visible(False)
+        self.fullscreen_bar.set_visible(True)
+        self._refresh_fullscreen_bar()
         self.fullscreen()
         self.picture.grab_focus()
-        self._log('INFO', 'Entered full-screen desktop view. Press Alt+Esc to exit.')
+        self._log('INFO', 'Entered full-screen desktop view. Double-click the top bar or press Alt+Esc to exit.')
         return True
+
+    def _fullscreen_bar_pressed(self, _gesture, n_press, _x, _y):
+        if self.fullscreen_active and n_press == 2:
+            self._exit_fullscreen()
 
     def _exit_fullscreen(self, event=None):
         if not self.fullscreen_active:
             return False
         self._release_remote_input_state()
+        self.fullscreen_bar.set_visible(False)
         self.unfullscreen()
         self.header.set_visible(True)
         self.connection_card.set_visible(True)

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.3
+
+- Fixed H.264 sessions disconnecting when the Mac desktop was static: a video socket read timeout is now treated as an idle interval instead of a fatal error.
+- Enabled TCP keepalive so genuinely dead LAN peers can still be detected without confusing a quiet ScreenCaptureKit stream with a disconnect.
+- Added client-selectable video quality presets: **Low**, **Balanced**, **High**, and **Ultra**. The selected profile is sent in the authenticated video-channel request and is clamped to safe limits by the Mac server.
+- Added **Auto reconnect** (enabled by default) with bounded exponential backoff after unexpected control-session disconnects. Manual Disconnect never auto-reconnects.
+- Reworked full-screen behavior: double-clicking the remote image enters full screen, but remote-image double-clicks remain available while full screen. Exit is now on a persistent top status bar via **double-click the bar**, **Exit Full Screen**, or **Alt+Esc**.
+- Added full-screen status information for connection state, selected quality, input-capture state, and the exit hint.
+
+## 0.5.2
+
+- Added explicit **Request Screen Recording Access** and **Request Mouse/Keyboard Access** controls to the macOS server GUI.
+- Permission prompts can now be initiated only by a local user action on the Mac; remote `Connect` still never triggers a macOS privacy prompt.
+- Added live Screen Recording and mouse/keyboard permission status plus a manual refresh button in the server window.
+- Use Core Graphics `CGRequestScreenCaptureAccess()` for Screen Recording and `CGRequestPostEventAccess()` for synthetic mouse/keyboard event permission.
+- Fixed Linux post-update restart so **Restart now** launches a detached replacement process and terminates the old GTK process deterministically instead of leaving GNOME with a misleading “not responding” dialog.
+- Clarified that ad-hoc-signed updates can lose TCC grants because macOS treats each changed build as a different code identity; Developer ID signing is still required for reliable permission continuity across releases.
+
 ## 0.5.1
 
 - Prevent a remote client connection from triggering the macOS Screen Recording permission prompt.

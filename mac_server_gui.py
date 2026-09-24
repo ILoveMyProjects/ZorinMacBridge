@@ -13,6 +13,7 @@ from tkinter import filedialog, messagebox, ttk
 from mac_server import (
     NativeStreamerLibrary,
     DEFAULT_SHARE, accessibility_permission_status, ensure_certificate, is_lan_ip,
+    permission_api_self_test, request_accessibility_permission, request_screen_capture_permission,
     screen_capture_permission_status, serve,
 )
 from discovery import LanAdvertiser
@@ -59,6 +60,8 @@ class ServerGUI:
         self.saved_password = load_server_password_verifier()
         self.status_var = tk.StringVar(value='Stopped')
         self.fp_var = tk.StringVar(value='')
+        self.screen_permission_var = tk.StringVar(value='Screen Recording: checking…')
+        self.input_permission_var = tk.StringVar(value='Mouse/keyboard control: checking…')
         self.stop_event: threading.Event | None = None
         self.thread: threading.Thread | None = None
         self.advertiser: LanAdvertiser | None = None
@@ -66,6 +69,7 @@ class ServerGUI:
 
         self._build(ips)
         self._build_menu()
+        self.root.after(100, self.refresh_permission_status)
         self.tray = TrayController(
             self.root,
             'ZorinMacBridge Server',
@@ -263,10 +267,16 @@ class ServerGUI:
             variable=self.auto_start_var, command=self._startup_settings_changed,
         ).grid(row=11, column=0, columnspan=3, sticky='w', pady=(2, 6))
 
-        perms = ttk.Frame(outer)
-        perms.grid(row=12, column=0, columnspan=3, sticky='w', pady=(2, 6))
-        ttk.Button(perms, text='Screen Recording settings', command=self.open_screen_settings).pack(side='left')
-        ttk.Button(perms, text='Accessibility settings', command=self.open_accessibility_settings).pack(side='left', padx=(8, 0))
+        perms = ttk.LabelFrame(outer, text='macOS permissions', padding=8)
+        perms.grid(row=12, column=0, columnspan=3, sticky='ew', pady=(2, 6))
+        ttk.Label(perms, textvariable=self.screen_permission_var).grid(row=0, column=0, sticky='w')
+        ttk.Button(perms, text='Request Screen Recording Access', command=self.request_screen_recording_access).grid(row=0, column=1, padx=(12, 0), sticky='e')
+        ttk.Button(perms, text='Settings', command=self.open_screen_settings).grid(row=0, column=2, padx=(8, 0), sticky='e')
+        ttk.Label(perms, textvariable=self.input_permission_var).grid(row=1, column=0, sticky='w', pady=(6, 0))
+        ttk.Button(perms, text='Request Mouse/Keyboard Access', command=self.request_input_access).grid(row=1, column=1, padx=(12, 0), pady=(6, 0), sticky='e')
+        ttk.Button(perms, text='Settings', command=self.open_accessibility_settings).grid(row=1, column=2, padx=(8, 0), pady=(6, 0), sticky='e')
+        ttk.Button(perms, text='Refresh permission status', command=self.refresh_permission_status).grid(row=2, column=0, columnspan=3, sticky='w', pady=(8, 0))
+        perms.columnconfigure(0, weight=1)
 
         buttons = ttk.Frame(outer)
         buttons.grid(row=13, column=0, columnspan=3, sticky='ew', pady=(8, 8))
@@ -331,6 +341,44 @@ class ServerGUI:
                 pass
             self._log('Launch-at-login disabled.')
 
+    def refresh_permission_status(self) -> None:
+        screen = screen_capture_permission_status()
+        input_access = accessibility_permission_status()
+        screen_text = 'Granted' if screen is True else ('Not granted' if screen is False else 'Unknown')
+        input_text = 'Granted' if input_access is True else ('Not granted' if input_access is False else 'Unknown')
+        self.screen_permission_var.set(f'Screen Recording: {screen_text}')
+        self.input_permission_var.set(f'Mouse/keyboard control: {input_text}')
+
+    def request_screen_recording_access(self) -> None:
+        if screen_capture_permission_status() is True:
+            self._log('Screen Recording permission is already granted to this running build.')
+            self.refresh_permission_status()
+            return
+        self._log('Local user requested the macOS Screen Recording permission prompt.')
+        result = request_screen_capture_permission()
+        if result is None:
+            self._log('CGRequestScreenCaptureAccess is unavailable; opening Screen Recording settings instead.')
+            self.open_screen_settings()
+        else:
+            self._log(f'CGRequestScreenCaptureAccess returned {result}. macOS may require the app to be fully quit and reopened after approval.')
+        self.root.after(700, self.refresh_permission_status)
+
+    def request_input_access(self) -> None:
+        if accessibility_permission_status() is True:
+            self._log('Mouse/keyboard control permission is already granted to this running build.')
+            self.refresh_permission_status()
+            return
+        self._log('Local user requested macOS permission for posting mouse/keyboard events.')
+        result = request_accessibility_permission()
+        if result is None:
+            self._log('CGRequestPostEventAccess is unavailable; opening Accessibility settings instead.')
+            self.open_accessibility_settings()
+        else:
+            self._log(f'CGRequestPostEventAccess returned {result}. If macOS shows the Accessibility pane, enable ZorinMacBridge Server there.')
+            if result is False:
+                self.root.after(350, self.open_accessibility_settings)
+        self.root.after(900, self.refresh_permission_status)
+
     def open_screen_settings(self) -> None:
         subprocess.Popen(['/usr/bin/open', 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'])
 
@@ -385,6 +433,7 @@ class ServerGUI:
         # Never request Screen Recording automatically from Start Server or Connect.
         # The H.264 video channel checks this same-process preflight before it
         # touches ScreenCaptureKit, so a remote connection cannot summon a TCC prompt.
+        self.refresh_permission_status()
         screen_permission = screen_capture_permission_status()
         if screen_permission is True:
             self._log('Screen Recording preflight: granted')
@@ -464,6 +513,14 @@ class ServerGUI:
 
 
 def main() -> None:
+    if '--self-test-permission-apis' in sys.argv:
+        try:
+            names = permission_api_self_test()
+            print('SELFTEST OK: macOS permission APIs resolved: ' + ', '.join(names))
+            raise SystemExit(0)
+        except Exception as exc:
+            print(f'SELFTEST FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)
+            raise SystemExit(1)
     if '--self-test-streamer-load' in sys.argv:
         try:
             native = NativeStreamerLibrary()

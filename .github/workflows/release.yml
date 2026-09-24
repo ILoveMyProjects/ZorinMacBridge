@@ -152,6 +152,7 @@ jobs:
           scripts/sign-macos-app.sh 'dist/ZorinMacBridge Server.app'
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-streamer-load
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-update-tls
+          'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-permission-apis
           mkdir -p release build/dmgroot
           cp -R 'dist/ZorinMacBridge Server.app' build/dmgroot/
           ln -s /Applications build/dmgroot/Applications
@@ -227,6 +228,7 @@ jobs:
           scripts/sign-macos-app.sh 'dist/ZorinMacBridge Server.app'
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-streamer-load
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-update-tls
+          'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-permission-apis
           mkdir -p release build/dmgroot
           cp -R 'dist/ZorinMacBridge Server.app' build/dmgroot/
           ln -s /Applications build/dmgroot/Applications

@@ -68,7 +68,18 @@ The video path uses:
 - **PyAV/FFmpeg** for H.264 decoding on Linux;
 - a dedicated TLS video connection so slow video rendering cannot block mouse/keyboard traffic.
 
-Default video settings are currently **30 fps**, up to **2560 px wide**, with an **8 Mbit/s H.264 target bitrate**.
+A completely static macOS desktop can legitimately produce no new ScreenCaptureKit/H.264 data for a while. The Linux client therefore treats video socket read timeouts as idle intervals rather than disconnects. TCP keepalive and the control channel are used to detect real peer loss.
+
+The Linux client exposes four per-connection quality presets:
+
+| Quality | Max width | FPS | Target bitrate |
+|---|---:|---:|---:|
+| Low | 1280 px | 15 | 3 Mbit/s |
+| Balanced | 1920 px | 30 | 8 Mbit/s |
+| High | 2560 px | 30 | 14 Mbit/s |
+| Ultra | 3840 px | 60 | 25 Mbit/s |
+
+The Mac never upscales the captured display; these are upper bounds. The server clamps client requests to sane limits before starting VideoToolbox.
 
 ## Normal setup
 
@@ -76,8 +87,8 @@ Default video settings are currently **30 fps**, up to **2560 px wide**, with an
 
 1. Install **ZorinMacBridge Server**.
 2. Open it locally once.
-3. Grant **Screen Recording** to **ZorinMacBridge Server** when macOS asks. v0.4.3 keeps capture inside that same app process, so connecting a client does not launch a second capture executable that needs separate TCC approval.
-4. Grant **Accessibility** under **System Settings → Privacy & Security → Accessibility** so remote mouse and keyboard events are allowed.
+3. In the macOS server window, use **Request Screen Recording Access** if the status says *Not granted*, then approve **ZorinMacBridge Server** in macOS. v0.4.3+ keeps capture inside that same app process.
+4. Use **Request Mouse/Keyboard Access** if input control is not granted. The app requests permission for synthetic Core Graphics events and opens the relevant macOS privacy pane when needed.
 5. Enter a session password of at least 12 characters.
 6. Keep **Remember password verifier on this Mac** enabled.
 7. Click **Start server**.
@@ -118,7 +129,7 @@ Closing ZorinMacBridge still stops the server. Disabling **Launch at login** rem
 
 ## Stable macOS permissions
 
-macOS controls Screen Recording and Accessibility through its privacy/TCC system. ZorinMacBridge cannot and should not silently grant itself those permissions.
+macOS controls Screen Recording and mouse/keyboard control through its privacy/TCC system. ZorinMacBridge cannot silently grant itself those permissions. In v0.5.2+, the server window has explicit **Request Screen Recording Access** and **Request Mouse/Keyboard Access** buttons. Those APIs are invoked only by a local click on the Mac; a remote connection never triggers a privacy prompt.
 
 For permissions to survive application updates reliably, macOS needs to recognize the new build as the same application. Public ad-hoc signed test builds do not provide the same stable code identity as a properly Developer-ID-signed release.
 
@@ -146,16 +157,26 @@ Until releases use a stable signing identity, macOS may treat a newly downloaded
 - scrolling and keyboard input when input capture is enabled;
 - Linux-friendly shortcut mapping;
 - bidirectional text clipboard;
-- file and complete-folder transfer.
+- file and complete-folder transfer;
+- client-selectable H.264 quality presets;
+- optional automatic reconnect after unexpected LAN/session drops.
 
 The client starts in **view-only mode**. Enable **Capture keyboard & mouse** when you want local input to control the Mac. Turning it off immediately releases any keys/modifiers/buttons the client believes are held down.
 
 ### Full-screen remote desktop
 
 - **Double-click** the remote desktop image to enter full-screen mode.
-- Press **Alt+Esc** to leave full-screen mode.
+- While full-screen, a top status bar shows connection state, selected video quality, input-capture state, and the exit instructions.
+- Leave full-screen with **Alt+Esc**, the **Exit Full Screen** button, or by **double-clicking the top status bar**.
+- Double-clicking the remote image while already full-screen is sent to the Mac instead of exiting, so normal remote double-click actions remain usable.
 - **Alt+Esc is reserved locally** while full-screen is active and is not sent to the Mac.
 - Entering or leaving full-screen releases held remote input state to avoid a stuck Alt/Ctrl/Command key.
+
+### Video quality and reconnect
+
+Use **Video quality** in the connection card to choose Low, Balanced, High, or Ultra. The selected profile applies to the next video connection/reconnection.
+
+**Auto reconnect** is enabled by default. If the control session ends unexpectedly, the client retries with bounded backoff. Choosing **Disconnect** manually cancels pending reconnect attempts.
 
 ### Keyboard mapping
 
@@ -232,6 +253,8 @@ Choose **Help → Check for updates** manually. The app then:
 5. installs the update;
 6. offers to restart the application.
 
+On Linux, **Restart now** uses a detached restart helper and terminates the old GTK process directly after the verified package is installed. This avoids a stale pre-update GTK process being reported by GNOME as “not responding”.
+
 You can also re-run the one-command installer.
 
 ## Security model
@@ -307,7 +330,7 @@ The Linux client includes a **Logs** tab. Connection logs show TCP, TLS, fingerp
 
 If macOS asks for Screen Recording **when you press Connect**, make sure you are on v0.4.3 or newer. v0.4.0-v0.4.2 launched a separate native capture executable, which could be treated as separate TCC-responsible code. v0.4.3 runs ScreenCaptureKit in the main server process instead.
 
-Because GitHub builds are currently ad-hoc signed, installing a *new release* can still require a one-time Screen Recording approval for that new build. Stable permission continuity across releases requires stable Developer ID signing.
+Because unsigned/ad-hoc-signed test releases do not have a stable macOS code identity, installing a *new release* can require Screen Recording and mouse/keyboard approval again even if the previous version was already enabled. In v0.5.2+, request the permissions from the local server window. Stable permission continuity across releases requires stable Developer ID signing.
 
 If video works but mouse/keyboard does not, check the Mac server log for:
 

@@ -147,9 +147,31 @@ def screen_capture_permission_status() -> bool | None:
         return None
 
 
+def request_screen_capture_permission() -> bool | None:
+    # LOCAL-ONLY helper for the macOS GUI. This is never called by a remote
+    # connection. Apple documents CGRequestScreenCaptureAccess() as the API
+    # that requests Screen Recording authorization for the current process.
+    try:
+        cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+        fn = getattr(cg, 'CGRequestScreenCaptureAccess')
+        fn.argtypes = []
+        fn.restype = ctypes.c_bool
+        return bool(fn())
+    except Exception:
+        return None
+
 
 def accessibility_permission_status() -> bool | None:
-    # Return whether this process is trusted for Accessibility event posting.
+    # Prefer CoreGraphics' event-posting permission because remote control is
+    # implemented with CGEventPost. Fall back to AX trust on older systems.
+    try:
+        cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+        fn = getattr(cg, 'CGPreflightPostEventAccess')
+        fn.argtypes = []
+        fn.restype = ctypes.c_bool
+        return bool(fn())
+    except Exception:
+        pass
     try:
         app = ctypes.CDLL('/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices')
         fn = getattr(app, 'AXIsProcessTrusted')
@@ -158,6 +180,37 @@ def accessibility_permission_status() -> bool | None:
         return bool(fn())
     except Exception:
         return None
+
+
+def request_accessibility_permission() -> bool | None:
+    # LOCAL-ONLY helper for mouse/keyboard control. CGRequestPostEventAccess()
+    # requests permission for this process to post synthetic input events.
+    # It is deliberately never invoked from a remote connection.
+    try:
+        cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+        fn = getattr(cg, 'CGRequestPostEventAccess')
+        fn.argtypes = []
+        fn.restype = ctypes.c_bool
+        return bool(fn())
+    except Exception:
+        return None
+
+
+def permission_api_self_test() -> tuple[str, ...]:
+    """Resolve, but do not call, the macOS privacy APIs used by the GUI.
+
+    This is safe for CI because it cannot trigger a TCC prompt.
+    """
+    cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+    required = (
+        'CGPreflightScreenCaptureAccess',
+        'CGRequestScreenCaptureAccess',
+        'CGPreflightPostEventAccess',
+        'CGRequestPostEventAccess',
+    )
+    for name in required:
+        getattr(cg, name)
+    return required
 
 
 class CGPoint(ctypes.Structure):
@@ -689,6 +742,34 @@ def verify_session_password(expected, supplied: str) -> bool:
             return False
     return hmac.compare_digest(str(supplied), str(expected))
 
+def video_options_from_auth(auth: dict, defaults) -> tuple[float, int, int, str]:
+    """Return clamped per-client video preferences from the authenticated request.
+
+    The client may request a preset, but the server always clamps untrusted values
+    to sane LAN streaming limits. Older clients simply receive server defaults.
+    """
+    request = auth.get('video', {})
+    if not isinstance(request, dict):
+        request = {}
+    try:
+        fps = float(request.get('fps', defaults.fps))
+    except (TypeError, ValueError):
+        fps = float(defaults.fps)
+    try:
+        max_width = int(request.get('max_width', defaults.max_width))
+    except (TypeError, ValueError):
+        max_width = int(defaults.max_width)
+    try:
+        bitrate = int(request.get('bitrate', defaults.bitrate))
+    except (TypeError, ValueError):
+        bitrate = int(defaults.bitrate)
+    fps = max(5.0, min(60.0, fps))
+    max_width = max(960, min(3840, max_width))
+    bitrate = max(1_000_000, min(40_000_000, bitrate))
+    quality = str(auth.get('quality', 'Custom')).strip()[:32] or 'Custom'
+    return fps, max_width, bitrate, quality
+
+
 def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: str, share: Path, args, log=print) -> None:
     peer_ip = addr[0]
     if not is_lan_ip(peer_ip):
@@ -698,6 +779,7 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
     sock = None
     try:
         log(f'[client {peer_ip}] TCP connection accepted')
+        raw.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         raw.settimeout(10)
         sock = context.wrap_socket(raw, server_side=True)
         log(f'[client {peer_ip}] TLS handshake completed')
@@ -723,7 +805,12 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
         if role == 'desktop':
             control_session(sock, log=log)
         elif role == 'video':
-            video_session(sock, args.fps, args.max_width, args.bitrate, log=log)
+            fps, max_width, bitrate, quality = video_options_from_auth(auth, args)
+            log(
+                f'[video] client profile={quality!r} max_width={max_width} '
+                f'fps={fps:g} bitrate={bitrate}'
+            )
+            video_session(sock, fps, max_width, bitrate, log=log)
         else:
             file_session(sock, share)
     except (ssl.SSLError, ConnectionError, OSError) as exc:

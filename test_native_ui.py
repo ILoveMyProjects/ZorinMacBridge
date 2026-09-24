@@ -15,8 +15,18 @@ assert "folder-symbolic" in client
 assert "Gtk.FileDialog" in client
 assert "Double-click" in (root / 'README.md').read_text(encoding='utf-8')
 assert 'def open_shared_folder(' in server
+assert 'Request Screen Recording Access' in server
+assert 'Request Mouse/Keyboard Access' in server
 assert "['/usr/bin/open', str(path)]" in server
 assert "accelerator='⌘⇧O'" in server
 assert 'gir1.2-gtk-4.0' in release and 'gir1.2-adw-1' in release
 assert 'linux_client_gtk.py' in release
+assert 'os._exit(0)' in client
+
+assert 'Auto reconnect' in client
+assert 'Video quality' in client
+assert 'Double-click this bar or press Alt+Esc to exit' in client
+assert 'def _schedule_auto_reconnect' in client
+assert 'def _fullscreen_bar_pressed' in client
+assert 'and not self.fullscreen_active' in client
 print('native UI static tests: OK')

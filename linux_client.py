@@ -62,6 +62,13 @@ SPECIAL_KEYS = {
     'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12', 'space',
 }
 
+VIDEO_QUALITY_PRESETS = {
+    'Low': {'fps': 15, 'max_width': 1280, 'bitrate': 3_000_000},
+    'Balanced': {'fps': 30, 'max_width': 1920, 'bitrate': 8_000_000},
+    'High': {'fps': 30, 'max_width': 2560, 'bitrate': 14_000_000},
+    'Ultra': {'fps': 60, 'max_width': 3840, 'bitrate': 25_000_000},
+}
+
 
 def is_lan_ip(text: str) -> bool:
     try:
@@ -117,6 +124,7 @@ class ClientApp:
         self.selected_server_id = ''
         self.selected_server_name = ''
         self.remember_credentials_var = tk.BooleanVar(value=True)
+        self.quality_var = tk.StringVar(value='Balanced')
         self.remember_credentials_active = True
 
         self.outgoing: queue.Queue[bytes] = queue.Queue(maxsize=1000)
@@ -455,12 +463,22 @@ class ClientApp:
             raise ValueError('Paste the full server SHA-256 fingerprint (64 hex characters; colons optional).')
         return ip, port, password, expected_fp
 
-    def _secure_connect(self, role: str) -> ssl.SSLSocket:
+    def _secure_connect(self, role: str, auth_extra: dict | None = None) -> ssl.SSLSocket:
         ip, port, password, expected_fp = self._connection_params()
         self._log('INFO', f'Opening {role} connection to {ip}:{port}')
         parsed_ip = ipaddress.ip_address(ip.split('%', 1)[0])
         family = socket.AF_INET6 if parsed_ip.version == 6 else socket.AF_INET
         raw = socket.socket(family, socket.SOCK_STREAM)
+        raw.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        # Detect a genuinely dead LAN peer without treating a static video image
+        # as a failure. These options are Linux-specific and best-effort.
+        for opt_name, value in (('TCP_KEEPIDLE', 15), ('TCP_KEEPINTVL', 5), ('TCP_KEEPCNT', 3)):
+            opt = getattr(socket, opt_name, None)
+            if opt is not None:
+                try:
+                    raw.setsockopt(socket.IPPROTO_TCP, opt, value)
+                except OSError:
+                    pass
         raw.settimeout(8)
         self._log('DEBUG', 'Connecting TCP socket…')
         raw.connect((ip, port))
@@ -481,8 +499,11 @@ class ClientApp:
                 f'TLS fingerprint DOES NOT MATCH.\nExpected: {format_fp(expected_fp)}\nReceived: {format_fp(actual_fp)}'
             )
         self._log('INFO', 'TLS fingerprint verified.')
+        auth = {'password': password, 'role': role}
+        if auth_extra:
+            auth.update(auth_extra)
         self._log('DEBUG', f'Sending authentication request for role={role!r}.')
-        sock.sendall(pack_json(AUTH, {'password': password, 'role': role}))
+        sock.sendall(pack_json(AUTH, auth))
         kind, payload = recv_one_blocking(sock)
         if kind == AUTH_FAIL:
             sock.close()
@@ -585,6 +606,9 @@ class ClientApp:
                     sock.close()
             except Exception:
                 pass
+            # A control-channel failure owns the lifetime of the whole session.
+            # Stop video/file helpers; an optional UI auto-reconnect can create a fresh session.
+            self.stop_event.set()
             if self.disconnect_requested and not disconnect_reason:
                 disconnect_reason = 'Disconnected by user'
             elif not disconnect_reason:
@@ -604,19 +628,43 @@ class ClientApp:
             except queue.Full:
                 pass
 
+    def _video_preferences(self) -> tuple[str, dict]:
+        var = getattr(self, 'quality_var', None)
+        try:
+            name = str(var.get()) if var is not None else 'Balanced'
+        except Exception:
+            name = 'Balanced'
+        if name not in VIDEO_QUALITY_PRESETS:
+            name = 'Balanced'
+        return name, dict(VIDEO_QUALITY_PRESETS[name])
+
     def _video_loop(self) -> None:
         sock = None
         decoder = None
         frames = 0
         try:
-            self._log('INFO', 'Opening dedicated H.264 video connection.')
-            sock = self._secure_connect('video')
+            profile_name, profile = self._video_preferences()
+            self._log(
+                'INFO',
+                f'Opening dedicated H.264 video connection ({profile_name}: '
+                f'{profile["max_width"]}px, {profile["fps"]} FPS, {profile["bitrate"] // 1_000_000} Mbit/s).',
+            )
+            sock = self._secure_connect('video', {
+                'video': profile,
+                'quality': profile_name,
+            })
+            # ScreenCaptureKit may legitimately emit no frames while the display is
+            # completely unchanged. A read timeout is therefore an idle tick, NOT a
+            # broken session. TCP keepalive/control-channel EOF detect real failures.
             sock.settimeout(5.0)
             reader = PacketReader()
             decoder = av.CodecContext.create('h264', 'r')
             self._log('INFO', 'H.264 decoder initialized (PyAV/FFmpeg).')
             while not self.stop_event.is_set():
-                data = sock.recv(262144)
+                try:
+                    data = sock.recv(262144)
+                except (socket.timeout, ssl.SSLWantReadError):
+                    continue
                 if not data:
                     raise ConnectionError('Video connection closed by server')
                 for kind, payload in reader.feed(data):
