@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.3
+
+- Fixed the macOS transport-signing validation bug in v0.6.2: `security find-key -a "$KEYCHAIN"` was malformed because `-a` means **application-label**, so the keychain path was being consumed as a label instead of searched as a keychain.
+- Private-key validation now uses `security find-key -t private "$KEYCHAIN"`, which correctly searches the isolated keychain for a private key.
+- PKCS#12 imports now explicitly use aggregate import type (`-t agg -f pkcs12`) so both the certificate and its private key are imported together.
+- Applied the same fixes to the persistent per-Mac local-signing identity, preventing the identical validation/import bug from appearing later during an in-app update.
+- Added regression assertions that fail if either the malformed `find-key -a` check or certificate-only PKCS#12 import returns.
+
 ## 0.6.2
 
 - Fixed the remaining macOS CI transport-signing failure where `codesign` could report `The specified item could not be found in the keychain` even though `security find-identity` saw the imported identity.

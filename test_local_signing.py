@@ -44,12 +44,17 @@ def main() -> None:
     assert 'mapfile' not in transport
     assert 'readarray' not in transport
     assert 'security default-keychain -d user -s "$KEYCHAIN"' in transport
-    assert 'security find-key -a "$KEYCHAIN"' in transport
+    assert 'security find-key -t private "$KEYCHAIN"' in transport
+    assert '-t agg -f pkcs12' in transport
+    assert '-t cert -f pkcs12' not in transport
     assert "_ensure_keychain_searchable(KEYCHAIN_PATH)" in local_signing
     assert 'security import "$TMP/identity.p12"' in transport
     assert ' -A ' in transport or ' -A \\' in transport
     assert '--sign "$IDENTITY"' in transport
     assert "'-A'" in local_signing
+    assert "'-t', 'agg', '-f', 'pkcs12'" in local_signing
+    assert "'-t', 'cert', '-f', 'pkcs12'" not in local_signing
+    assert "'find-key', '-t', 'private', str(KEYCHAIN_PATH)" in local_signing
     assert "--local-sign-app 'build/local-sign-test/ZorinMacBridge Server.app'" in workflow
     assert 'security add-trusted-cert -d -r trustRoot -p codeSign' in workflow
     assert 'setup-stable-signing-linux.sh' not in workflow

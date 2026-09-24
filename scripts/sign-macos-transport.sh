@@ -58,7 +58,7 @@ echo '[transport-sign] importing identity'
 security import "$TMP/identity.p12" \
   -k "$KEYCHAIN" -P "$P12_PASSWORD" -A \
   -T /usr/bin/codesign -T /usr/bin/security \
-  -t cert -f pkcs12 >/dev/null
+  -t agg -f pkcs12 >/dev/null
 
 # A custom keychain can contain a valid identity yet codesign may still return
 # errSecItemNotFound if that keychain is not in the user search list. Put the
@@ -87,8 +87,11 @@ if ! printf '%s\n' "$IDENTITIES" | grep -Fq "\"$IDENTITY\""; then
   printf '%s\n' "$IDENTITIES" >&2
   exit 1
 fi
-if ! security find-key -a "$KEYCHAIN" >/dev/null 2>&1; then
-  echo 'ERROR: transport signing private key was not imported into the isolated keychain.' >&2
+# `find-key -a` is NOT "find all": on macOS `-a` means application-label.
+# Search for a private key explicitly and pass the isolated keychain as the
+# positional keychain argument.
+if ! security find-key -t private "$KEYCHAIN" >/dev/null 2>&1; then
+  echo 'ERROR: transport signing private key is not visible in the isolated keychain.' >&2
   security find-certificate -a -Z -c "$IDENTITY" "$KEYCHAIN" >&2 || true
   exit 1
 fi

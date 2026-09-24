@@ -190,11 +190,11 @@ def _create_identity_files() -> None:
     _run([
         '/usr/bin/security', 'import', str(P12_PATH), '-k', str(KEYCHAIN_PATH),
         '-P', p12_password, '-A', '-T', '/usr/bin/codesign', '-T', '/usr/bin/security',
-        '-t', 'cert', '-f', 'pkcs12',
+        '-t', 'agg', '-f', 'pkcs12',
     ])
     _ensure_keychain_searchable(KEYCHAIN_PATH)
     private_key = _run(
-        ['/usr/bin/security', 'find-key', '-a', str(KEYCHAIN_PATH)],
+        ['/usr/bin/security', 'find-key', '-t', 'private', str(KEYCHAIN_PATH)],
         check=False,
     )
     if private_key.returncode != 0:
