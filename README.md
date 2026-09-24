@@ -283,3 +283,20 @@ The macOS server window also contains a live log. For a healthy desktop connecti
 If Screen Recording permission is missing, **Start server** now stops before listening and asks you to enable **ZorinMacBridge Server** in **System Settings → Privacy & Security → Screen Recording** (the label may be **Screen & System Audio Recording** on some macOS versions). Quit and reopen the app after changing this permission. Accessibility permission is also required for remote mouse and keyboard control.
 
 Use **Copy all** in the Linux Logs tab to copy the client log into a bug report, or **Save…** to write it to a local `.log` file.
+
+
+### macOS Screen Recording permission behavior
+
+`Start server` does **not** request Screen Recording permission automatically. It performs a real one-frame capture test instead. If that succeeds, the server starts. If it fails, the app reports the failure once and you change the permission manually in System Settings.
+
+Current public CI builds are ad-hoc signed. macOS privacy permissions are tied to application code identity, so replacing the app with a differently signed build may require granting Screen Recording to that installed build again. Stable permission continuity between releases requires a stable Developer ID signature.
+
+### Linux remote screen shows no image
+
+Release **v0.3.5+** includes the Pillow/Tkinter packaging fix required by the frozen Linux client. If an older client log contains:
+
+```text
+ModuleNotFoundError: No module named 'PIL._tkinter_finder'
+```
+
+update the Linux client to v0.3.5 or later. This error is local to the Linux renderer; it does not indicate a TLS, password, or macOS Screen Recording failure.

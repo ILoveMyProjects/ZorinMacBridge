@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.5
+
+- Fixed the Linux client remote-screen renderer failing with `ModuleNotFoundError: No module named 'PIL._tkinter_finder'` in PyInstaller release builds.
+- The Linux source now imports `PIL._tkinter_finder` explicitly so the dependency is visible to freezer analysis.
+- Linux release builds now use both `--collect-all PIL` and `--hidden-import PIL._tkinter_finder`.
+- Added a release-build guard that inspects the generated executable and refuses to publish it if `PIL._tkinter_finder` is absent.
+- No protocol, TLS, authentication, discovery, file-transfer, or macOS server behavior changed in this release.
+
+## 0.3.4
+
+- Fixed repeated macOS Screen Recording prompts: **Start server no longer calls `CGRequestScreenCaptureAccess()` automatically**.
+- Start Server now performs one real screen-capture probe and only starts when the currently running build can actually capture the display.
+- If capture is unavailable, the app shows one diagnostic error and leaves permission changes entirely manual.
+- Added logging that distinguishes the CoreGraphics preflight result from the real capture probe.
+- Documented that current GitHub release builds are ad-hoc signed; macOS privacy permission persistence across app upgrades is not guaranteed until releases use a stable Developer ID signature.
+
 ## 0.3.3
 
 - Fixed a diagnostics bug where desktop-session failures could be hidden by the very short streaming socket timeout, causing the Linux client to report only `Server closed the connection`.

@@ -149,17 +149,6 @@ def screen_capture_permission_status() -> bool | None:
         return None
 
 
-def request_screen_capture_permission() -> bool | None:
-    # Ask macOS for screen-capture consent when the API is available.
-    try:
-        cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
-        fn = getattr(cg, 'CGRequestScreenCaptureAccess')
-        fn.argtypes = []
-        fn.restype = ctypes.c_bool
-        return bool(fn())
-    except Exception:
-        return None
-
 
 def accessibility_permission_status() -> bool | None:
     # Return whether this process is trusted for Accessibility event posting.
@@ -404,6 +393,29 @@ class ScreenGrabber:
             buf = io.BytesIO()
             im.save(buf, format='JPEG', quality=self.quality, optimize=False)
             return im.width, im.height, buf.getvalue()
+
+
+
+
+def probe_screen_capture() -> tuple[bool, str]:
+    """Try one real screen capture without requesting macOS permission.
+
+    This is intentionally authoritative for Start Server: the preflight API can
+    disagree with the effective TCC identity of packaged/ad-hoc builds, while
+    the real capture tells us whether this exact process can stream the screen.
+    """
+    grabber = None
+    try:
+        grabber = ScreenGrabber(max_width=320, quality=45)
+        width, height, jpeg = grabber.capture()
+        if width < 1 or height < 1 or not jpeg:
+            return False, 'screen capture returned an empty frame'
+        return True, f'{width}x{height}, {len(jpeg)} bytes'
+    except Exception as exc:
+        return False, f'{type(exc).__name__}: {exc}'
+    finally:
+        if grabber is not None:
+            grabber.close()
 
 
 def send_frame(sock: ssl.SSLSocket, width: int, height: int, jpeg: bytes) -> None:

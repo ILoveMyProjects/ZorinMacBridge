@@ -35,11 +35,17 @@ jobs:
             --name ZorinMacBridge-Client \
             --add-data 'assets/client.png:assets' \
             --add-data 'VERSION:.' \
+            --collect-all PIL \
             --collect-all zeroconf \
             --collect-all pystray \
             --collect-all Xlib \
+            --hidden-import PIL._tkinter_finder \
             --hidden-import pystray._xorg \
             linux_client.py
+
+          # Pillow's ImageTk backend imports PIL._tkinter_finder dynamically.
+          # Refuse to publish a Linux build if the frozen archive is missing it.
+          pyi-archive_viewer -l dist/ZorinMacBridge-Client | grep -F 'PIL._tkinter_finder'
 
           VERSION="${GITHUB_REF_NAME#v}"
           if [ "$VERSION" = "$GITHUB_REF_NAME" ]; then VERSION="$(cat VERSION)"; fi

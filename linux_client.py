@@ -22,6 +22,9 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from PIL import Image, ImageTk
+# Explicit import: Pillow loads this helper dynamically from ImageTk/_imagingtk.
+# Keeping it visible here also ensures PyInstaller includes it in frozen Linux builds.
+import PIL._tkinter_finder  # noqa: F401
 
 from discovery import discover_servers
 from resources import resource_path, set_tk_icon

@@ -11,7 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from mac_server import (
     DEFAULT_SHARE, accessibility_permission_status, ensure_certificate, is_lan_ip,
-    request_screen_capture_permission, screen_capture_permission_status, serve,
+    probe_screen_capture, screen_capture_permission_status, serve,
 )
 from discovery import LanAdvertiser
 from resources import resource_path, set_tk_icon
@@ -282,22 +282,34 @@ class ServerGUI:
             messagebox.showerror('Invalid port', 'Port must be a number.')
             return
 
+        # Do not call CGRequestScreenCaptureAccess() here. Repeated permission
+        # prompts are hostile UX, and ad-hoc packaged builds can have a TCC
+        # identity that does not match an older build even when System Settings
+        # still shows a similarly named entry. A real one-frame capture is the
+        # authoritative test for this exact running build.
         screen_permission = screen_capture_permission_status()
-        if screen_permission is False:
-            self._log('Screen Recording permission is not granted. Requesting macOS consent…')
-            request_screen_capture_permission()
-            messagebox.showwarning(
-                'Screen Recording permission required',
-                'ZorinMacBridge Server needs Screen Recording permission to stream the Mac display.\n\n'
+        if screen_permission is True:
+            self._log('Screen Recording preflight: granted')
+        elif screen_permission is False:
+            self._log('Screen Recording preflight: denied for this running build; testing real capture instead')
+        else:
+            self._log('Screen Recording preflight API unavailable; testing real capture instead')
+
+        capture_ok, capture_detail = probe_screen_capture()
+        if not capture_ok:
+            self._log(f'ERROR: Screen capture probe failed: {capture_detail}')
+            messagebox.showerror(
+                'Screen capture unavailable',
+                'This running build cannot capture the Mac display. ZorinMacBridge will NOT request '
+                'permission again automatically.\n\n'
                 'Open System Settings → Privacy & Security → Screen Recording '
-                '(or Screen & System Audio Recording), enable ZorinMacBridge Server, '
-                'then quit and reopen ZorinMacBridge Server before starting the server.',
+                '(or Screen & System Audio Recording) and verify ZorinMacBridge Server. '
+                'If it is already enabled, the entry may belong to an older differently signed build; '
+                'remove/re-add permission for the currently installed app, then quit and reopen it.\n\n'
+                f'Diagnostic: {capture_detail}',
             )
             return
-        elif screen_permission is True:
-            self._log('Screen Recording permission: granted')
-        else:
-            self._log('Screen Recording permission: preflight API unavailable; continuing')
+        self._log(f'Screen capture probe: OK ({capture_detail})')
 
         accessibility = accessibility_permission_status()
         if accessibility is False:
