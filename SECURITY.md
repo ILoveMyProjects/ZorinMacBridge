@@ -1,63 +1,45 @@
-# Security model
+# Security policy
 
-ZorinMacBridge is designed for a trusted private LAN. It is not intended to be exposed directly to the public Internet.
+## Intended deployment
 
-## Network boundaries
+ZorinMacBridge is intended for remote access to your own Mac from your own Zorin/Linux workstation on a trusted local network. Do not expose the service port directly to the public Internet.
 
-The client and server accept literal private/loopback/link-local addresses only. The project does not configure router forwarding, UPnP, cloud relays, or public rendezvous services.
+The core remote session uses no cloud relay, vendor account, telemetry, DNS lookup, UPnP, or router configuration. LAN discovery uses mDNS/Bonjour only while the server is running. GitHub is contacted only when the user explicitly installs or checks for an update.
 
-Runtime traffic is split across authenticated TLS connections:
+## Network trust
 
-- control: mouse, keyboard, clipboard;
-- video: H.264 screen stream;
-- file operations: listing, upload, download, mkdir.
+- TLS protects control, video, and file channels.
+- The Linux client pins the server certificate SHA-256 fingerprint.
+- Authentication occurs after TLS verification.
+- The server accepts only private/link-local/loopback address ranges.
+- Video, control, and file transfer use separate connections.
 
-This separation prevents video backpressure from blocking input or file operations.
+## Authentication storage
 
-## TLS and trust
+The Mac stores only a salted PBKDF2 password verifier. The plaintext session password is not stored there. When the user chooses to remember the Mac on Linux, the client uses the desktop keyring when available.
 
-The macOS server generates a local TLS certificate and private key under:
+## File-transfer boundary
 
-```text
-~/.zorin-mac-bridge/
-```
+Remote file operations are constrained to the configured share root. Path validation rejects absolute paths, `..` traversal, and symlink escapes outside that root.
 
-The Linux client pins the SHA-256 certificate fingerprint. LAN discovery does not publish the fingerprint as a trusted value. On first pairing, compare the fingerprint shown by the Mac. The client can remember the verified fingerprint after a successful connection.
+## macOS privacy permissions and update identity
 
-## Password handling
+Screen Recording is required for video and Accessibility/Core Graphics event permission is required for remote keyboard/mouse control. ZorinMacBridge does not edit the TCC database or bypass macOS consent.
 
-The server does not need the plaintext session password after configuration. When password persistence is enabled it stores a salted PBKDF2-HMAC-SHA256 verifier with a high iteration count in a mode-0600 settings file.
+Starting with v0.6.0, installed Mac copies use a persistent **per-Mac local code-signing identity**. The private key is generated and kept on that Mac under the user's Application Support directory; it is not uploaded to GitHub and is not stored in the public repository. Before an update replaces the installed app, the verified release artifact is staged and re-signed with the same local identity. The resulting designated requirement is bound to the fixed bundle identifier and that local certificate.
 
-The Linux client can remember the plaintext password in the desktop system keyring. If no usable system keyring backend is available, ZorinMacBridge logs a warning and does not silently fall back to a plaintext password file.
+This design is intended to stop normal app updates from changing the code identity associated with existing Screen Recording and input-control grants. The one-time migration from pre-v0.6 builds can still require a fresh grant because the identity genuinely changes at that migration boundary.
 
-Passwords are never written to application logs or mDNS records.
-
-## File confinement
-
-Remote file operations are constrained to the configured share root (default `~/ZorinMac-Share`). The server rejects absolute paths, `..`, NUL bytes, path escapes, and symlink traversal. Uploads are written to temporary files and atomically renamed on successful completion.
-
-## macOS permissions
-
-Screen Recording and Accessibility are macOS privacy/TCC permissions. ZorinMacBridge does not attempt to bypass or silently grant them.
-
-As of v0.4.3, ScreenCaptureKit runs inside the main `ZorinMacBridge Server.app` process through an embedded Swift dynamic library. The project intentionally does not launch a separate screen-capture executable, because a separate process can be treated as distinct responsible code by macOS privacy controls.
-
-Stable permissions across application updates depend on stable macOS code identity. Ad-hoc signed builds may be treated as different code after updates. Production releases should use a stable Developer ID Application identity and notarization.
-
-Apple also provides the restricted `com.apple.developer.persistent-content-capture` entitlement for VNC applications that need persistent screen-capture access. The entitlement requires Apple approval before it may be used.
-
-## Start at login
-
-The optional launch-at-login feature creates a **per-user LaunchAgent** under `~/Library/LaunchAgents`. It is disabled by default and can be removed from the server UI. It does not install a root daemon.
-
-The optional auto-start-server setting starts listening when the GUI app launches. These options are intended for a Mac mini or other dedicated development Mac where the user explicitly wants unattended access after login.
+Deleting the local signing state causes a new identity to be generated and can therefore require privacy authorization again.
 
 ## Updates
 
-There is no background update checker. A GitHub request occurs only after the user explicitly selects **Check for updates** or runs an installer command.
+There is no background update checker. An update request occurs only after an explicit user action.
 
-Release packages are verified against published SHA-256 files before installation. For stronger software-supply-chain assurance, production macOS releases should additionally be Developer-ID-signed and notarized.
+The updater downloads the matching release package and checksum from GitHub, verifies SHA-256, verifies the macOS transport signature and bundle identifier, applies the Mac's persistent local signature to a staged copy, verifies the resulting signature/designated requirement, and only then asks for administrator authorization to replace the installed application.
+
+Linux package installation continues to use the system package manager and its normal administrator authorization flow.
 
 ## Reporting issues
 
-Do not include real session passwords, TLS private keys, personal file contents, or other secrets in a public issue. Connection logs intentionally omit the session password.
+Do not include real session passwords, TLS private keys, personal file contents, or the files under `~/Library/Application Support/ZorinMacBridge/CodeSigning/` in public issues.

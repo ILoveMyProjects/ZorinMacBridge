@@ -6,6 +6,7 @@ import os
 import platform
 import shutil
 import ssl
+import sys
 import subprocess
 import tempfile
 import urllib.error
@@ -304,6 +305,119 @@ def _install_linux(package_path: Path, progress: ProgressCallback | None) -> Non
     _emit(progress, 'Linux package installed successfully.')
 
 
+
+
+def _current_macos_app() -> Path | None:
+    """Return the currently running .app bundle when executed from a frozen macOS app."""
+    candidates = []
+    try:
+        candidates.append(Path(sys.executable).resolve())
+    except Exception:
+        pass
+    candidates.append(Path('/Applications/ZorinMacBridge Server.app'))
+    for candidate in candidates:
+        for parent in (candidate, *candidate.parents):
+            if parent.name == 'ZorinMacBridge Server.app' and parent.is_dir():
+                return parent
+    return None
+
+
+def _codesign_output(app: Path) -> str:
+    completed = subprocess.run(
+        ['/usr/bin/codesign', '-dvvv', str(app)],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f'Could not inspect code signature for {app}:\n{completed.stdout.strip()}')
+    return completed.stdout or ''
+
+
+def _designated_requirement(app: Path) -> str:
+    completed = subprocess.run(
+        ['/usr/bin/codesign', '-d', '-r-', str(app)],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+    )
+    text = completed.stdout or ''
+    marker = 'designated =>'
+    pos = text.find(marker)
+    if completed.returncode != 0 or pos < 0:
+        raise RuntimeError(f'Could not read designated requirement for {app}:\n{text.strip()}')
+    requirement = text[pos + len(marker):].strip()
+    if not requirement:
+        raise RuntimeError(f'Empty designated requirement for {app}.')
+    return requirement
+
+
+def _verify_requirement(app: Path, requirement: str, label: str) -> None:
+    with tempfile.NamedTemporaryFile('w', prefix='zmb-requirement-', suffix='.txt', delete=False) as handle:
+        handle.write(requirement + '\n')
+        req_path = Path(handle.name)
+    try:
+        completed = subprocess.run(
+            ['/usr/bin/codesign', '--verify', '--strict', '--deep', '-R', str(req_path), str(app)],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f'{label} does not satisfy the required ZorinMacBridge code identity. '
+                'The update was NOT installed.\n' + (completed.stdout or '').strip()
+            )
+    finally:
+        try:
+            req_path.unlink()
+        except OSError:
+            pass
+
+
+def _verify_macos_transport_app(app: Path, progress: ProgressCallback | None) -> None:
+    """Verify the release artifact before it is re-signed for this Mac."""
+    import plistlib
+
+    codesign = Path('/usr/bin/codesign')
+    if not codesign.exists():
+        raise RuntimeError('codesign was not found; refusing to install an unverified macOS update.')
+    _emit(progress, 'Verifying downloaded macOS application…')
+    completed = subprocess.run(
+        [str(codesign), '--verify', '--strict', '--deep', '--verbose=2', str(app)],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError('Downloaded macOS app has an invalid transport signature. Update aborted.\n' + (completed.stdout or '').strip())
+    info = app / 'Contents' / 'Info.plist'
+    try:
+        with info.open('rb') as fh:
+            bundle_id = plistlib.load(fh).get('CFBundleIdentifier')
+    except Exception as exc:
+        raise RuntimeError(f'Could not read downloaded app Info.plist: {exc}') from exc
+    if bundle_id != 'com.ilovemyprojects.zorinmacbridge.server':
+        raise RuntimeError(f'Unexpected macOS bundle identifier: {bundle_id!r}. Update aborted.')
+
+
+def _verify_macos_update_identity(current_app: Path | None, new_app: Path, progress: ProgressCallback | None) -> None:
+    """Verify that an already locally-signed install keeps the same per-Mac DR.
+
+    v0.6.0 is the migration point. Older installs may have ad-hoc or release-transport
+    signatures. Once a local persistent identity exists, every installed update is
+    re-signed with that same identity *before* replacing the app.
+    """
+    from mac_local_signing import app_has_local_identity, verify_app_local_identity
+
+    verify_app_local_identity(new_app)
+    if current_app is None or not current_app.is_dir():
+        _emit(progress, 'Persistent local code identity verified for the new installation.')
+        return
+
+    if not app_has_local_identity(current_app):
+        _emit(progress, 'One-time migration: current app uses the old code identity; new app uses this Mac\'s persistent local identity.')
+        return
+
+    old_req = _designated_requirement(current_app)
+    new_req = _designated_requirement(new_app)
+    _verify_requirement(new_app, old_req, 'New application')
+    _verify_requirement(current_app, new_req, 'Current application')
+    _emit(progress, 'Persistent code identity verified: privacy permissions remain attached to the same app identity.')
+
+
 def _install_macos(package_path: Path, progress: ProgressCallback | None) -> None:
     hdiutil = '/usr/bin/hdiutil'
     osascript = '/usr/bin/osascript'
@@ -313,8 +427,12 @@ def _install_macos(package_path: Path, progress: ProgressCallback | None) -> Non
     if not Path(hdiutil).exists() or not Path(osascript).exists():
         raise RuntimeError('Required macOS system tools hdiutil/osascript were not found.')
 
+    from mac_local_signing import stage_and_sign
+
     mount_dir = package_path.parent / 'mounted-dmg'
+    stage_root = package_path.parent / 'locally-signed-stage'
     mount_dir.mkdir(exist_ok=True)
+    stage_root.mkdir(exist_ok=True)
     mounted = False
     try:
         _emit(progress, 'Mounting the verified DMG…')
@@ -333,6 +451,12 @@ def _install_macos(package_path: Path, progress: ProgressCallback | None) -> Non
         if not source_app.is_dir():
             raise RuntimeError(f'The downloaded DMG does not contain {app_name}.')
 
+        _verify_macos_transport_app(source_app, progress)
+        _emit(progress, 'Applying this Mac\'s persistent local code identity…')
+        signed_app, identity = stage_and_sign(source_app, stage_root)
+        _emit(progress, f'Local identity ready: {identity.cert_sha256[:16]}…')
+        _verify_macos_update_identity(_current_macos_app(), signed_app, progress)
+
         _emit(progress, 'Waiting for the macOS administrator-password prompt…')
         script = (
             'on run argv\n'
@@ -342,7 +466,7 @@ def _install_macos(package_path: Path, progress: ProgressCallback | None) -> Non
             'end run'
         )
         completed = subprocess.run(
-            [osascript, '-e', script, str(source_app), destination],
+            [osascript, '-e', script, str(signed_app), destination],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -351,7 +475,7 @@ def _install_macos(package_path: Path, progress: ProgressCallback | None) -> Non
         if completed.returncode != 0:
             output = (completed.stdout or '').strip()
             raise RuntimeError('macOS application installation failed:\n' + (output or f'osascript exited with code {completed.returncode}'))
-        _emit(progress, 'macOS application installed successfully.')
+        _emit(progress, 'macOS application installed with the persistent local identity.')
     finally:
         if mounted:
             subprocess.run(
@@ -360,7 +484,6 @@ def _install_macos(package_path: Path, progress: ProgressCallback | None) -> Non
                 stderr=subprocess.DEVNULL,
                 check=False,
             )
-
 
 def install_update(
     info: UpdateInfo,

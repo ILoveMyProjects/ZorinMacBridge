@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.6.0
+
+- Replaced the Linux/GitHub-secret macOS signing setup with an automatic persistent **per-Mac local code identity**.
+- Removed `scripts/setup-stable-signing-linux.sh` and all `MACOS_CERTIFICATE_*` / `MACOS_SIGNING_IDENTITY` release-secret requirements.
+- GitHub Actions now applies only an ephemeral self-signed **transport signature** to macOS release artifacts; no developer account or repository signing secret is required.
+- The macOS one-command installer verifies the release, stages the app, creates/reuses the Mac's local identity, re-signs the staged app, verifies it, and only then installs it.
+- The in-app macOS updater performs the same local re-signing before replacing `/Applications/ZorinMacBridge Server.app`.
+- Added an automatic one-time migration for installs upgraded from v0.5.x through the old updater: v0.6.0 re-signs the installed app with the persistent local identity and restarts before the normal GUI starts.
+- The persistent designated requirement is bound to `com.ilovemyprojects.zorinmacbridge.server` plus that Mac's local signing certificate.
+- Added release/CI tests that fail if the obsolete GitHub signing-secret workflow returns.
+- Kept the Linux post-update `execv()` restart path, video idle-timeout fix, auto-reconnect, quality presets, and fullscreen status bar from the v0.5.x series.
+
+## 0.5.7
+
+- Made `scripts/setup-stable-signing-linux.sh` non-invasive by default.
+- The signing helper no longer installs packages, runs `gh auth login`, or touches SSH keys.
+- Default mode only prepares/reuses the local stable signing identity after explicit confirmation and writes the four GitHub Actions secret values to private local files.
+- Added optional `--upload-github` mode that works only when `gh` is already authenticated and requires typing `UPLOAD` before any repository secret is changed.
+- Missing local tools now cause a clean error instead of automatic `apt`/`sudo` installation.
+- Linux post-update restart now calls `execv()` immediately, without potentially blocking GTK/tray/network cleanup before process replacement.
+
+## 0.5.6
+
+- Added `scripts/setup-stable-signing-linux.sh`: one-time stable macOS signing setup performed entirely from Zorin/Linux.
+- No Developer ID is required for private/internal deployments; the script creates a persistent self-signed code-signing identity with OpenSSL.
+- The Linux script automatically stores the encrypted signing identity and password in GitHub Actions secrets using `gh`.
+- Added a pinned SHA-256 certificate fingerprint secret so release builds fail if GitHub ever receives a different signing certificate by mistake.
+- macOS signing now validates the imported certificate fingerprint before signing and continues to refuse ad-hoc releases.
+- Documented the Linux-only stable-signing workflow in `SIGNING.md` and README.
+
+
+## v0.5.5
+
+- macOS releases now **require a persistent signing identity**; ad-hoc fallback was removed.
+- The macOS updater refuses ad-hoc or code-identity-incompatible future updates.
+- Once migrated to the stable identity, future correctly signed updates preserve the app identity used by macOS privacy permissions.
+- Removed the misleading permission-repair button from the server UI.
+- Added one-time ad-hoc → stable-signing migration messaging.
+
+## 0.5.4
+
+- Fixed Linux post-update restart by replacing the running process directly with `/usr/bin/zorinmacbridge` instead of relying on GTK/tray teardown or a helper process.
+- Added macOS detection of ad-hoc vs stable code signing in the server permission panel.
+- Added a local **Repair stale permissions after update** flow for the macOS case where System Settings still shows Screen Recording/Accessibility enabled but the updated build is not actually authorized.
+- The repair flow resets only this app's `ScreenCapture` and `Accessibility` TCC records, requests fresh grants locally, and requires a full app restart.
+- Added an explicit warning before installing a macOS update when the current build is ad-hoc signed and already has privacy grants.
+- Changed macOS restart-after-update to replace the running process with LaunchServices' `open`, avoiding stale Tk/tray processes.
+
 ## 0.5.3
 
 - Fixed H.264 sessions disconnecting when the Mac desktop was static: a video socket read timeout is now treated as an idle interval instead of a fatal error.

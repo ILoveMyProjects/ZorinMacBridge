@@ -669,31 +669,24 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self._log('INFO', 'Disconnect requested by user.')
 
     def _restart_after_update(self) -> None:
-        # A normal GTK application quit can be delayed by tray/backend teardown,
-        # which made GNOME show a misleading "not responding" dialog after a
-        # successful package update. For this explicit restart action, launch a
-        # detached helper first and then terminate the old process deterministically.
+        # Replace the process immediately. Do not call GTK/tray/network teardown
+        # first: any blocking cleanup here can leave the old GUI in a
+        # "not responding" state after the package has already been replaced.
+        # Python-created sockets/file descriptors are non-inheritable by default,
+        # so exec closes the old session as the process image is replaced.
         exe = '/usr/bin/zorinmacbridge'
-        command = 'sleep 0.8; exec "$1"'
-        subprocess.Popen(
-            ['/bin/sh', '-c', command, 'zorinmacbridge-restart', exe],
-            start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-        )
+        if not Path(exe).is_file():
+            self._dialog(
+                'Restart failed',
+                f'The updated launcher was not found at {exe}. Close this window and start ZorinMacBridge Client from the application menu.',
+            )
+            return
+        self._log('INFO', 'Restarting after update by immediately replacing the current process with /usr/bin/zorinmacbridge.')
         try:
-            self.disconnect_remote()
-        except Exception:
-            pass
-        try:
-            self.set_visible(False)
-        except Exception:
-            pass
-        self._log('INFO', 'Restarting after update using a detached helper.')
-        # Do not wait for GTK/pystray shutdown here; the user explicitly chose
-        # Restart now and all persistent state has already been written.
-        os._exit(0)
+            os.execv(exe, [exe])
+        except Exception as exc:
+            self._log('ERROR', f'Restart after update failed: {type(exc).__name__}: {exc}')
+            self._dialog('Restart failed', f'The update is installed, but the client could not restart automatically.\n\n{exc}')
 
     # ---------- Queue / video ----------
 

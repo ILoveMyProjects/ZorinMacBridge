@@ -24,6 +24,8 @@ from settings import (PasswordVerifier, load_server_password_verifier, load_serv
                       persistent_server_id, save_server_password, update_server_settings)
 
 
+
+
 def private_ipv4_addresses() -> list[str]:
     try:
         text = subprocess.check_output(['/sbin/ifconfig'], text=True, stderr=subprocess.DEVNULL)
@@ -62,6 +64,7 @@ class ServerGUI:
         self.fp_var = tk.StringVar(value='')
         self.screen_permission_var = tk.StringVar(value='Screen Recording: checking…')
         self.input_permission_var = tk.StringVar(value='Mouse/keyboard control: checking…')
+        self.signing_var = tk.StringVar(value='Code signing: checking…')
         self.stop_event: threading.Event | None = None
         self.thread: threading.Thread | None = None
         self.advertiser: LanAdvertiser | None = None
@@ -183,15 +186,24 @@ class ServerGUI:
             self._restart_after_update()
 
     def _restart_after_update(self) -> None:
-        pid = os.getpid()
-        helper = f'while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open -a "ZorinMacBridge Server"'
-        subprocess.Popen(
-            ['/bin/sh', '-c', helper],
-            start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        self.on_close()
+        # Replace this process with LaunchServices' `open` tool. This avoids
+        # waiting for Tk/tray teardown and guarantees the old app process is gone
+        # before LaunchServices starts the updated bundle.
+        try:
+            self.stop()
+        except Exception:
+            pass
+        try:
+            if self.tray is not None:
+                self.tray.stop()
+        except Exception:
+            pass
+        try:
+            self.root.withdraw()
+        except Exception:
+            pass
+        self._log('Restarting updated ZorinMacBridge Server through LaunchServices.')
+        os.execv('/usr/bin/open', ['/usr/bin/open', '-a', 'ZorinMacBridge Server'])
 
     def _show_update_install_error(self, error: str) -> None:
         self._log('Update installation failed: ' + error)
@@ -275,7 +287,11 @@ class ServerGUI:
         ttk.Label(perms, textvariable=self.input_permission_var).grid(row=1, column=0, sticky='w', pady=(6, 0))
         ttk.Button(perms, text='Request Mouse/Keyboard Access', command=self.request_input_access).grid(row=1, column=1, padx=(12, 0), pady=(6, 0), sticky='e')
         ttk.Button(perms, text='Settings', command=self.open_accessibility_settings).grid(row=1, column=2, padx=(8, 0), pady=(6, 0), sticky='e')
-        ttk.Button(perms, text='Refresh permission status', command=self.refresh_permission_status).grid(row=2, column=0, columnspan=3, sticky='w', pady=(8, 0))
+        ttk.Label(perms, textvariable=self.signing_var).grid(row=2, column=0, columnspan=3, sticky='w', pady=(8, 0))
+        permission_actions = ttk.Frame(perms)
+        permission_actions.grid(row=3, column=0, columnspan=3, sticky='ew', pady=(8, 0))
+        ttk.Button(permission_actions, text='Refresh permission status', command=self.refresh_permission_status).pack(side='left')
+        ttk.Button(permission_actions, text='Restart app', command=self.restart_app).pack(side='left', padx=(8, 0))
         perms.columnconfigure(0, weight=1)
 
         buttons = ttk.Frame(outer)
@@ -341,6 +357,58 @@ class ServerGUI:
                 pass
             self._log('Launch-at-login disabled.')
 
+    def _app_bundle_path(self) -> Path | None:
+        try:
+            exe = Path(sys.executable).resolve()
+        except Exception:
+            return None
+        for parent in (exe, *exe.parents):
+            if parent.suffix == '.app' and parent.is_dir():
+                return parent
+        return None
+
+    def _code_signing_mode(self) -> str:
+        app = self._app_bundle_path()
+        if app is None:
+            return 'source/unknown'
+        try:
+            from mac_local_signing import app_has_local_identity, identity_summary
+            if app_has_local_identity(app):
+                return 'local stable identity · ' + identity_summary()
+        except Exception:
+            pass
+        try:
+            proc = subprocess.run(
+                ['/usr/bin/codesign', '-dv', '--verbose=4', str(app)],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=4, check=False,
+            )
+            text = proc.stdout or ''
+            if 'Signature=adhoc' in text:
+                return 'legacy ad-hoc'
+            for line in text.splitlines():
+                if line.startswith('Authority='):
+                    return 'release transport · ' + line.split('Authority=', 1)[1].strip()
+            return 'signed/unknown identity' if proc.returncode == 0 else 'unknown'
+        except Exception:
+            return 'unknown'
+
+    def restart_app(self) -> None:
+        try:
+            self.stop()
+        except Exception:
+            pass
+        try:
+            if self.tray is not None:
+                self.tray.stop()
+        except Exception:
+            pass
+        try:
+            self.root.withdraw()
+        except Exception:
+            pass
+        self._log('Restarting ZorinMacBridge Server through LaunchServices.')
+        os.execv('/usr/bin/open', ['/usr/bin/open', '-a', 'ZorinMacBridge Server'])
+
     def refresh_permission_status(self) -> None:
         screen = screen_capture_permission_status()
         input_access = accessibility_permission_status()
@@ -348,6 +416,8 @@ class ServerGUI:
         input_text = 'Granted' if input_access is True else ('Not granted' if input_access is False else 'Unknown')
         self.screen_permission_var.set(f'Screen Recording: {screen_text}')
         self.input_permission_var.set(f'Mouse/keyboard control: {input_text}')
+        signing = self._code_signing_mode()
+        self.signing_var.set(f'Code signing: {signing}')
 
     def request_screen_recording_access(self) -> None:
         if screen_capture_permission_status() is True:
@@ -513,6 +583,37 @@ class ServerGUI:
 
 
 def main() -> None:
+    if '--prepare-local-signing' in sys.argv:
+        try:
+            from mac_local_signing import ensure_local_identity, local_certificate_path, identity_is_trusted
+            identity = ensure_local_identity()
+            print(f'CERT_PATH={local_certificate_path()}')
+            print(f'CERT_SHA256={identity.cert_sha256}')
+            print(f'TRUSTED={1 if identity_is_trusted(identity) else 0}')
+            raise SystemExit(0)
+        except Exception as exc:
+            print(f'LOCAL SIGNING PREP FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)
+            raise SystemExit(1)
+    if '--local-sign-app' in sys.argv:
+        try:
+            idx = sys.argv.index('--local-sign-app')
+            target = Path(sys.argv[idx + 1])
+            from mac_local_signing import sign_app_locally
+            identity = sign_app_locally(target)
+            print(f'LOCAL SIGN OK: {target} · {identity.cert_sha256}')
+            raise SystemExit(0)
+        except Exception as exc:
+            print(f'LOCAL SIGN FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)
+            raise SystemExit(1)
+    if '--self-test-local-signing-identity' in sys.argv:
+        try:
+            from mac_local_signing import ensure_local_identity
+            identity = ensure_local_identity()
+            print(f'SELFTEST OK: persistent local signing identity available: {identity.cert_sha256}')
+            raise SystemExit(0)
+        except Exception as exc:
+            print(f'SELFTEST FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)
+            raise SystemExit(1)
     if '--self-test-permission-apis' in sys.argv:
         try:
             names = permission_api_self_test()
@@ -537,8 +638,26 @@ def main() -> None:
         except Exception as exc:
             print(f'SELFTEST FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)
             raise SystemExit(1)
+
+    bootstrap_error = None
+    try:
+        from mac_local_signing import bootstrap_installed_app_identity
+        bootstrap_installed_app_identity()
+    except Exception as exc:
+        bootstrap_error = f'{type(exc).__name__}: {exc}'
+
     root = tk.Tk()
-    ServerGUI(root)
+    gui = ServerGUI(root)
+    if bootstrap_error:
+        gui._log('Persistent local code-identity migration failed: ' + bootstrap_error)
+        root.after(
+            250,
+            lambda: messagebox.showerror(
+                'ZorinMacBridge code identity',
+                'The one-time local code-identity migration could not be completed. '
+                'The server will not silently reset permissions.\n\n' + bootstrap_error,
+            ),
+        )
     root.mainloop()
 
 

@@ -24,6 +24,7 @@ jobs:
           /usr/bin/python3 test_support.py
           /usr/bin/python3 test_updater.py
           /usr/bin/python3 test_native_ui.py
+          /usr/bin/python3 test_local_signing.py
           /usr/bin/python3 -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); from gi.repository import Gtk, Adw; import av; av.CodecContext.create('h264','r'); import keyring; print('GTK4/libadwaita + H.264 runtime OK')"
           bash -n install-linux.sh
           bash -n install-macos.sh

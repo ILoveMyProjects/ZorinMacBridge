@@ -1,38 +1,45 @@
-# Stable macOS signing
+# macOS code identity in ZorinMacBridge
 
-ZorinMacBridge uses macOS Screen Recording and Accessibility privacy permissions.
-Those permissions are associated with the app's code identity (designated requirement).
+ZorinMacBridge does **not** require a Developer ID, a GitHub signing secret, or a certificate created on the Linux workstation for the private/internal workflow used by this project.
 
-## Why ad-hoc releases ask again after an update
+## How v0.6+ works
 
-The fallback public GitHub Actions build uses ad-hoc signing when no Developer ID
-certificate is configured. Apple documents that an ad-hoc designated requirement is
-tied to that specific version of the code, so macOS cannot reliably treat the next
-build as the same application for privacy permissions.
+GitHub Actions creates a short-lived **transport signature** for each macOS release artifact. That signature exists only so the downloaded `.app` is structurally signed and older ZorinMacBridge updaters can validate/install the migration release.
 
-This means an ad-hoc update may require Screen Recording and Accessibility approval
-again. ZorinMacBridge cannot securely bypass macOS TCC.
+Before an app is installed on a Mac, ZorinMacBridge creates one **persistent local code-signing identity on that Mac** and re-signs the staged app with it. The private key remains on that Mac under:
 
-## Recommended public-release configuration
+```text
+~/Library/Application Support/ZorinMacBridge/CodeSigning/
+```
 
-Configure these GitHub repository secrets:
+Future in-app updates are downloaded and checksum-verified, copied to a staging directory, re-signed with the same local identity, checked for the expected bundle ID and designated requirement, and only then installed into `/Applications`.
 
-- `MACOS_CERTIFICATE_P12_BASE64` — base64 of a Developer ID Application `.p12`
-- `MACOS_CERTIFICATE_PASSWORD` — password protecting the `.p12`
-- `MACOS_SIGNING_IDENTITY` — for example `Developer ID Application: Your Name (TEAMID)`
+The designated requirement is pinned to both:
 
-Optional notarization secrets:
+```text
+com.ilovemyprojects.zorinmacbridge.server
+```
 
-- `APPLE_ID`
-- `APPLE_TEAM_ID`
-- `APPLE_APP_PASSWORD` — app-specific password for notarization
+and the certificate belonging to that Mac's persistent local identity.
 
-When the Developer ID secrets are present, the release workflow signs the macOS app
-with that stable identity. Keep the bundle identifier
-`com.ilovemyprojects.zorinmacbridge.server` unchanged between releases.
+This prevents each GitHub release build from becoming a new privacy identity on that Mac.
 
-When the three notarization secrets are also present, the workflow submits each DMG
-to Apple's notary service and staples the result.
+## Migration from v0.5.x
 
-Do not commit a `.p12`, private key, certificate password, Apple ID password, or
-notarization credential to the repository.
+v0.6.0 is the migration release. Older updaters can install its transport-signed app. On the first v0.6.0 launch, if the app in `/Applications` does not yet use the Mac's persistent local identity, ZorinMacBridge automatically:
+
+1. creates/reuses the local identity;
+2. stages a copy of the installed app;
+3. signs the staged copy with the persistent local identity;
+4. asks macOS for administrator authorization to replace the app in `/Applications`;
+5. restarts the freshly signed app.
+
+Because this changes from the old v0.5.x identity to the new persistent per-Mac identity, macOS can require Screen Recording and mouse/keyboard authorization **once at this migration point**. Future v0.6+ updates on that Mac reuse the same identity.
+
+## Important
+
+Do not delete the `CodeSigning` directory above if you want that Mac to retain the same ZorinMacBridge code identity. Deleting it causes a new identity to be created later, which can require privacy permissions again.
+
+There is no `setup-stable-signing-linux.sh` in v0.6+. No `gh auth login`, GitHub secret upload, SSH-key modification, or Developer ID setup is part of this workflow.
+
+For public third-party distribution, Apple Developer ID signing and notarization are still the conventional deployment mechanism. The per-Mac local identity described here is intended for this project's private/internal machines.

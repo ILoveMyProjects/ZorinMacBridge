@@ -45,7 +45,7 @@ curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/mast
 
 The installer detects Apple Silicon vs Intel, downloads the correct `.dmg`, verifies SHA-256, and installs **ZorinMacBridge Server** into `/Applications`.
 
-The public macOS builds are currently ad-hoc signed unless the release workflow is configured with a stable Apple signing identity. See **Stable macOS permissions** below.
+Starting with v0.6, installation uses a **persistent per-Mac local code identity**. No GitHub signing secret, Linux certificate setup, or Developer ID is required for this private/internal workflow. The Mac creates the identity automatically and reuses it for future updates.
 
 ## Remote desktop architecture
 
@@ -131,9 +131,7 @@ Closing ZorinMacBridge still stops the server. Disabling **Launch at login** rem
 
 macOS controls Screen Recording and mouse/keyboard control through its privacy/TCC system. ZorinMacBridge cannot silently grant itself those permissions. In v0.5.2+, the server window has explicit **Request Screen Recording Access** and **Request Mouse/Keyboard Access** buttons. Those APIs are invoked only by a local click on the Mac; a remote connection never triggers a privacy prompt.
 
-For permissions to survive application updates reliably, macOS needs to recognize the new build as the same application. Public ad-hoc signed test builds do not provide the same stable code identity as a properly Developer-ID-signed release.
-
-For long-term releases, use a stable **Developer ID Application** signing identity and notarization. The project keeps the bundle identifier stable as:
+For permissions to survive application updates reliably, macOS needs to recognize the new build as the same application. Ad-hoc signed builds do not provide a stable code identity across changed versions. For private/internal use, ZorinMacBridge now supports a persistent self-signed code-signing identity generated entirely on Zorin/Linux. The project keeps the bundle identifier stable as:
 
 ```text
 com.ilovemyprojects.zorinmacbridge.server
@@ -253,9 +251,20 @@ Choose **Help → Check for updates** manually. The app then:
 5. installs the update;
 6. offers to restart the application.
 
-On Linux, **Restart now** uses a detached restart helper and terminates the old GTK process directly after the verified package is installed. This avoids a stale pre-update GTK process being reported by GNOME as “not responding”.
+On Linux, **Restart now** immediately replaces the current process with `/usr/bin/zorinmacbridge` after the verified package is installed. It deliberately does not wait for GTK, the tray backend, or network-worker cleanup first, preventing blocking teardown from leaving the old window in a “not responding” state.
 
 You can also re-run the one-command installer.
+
+
+## Stable macOS permissions across updates
+
+There is **no signing setup to run on Zorin/Linux**. Do not create GitHub signing secrets and do not run a signing helper.
+
+For v0.6+, each Mac automatically owns one persistent local signing identity. The one-command installer and the in-app updater re-sign the staged server app with that same identity before placing it in `/Applications`. The private key never leaves the Mac.
+
+The first migration from an older v0.5.x build can require Screen Recording and mouse/keyboard approval once because the code identity genuinely changes at that boundary. After migration, normal v0.6+ updates reuse the same identity on that Mac.
+
+See [`SIGNING.md`](SIGNING.md) for the architecture.
 
 ## Security model
 
@@ -318,6 +327,8 @@ chmod +x scripts/setup-source-macos.sh scripts/build-macos-streamer.sh
 python test_protocol.py
 python test_support.py
 python test_updater.py
+python test_native_ui.py
+python test_local_signing.py
 python -m compileall -q .
 swiftc -frontend -parse native/macos/ZMBStreamerLib.swift
 ```
@@ -330,7 +341,7 @@ The Linux client includes a **Logs** tab. Connection logs show TCP, TLS, fingerp
 
 If macOS asks for Screen Recording **when you press Connect**, make sure you are on v0.4.3 or newer. v0.4.0-v0.4.2 launched a separate native capture executable, which could be treated as separate TCC-responsible code. v0.4.3 runs ScreenCaptureKit in the main server process instead.
 
-Because unsigned/ad-hoc-signed test releases do not have a stable macOS code identity, installing a *new release* can require Screen Recording and mouse/keyboard approval again even if the previous version was already enabled. In v0.5.2+, request the permissions from the local server window. Stable permission continuity across releases requires stable Developer ID signing.
+v0.6+ re-signs installed updates with the same persistent local identity on each Mac. If permissions change after a normal v0.6+ update, treat that as a bug and capture the server log plus the `Code signing:` line from the server UI.
 
 If video works but mouse/keyboard does not, check the Mac server log for:
 
@@ -347,10 +358,16 @@ MIT — see [LICENSE](LICENSE).
 ## macOS privacy permissions and updates
 
 Screen Recording and Accessibility are macOS TCC permissions tied to the app's code identity.
-A release built with ad-hoc signing may require those permissions again after an update.
+The release artifact's transport identity is not the installed identity in v0.6+: the staged app is re-signed locally before installation.
 ZorinMacBridge never bypasses TCC and, starting with v0.5.1, a remote **Connect** will not
 trigger the Screen Recording prompt: if permission is missing, the video channel fails with
 a clear message and the permission must be granted locally on the Mac.
 
-For stable permissions across releases, configure Developer ID signing in GitHub Actions.
-See [`SIGNING.md`](SIGNING.md).
+Stable permissions across v0.6+ updates use the automatic per-Mac identity described in [`SIGNING.md`](SIGNING.md); no Linux signing command is required.
+
+### macOS privacy permissions across updates
+
+macOS installs from **v0.6 onward use a persistent per-Mac code identity**.
+The release workflow produces a signed transport artifact; the installer/updater applies that Mac's persistent local identity before installation.
+After the one-time migration from an older build, Screen Recording and mouse/keyboard privacy grants are intended to remain associated with the same installed app identity across normal v0.6+ updates.
+See `SIGNING.md`.
