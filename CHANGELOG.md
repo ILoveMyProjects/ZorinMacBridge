@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.0 - 2026-09-24
+
+Desktop UX and controlled-discovery update:
+
+- added dedicated Client and Server application icons;
+- added one-command installers for Zorin/Ubuntu and macOS;
+- macOS installer detects Apple Silicon vs Intel automatically and never starts the server automatically;
+- added manual-only GitHub release update checks with no background polling;
+- added local mDNS/Bonjour server discovery while the manually started server is running;
+- discovery fills private IP/port but does not bypass TLS fingerprint verification;
+- added best-effort system tray / macOS menu-bar controls;
+- kept the macOS server explicitly manual with no LaunchAgent, daemon, login item, or service;
+- updated release packaging so app icons and new runtime dependencies are bundled.
+
 ## 0.2.0 - 2026-09-24
 
 End-user distribution update:

@@ -1,2 +1,4 @@
 Pillow==12.3.0
+zeroconf>=0.147,<1
+pystray>=0.19.5,<1
 cryptography==50.0.1; platform_system == "Darwin"

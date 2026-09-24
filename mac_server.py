@@ -67,7 +67,7 @@ def ensure_certificate() -> str:
             from cryptography.hazmat.primitives.asymmetric import rsa
             from cryptography.x509.oid import NameOID
         except ImportError as exc:
-            raise SystemExit('The cryptography package is missing. Run install_macos.sh') from exc
+            raise SystemExit('The cryptography package is missing. Run scripts/setup-source-macos.sh') from exc
 
         key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
         subject = issuer = x509.Name([
@@ -617,7 +617,7 @@ def serve(bind: str, port: int, share: Path, fps: float, max_width: int, quality
     log(f'Listening on {bind}:{port}')
     log(f'Share directory: {share}')
     log(f'TLS SHA-256: {fingerprint}')
-    log('Runtime: no DNS, cloud, relay, telemetry, or outbound connections')
+    log('Core server: no DNS, cloud, relay, telemetry, or Internet connections')
     log('Clients: RFC1918/ULA/link-local/loopback only')
     if ready_callback is not None:
         ready_callback(fingerprint)

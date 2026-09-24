@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve ZorinMac-Bridge.
+Thanks for helping improve ZorinMacBridge.
 
 ## Development setup
 
@@ -11,6 +11,7 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements.txt
 python test_protocol.py
+python test_support.py
 ```
 
 Before opening a pull request:
@@ -18,6 +19,7 @@ Before opening a pull request:
 ```bash
 python -m compileall -q .
 python test_protocol.py
+python test_support.py
 ```
 
 ## Project principles

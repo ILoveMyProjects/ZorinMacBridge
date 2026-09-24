@@ -22,18 +22,36 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y python3-tk
           python -m pip install --upgrade pip
-          python -m pip install pyinstaller Pillow==12.3.0
+          python -m pip install pyinstaller Pillow==12.3.0 'zeroconf>=0.147,<1' 'pystray>=0.19.5,<1'
       - name: Build Linux client
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed \
-            --name ZorinMacBridge-Client linux_client.py
+            --name ZorinMacBridge-Client \
+            --add-data 'assets/client.png:assets' \
+            --add-data 'VERSION:.' \
+            --collect-all zeroconf \
+            --collect-all pystray \
+            --collect-all Xlib \
+            --hidden-import pystray._xorg \
+            linux_client.py
+
           VERSION="${GITHUB_REF_NAME#v}"
           if [ "$VERSION" = "$GITHUB_REF_NAME" ]; then VERSION="$(cat VERSION)"; fi
+
           PKG="build/deb"
-          mkdir -p "$PKG/DEBIAN" "$PKG/usr/bin" "$PKG/usr/share/applications" "$PKG/usr/share/icons/hicolor/scalable/apps"
+          mkdir -p "$PKG/DEBIAN" \
+                   "$PKG/usr/bin" \
+                   "$PKG/usr/share/applications" \
+                   "$PKG/usr/share/icons/hicolor/256x256/apps"
+
           install -m 0755 dist/ZorinMacBridge-Client "$PKG/usr/bin/zorinmacbridge"
           install -m 0644 packaging/linux/zorinmacbridge.desktop "$PKG/usr/share/applications/zorinmacbridge.desktop"
-          install -m 0644 packaging/linux/zorinmacbridge.svg "$PKG/usr/share/icons/hicolor/scalable/apps/zorinmacbridge.svg"
+          python - <<'PY'
+          from PIL import Image
+          Image.open('assets/client.png').convert('RGBA').resize((256,256), Image.Resampling.LANCZOS).save('build/client-256.png')
+          PY
+          install -m 0644 build/client-256.png "$PKG/usr/share/icons/hicolor/256x256/apps/zorinmacbridge.png"
+
           cat > "$PKG/DEBIAN/control" <<CTRL
           Package: zorinmacbridge
           Version: $VERSION
@@ -41,8 +59,9 @@ jobs:
           Priority: optional
           Architecture: amd64
           Maintainer: ILoveMyProjects
-          Description: LAN-only Linux client for ZorinMacBridge macOS remote desktop
+          Description: LAN-first Linux client for ZorinMacBridge macOS remote desktop
           CTRL
+
           mkdir -p release
           dpkg-deb --build "$PKG" "release/ZorinMacBridge-Client_linux-amd64.deb"
           cp dist/ZorinMacBridge-Client "release/ZorinMacBridge-Client_linux-amd64"
@@ -60,22 +79,44 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Build macOS Apple Silicon server
+      - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pyinstaller Pillow==12.3.0 cryptography==50.0.1
+          python -m pip install pyinstaller Pillow==12.3.0 cryptography==50.0.1 'zeroconf>=0.147,<1' 'pystray>=0.19.5,<1'
+      - name: Build macOS Apple Silicon server
+        run: |
+          mkdir -p build/AppIcon.iconset
+          sips -z 16 16 assets/server.png --out build/AppIcon.iconset/icon_16x16.png >/dev/null
+          sips -z 32 32 assets/server.png --out build/AppIcon.iconset/icon_16x16@2x.png >/dev/null
+          sips -z 32 32 assets/server.png --out build/AppIcon.iconset/icon_32x32.png >/dev/null
+          sips -z 64 64 assets/server.png --out build/AppIcon.iconset/icon_32x32@2x.png >/dev/null
+          sips -z 128 128 assets/server.png --out build/AppIcon.iconset/icon_128x128.png >/dev/null
+          sips -z 256 256 assets/server.png --out build/AppIcon.iconset/icon_128x128@2x.png >/dev/null
+          sips -z 256 256 assets/server.png --out build/AppIcon.iconset/icon_256x256.png >/dev/null
+          sips -z 512 512 assets/server.png --out build/AppIcon.iconset/icon_256x256@2x.png >/dev/null
+          sips -z 512 512 assets/server.png --out build/AppIcon.iconset/icon_512x512.png >/dev/null
+          cp assets/server.png build/AppIcon.iconset/icon_512x512@2x.png
+          iconutil -c icns build/AppIcon.iconset -o build/server.icns
+
           pyinstaller --noconfirm --clean --windowed \
-            --name "ZorinMacBridge Server" \
+            --name 'ZorinMacBridge Server' \
             --osx-bundle-identifier com.ilovemyprojects.zorinmacbridge.server \
+            --icon build/server.icns \
+            --add-data 'assets/server.png:assets' \
+            --add-data 'VERSION:.' \
             --collect-all cryptography \
+            --collect-all zeroconf \
+            --collect-all pystray \
+            --hidden-import pystray._darwin \
             mac_server_gui.py
-          codesign --force --deep --sign - "dist/ZorinMacBridge Server.app"
-          VERSION="${GITHUB_REF_NAME#v}"
-          if [ "$VERSION" = "$GITHUB_REF_NAME" ]; then VERSION="$(cat VERSION)"; fi
-          mkdir -p release
-          hdiutil create -volname "ZorinMacBridge Server" \
-            -srcfolder "dist/ZorinMacBridge Server.app" \
-            -ov -format UDZO "release/ZorinMacBridge-Server_macOS-arm64.dmg"
+
+          codesign --force --deep --sign - 'dist/ZorinMacBridge Server.app'
+          mkdir -p release build/dmgroot
+          cp -R 'dist/ZorinMacBridge Server.app' build/dmgroot/
+          ln -s /Applications build/dmgroot/Applications
+          hdiutil create -volname 'ZorinMacBridge Server' \
+            -srcfolder build/dmgroot \
+            -ov -format UDZO 'release/ZorinMacBridge-Server_macOS-arm64.dmg'
           (cd release && shasum -a 256 * > SHA256SUMS-macOS-arm64.txt)
       - uses: actions/upload-artifact@v4
         with:
@@ -89,22 +130,44 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Build macOS Intel server
+      - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pyinstaller Pillow==12.3.0 cryptography==50.0.1
+          python -m pip install pyinstaller Pillow==12.3.0 cryptography==50.0.1 'zeroconf>=0.147,<1' 'pystray>=0.19.5,<1'
+      - name: Build macOS Intel server
+        run: |
+          mkdir -p build/AppIcon.iconset
+          sips -z 16 16 assets/server.png --out build/AppIcon.iconset/icon_16x16.png >/dev/null
+          sips -z 32 32 assets/server.png --out build/AppIcon.iconset/icon_16x16@2x.png >/dev/null
+          sips -z 32 32 assets/server.png --out build/AppIcon.iconset/icon_32x32.png >/dev/null
+          sips -z 64 64 assets/server.png --out build/AppIcon.iconset/icon_32x32@2x.png >/dev/null
+          sips -z 128 128 assets/server.png --out build/AppIcon.iconset/icon_128x128.png >/dev/null
+          sips -z 256 256 assets/server.png --out build/AppIcon.iconset/icon_128x128@2x.png >/dev/null
+          sips -z 256 256 assets/server.png --out build/AppIcon.iconset/icon_256x256.png >/dev/null
+          sips -z 512 512 assets/server.png --out build/AppIcon.iconset/icon_256x256@2x.png >/dev/null
+          sips -z 512 512 assets/server.png --out build/AppIcon.iconset/icon_512x512.png >/dev/null
+          cp assets/server.png build/AppIcon.iconset/icon_512x512@2x.png
+          iconutil -c icns build/AppIcon.iconset -o build/server.icns
+
           pyinstaller --noconfirm --clean --windowed \
-            --name "ZorinMacBridge Server" \
+            --name 'ZorinMacBridge Server' \
             --osx-bundle-identifier com.ilovemyprojects.zorinmacbridge.server \
+            --icon build/server.icns \
+            --add-data 'assets/server.png:assets' \
+            --add-data 'VERSION:.' \
             --collect-all cryptography \
+            --collect-all zeroconf \
+            --collect-all pystray \
+            --hidden-import pystray._darwin \
             mac_server_gui.py
-          codesign --force --deep --sign - "dist/ZorinMacBridge Server.app"
-          VERSION="${GITHUB_REF_NAME#v}"
-          if [ "$VERSION" = "$GITHUB_REF_NAME" ]; then VERSION="$(cat VERSION)"; fi
-          mkdir -p release
-          hdiutil create -volname "ZorinMacBridge Server" \
-            -srcfolder "dist/ZorinMacBridge Server.app" \
-            -ov -format UDZO "release/ZorinMacBridge-Server_macOS-x86_64.dmg"
+
+          codesign --force --deep --sign - 'dist/ZorinMacBridge Server.app'
+          mkdir -p release build/dmgroot
+          cp -R 'dist/ZorinMacBridge Server.app' build/dmgroot/
+          ln -s /Applications build/dmgroot/Applications
+          hdiutil create -volname 'ZorinMacBridge Server' \
+            -srcfolder build/dmgroot \
+            -ov -format UDZO 'release/ZorinMacBridge-Server_macOS-x86_64.dmg'
           (cd release && shasum -a 256 * > SHA256SUMS-macOS-x86_64.txt)
       - uses: actions/upload-artifact@v4
         with:

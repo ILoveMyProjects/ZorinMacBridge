@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=ZorinMacBridge Client
-Comment=LAN-only remote desktop client for macOS development machines
+Comment=LAN-only remote desktop client for manually started macOS development machines
 Exec=zorinmacbridge
 Icon=zorinmacbridge
 Terminal=false

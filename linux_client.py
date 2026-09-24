@@ -19,6 +19,11 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from PIL import Image, ImageTk
 
+from discovery import discover_servers
+from resources import resource_path, set_tk_icon
+from tray_icon import TrayController
+from updates import check_for_updates, open_release_page
+
 from protocol import (
     AUTH, AUTH_FAIL, AUTH_OK, CLIPBOARD_DATA, CLIPBOARD_GET, CLIPBOARD_SET,
     DOWNLOAD_BEGIN, DOWNLOAD_CHUNK, DOWNLOAD_END, DOWNLOAD_REQ, ERROR, FRAME,
@@ -84,9 +89,10 @@ def remote_join(parent: str, name: str) -> str:
 class ClientApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        root.title('ZorinMac-Bridge — Linux → macOS')
+        root.title('ZorinMacBridge — Linux → macOS')
         root.geometry('1280x900')
         root.minsize(900, 650)
+        set_tk_icon(root, 'assets/client.png')
 
         self.ip_var = tk.StringVar(value='192.168.1.50')
         self.port_var = tk.StringVar(value='45950')
@@ -95,6 +101,8 @@ class ClientApp:
         self.status_var = tk.StringVar(value='Disconnected')
         self.remote_path_var = tk.StringVar(value='/')
         self.linux_shortcuts_var = tk.BooleanVar(value=True)
+        self.machine_var = tk.StringVar(value='')
+        self.discovered_by_label = {}
 
         self.outgoing: queue.Queue[bytes] = queue.Queue(maxsize=1000)
         self.ui_queue: queue.Queue[tuple] = queue.Queue()
@@ -108,27 +116,74 @@ class ClientApp:
         self.keys_down: set[str] = set()
         self.remote_path = ''
         self.file_entries: dict[str, dict] = {}
+        self.tray = None
 
         self._build_ui()
+        self._build_menu()
+        self.tray = TrayController(
+            self.root,
+            'ZorinMacBridge Client',
+            resource_path('assets/client.png'),
+            [
+                ('Show window', self.show_window),
+                ('Find Macs on LAN', self.discover_macs),
+                ('Connect', self.connect),
+                ('Disconnect', self.disconnect),
+                ('Check for updates', self.check_updates),
+                ('Quit', self.on_close),
+            ],
+        )
+        self.tray.start()
         self.root.after(20, self._process_ui_queue)
+        self.root.after(700, self.discover_macs)
         self.root.protocol('WM_DELETE_WINDOW', self.on_close)
+
+    def _build_menu(self) -> None:
+        menu = tk.Menu(self.root)
+        connection = tk.Menu(menu, tearoff=False)
+        connection.add_command(label='Find Macs on LAN', command=self.discover_macs)
+        connection.add_command(label='Connect', command=self.connect)
+        connection.add_command(label='Disconnect', command=self.disconnect)
+        connection.add_separator()
+        connection.add_command(label='Exit', command=self.on_close)
+        menu.add_cascade(label='Connection', menu=connection)
+
+        help_menu = tk.Menu(menu, tearoff=False)
+        help_menu.add_command(label='Check for updates…', command=self.check_updates)
+        help_menu.add_command(label='About', command=self.show_about)
+        menu.add_cascade(label='Help', menu=help_menu)
+        self.root.configure(menu=menu)
 
     def _build_ui(self) -> None:
         top = ttk.Frame(self.root, padding=8)
         top.pack(fill='x')
-        ttk.Label(top, text='Mac IP:').grid(row=0, column=0, sticky='w')
-        ttk.Entry(top, textvariable=self.ip_var, width=16).grid(row=0, column=1, padx=(4, 10))
-        ttk.Label(top, text='Port:').grid(row=0, column=2, sticky='w')
-        ttk.Entry(top, textvariable=self.port_var, width=7).grid(row=0, column=3, padx=(4, 10))
-        ttk.Label(top, text='Password:').grid(row=0, column=4, sticky='w')
-        ttk.Entry(top, textvariable=self.password_var, show='•', width=18).grid(row=0, column=5, padx=(4, 10))
-        ttk.Button(top, text='Connect', command=self.connect).grid(row=0, column=6, padx=4)
-        ttk.Button(top, text='Disconnect', command=self.disconnect).grid(row=0, column=7, padx=4)
 
-        ttk.Label(top, text='TLS SHA-256 fingerprint:').grid(row=1, column=0, columnspan=2, sticky='w', pady=(8, 0))
-        ttk.Entry(top, textvariable=self.fp_var).grid(row=1, column=2, columnspan=6, sticky='ew', padx=(4, 0), pady=(8, 0))
+        ttk.Label(top, text='Discovered Mac:').grid(row=0, column=0, sticky='w')
+        self.machine_box = ttk.Combobox(top, textvariable=self.machine_var, state='readonly', width=38)
+        self.machine_box.grid(row=0, column=1, columnspan=3, sticky='ew', padx=(4, 8))
+        self.machine_box.bind('<<ComboboxSelected>>', self._machine_selected)
+        ttk.Button(top, text='Find Macs', command=self.discover_macs).grid(row=0, column=4, padx=4)
+        ttk.Label(top, text='LAN discovery only works while the Mac server is running.').grid(
+            row=0, column=5, columnspan=3, sticky='w', padx=(8, 0)
+        )
+
+        ttk.Label(top, text='Mac IP:').grid(row=1, column=0, sticky='w', pady=(8, 0))
+        ttk.Entry(top, textvariable=self.ip_var, width=16).grid(row=1, column=1, padx=(4, 10), pady=(8, 0))
+        ttk.Label(top, text='Port:').grid(row=1, column=2, sticky='w', pady=(8, 0))
+        ttk.Entry(top, textvariable=self.port_var, width=7).grid(row=1, column=3, padx=(4, 10), pady=(8, 0))
+        ttk.Label(top, text='Password:').grid(row=1, column=4, sticky='w', pady=(8, 0))
+        ttk.Entry(top, textvariable=self.password_var, show='•', width=18).grid(row=1, column=5, padx=(4, 10), pady=(8, 0))
+        ttk.Button(top, text='Connect', command=self.connect).grid(row=1, column=6, padx=4, pady=(8, 0))
+        ttk.Button(top, text='Disconnect', command=self.disconnect).grid(row=1, column=7, padx=4, pady=(8, 0))
+
+        ttk.Label(top, text='TLS SHA-256 fingerprint:').grid(row=2, column=0, columnspan=2, sticky='w', pady=(8, 0))
+        ttk.Entry(top, textvariable=self.fp_var).grid(row=2, column=2, columnspan=6, sticky='ew', padx=(4, 0), pady=(8, 0))
+        ttk.Label(
+            top,
+            text='Discovery fills IP/port only. Compare the fingerprint shown by the Mac before connecting.',
+        ).grid(row=3, column=0, columnspan=8, sticky='w', pady=(4, 0))
+        top.columnconfigure(1, weight=1)
         top.columnconfigure(5, weight=1)
-        top.columnconfigure(7, weight=1)
 
         options = ttk.Frame(self.root, padding=(8, 0, 8, 6))
         options.pack(fill='x')
@@ -199,6 +254,54 @@ class ClientApp:
             justify='left',
         ).pack(pady=(10, 0))
 
+    def show_window(self) -> None:
+        self.root.deiconify()
+        self.root.lift()
+        try:
+            self.root.focus_force()
+        except Exception:
+            pass
+
+    def _machine_selected(self, _event=None) -> None:
+        server = self.discovered_by_label.get(self.machine_var.get())
+        if server is None:
+            return
+        self.ip_var.set(server.ip)
+        self.port_var.set(str(server.port))
+        self.status_var.set(f'Selected {server.name} at {server.ip}:{server.port}. Verify TLS fingerprint on the Mac.')
+
+    def discover_macs(self) -> None:
+        self.status_var.set('Searching the local network for running Macs…')
+
+        def worker() -> None:
+            try:
+                servers = discover_servers(2.5)
+                self.ui_queue.put(('discovery', servers))
+            except Exception as exc:
+                self.ui_queue.put(('discovery_error', str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def check_updates(self) -> None:
+        self.status_var.set('Checking GitHub Releases for updates…')
+
+        def worker() -> None:
+            try:
+                self.ui_queue.put(('update', check_for_updates()))
+            except Exception as exc:
+                self.ui_queue.put(('update_error', str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def show_about(self) -> None:
+        from updates import current_version
+        messagebox.showinfo(
+            'About ZorinMacBridge',
+            f'ZorinMacBridge Client {current_version()}\n\n'
+            'LAN-first Linux client for a manually started macOS development server.\n'
+            'No background update checks are performed.',
+        )
+
     def _connection_params(self):
         ip = self.ip_var.get().strip()
         if not is_lan_ip(ip):
@@ -242,12 +345,12 @@ class ClientApp:
         return sock
 
     def connect(self) -> None:
-        if self.connected:
+        if self.connected or (self.net_thread is not None and self.net_thread.is_alive()):
             return
         try:
             self._connection_params()
         except Exception as exc:
-            messagebox.showerror('Connectenie', str(exc))
+            messagebox.showerror('Connection', str(exc))
             return
         self.stop_event.clear()
         self.status_var.set('Connecting…')
@@ -322,6 +425,37 @@ class ClientApp:
                     self.status_var.set(item[1])
                 elif item[0] == 'clipboard':
                     self._set_local_clipboard(item[1])
+                elif item[0] == 'discovery':
+                    servers = item[1]
+                    self.discovered_by_label = {server.label: server for server in servers}
+                    values = list(self.discovered_by_label)
+                    self.machine_box.configure(values=values)
+                    if servers:
+                        self.machine_var.set(values[0])
+                        self._machine_selected()
+                        self.status_var.set(f'Found {len(servers)} running Mac server(s) on the LAN.')
+                    else:
+                        self.machine_var.set('')
+                        self.status_var.set('No running ZorinMacBridge server found on the LAN.')
+                elif item[0] == 'discovery_error':
+                    self.status_var.set(f'LAN discovery error: {item[1]}')
+                elif item[0] == 'update':
+                    info = item[1]
+                    if info.available:
+                        if messagebox.askyesno(
+                            'ZorinMacBridge update',
+                            f'Version {info.latest} is available.\nInstalled: {info.current}\n\nOpen the release page?',
+                        ):
+                            open_release_page(info.page_url)
+                    else:
+                        messagebox.showinfo('ZorinMacBridge update', f'You are up to date (version {info.current}).')
+                    self.status_var.set('Update check completed.')
+                elif item[0] == 'update_error':
+                    self.status_var.set('Update check failed.')
+                    messagebox.showerror(
+                        'Update check failed',
+                        'The manual update check could not reach GitHub Releases.\n\n' + item[1],
+                    )
         except queue.Empty:
             pass
 
@@ -763,6 +897,8 @@ class ClientApp:
 
     def on_close(self) -> None:
         self.disconnect()
+        if self.tray is not None:
+            self.tray.stop()
         self.root.destroy()
 
 
