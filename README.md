@@ -320,3 +320,14 @@ If it says Accessibility is not granted, enable **ZorinMacBridge Server** under 
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## macOS privacy permissions and updates
+
+Screen Recording and Accessibility are macOS TCC permissions tied to the app's code identity.
+A release built with ad-hoc signing may require those permissions again after an update.
+ZorinMacBridge never bypasses TCC and, starting with v0.5.1, a remote **Connect** will not
+trigger the Screen Recording prompt: if permission is missing, the video channel fails with
+a clear message and the permission must be granted locally on the Mac.
+
+For stable permissions across releases, configure Developer ID signing in GitHub Actions.
+See [`SIGNING.md`](SIGNING.md).

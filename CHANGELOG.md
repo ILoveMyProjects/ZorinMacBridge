@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1
+
+- Prevent a remote client connection from triggering the macOS Screen Recording permission prompt.
+- Refuse H.264 capture before touching ScreenCaptureKit when the exact running build is not already authorized.
+- Propagate the native ScreenCaptureKit/VideoToolbox fatal error text to the Linux client instead of only `code=2`.
+- Add optional Developer ID signing and notarization support to the GitHub release workflow.
+- Add `SIGNING.md` with the required GitHub secrets and the reason ad-hoc builds cannot preserve TCC permissions across code changes.
+
 ## 0.5.0
 
 - Replaced the Linux client presentation layer with a native **GTK4 + libadwaita** interface for Zorin OS / GNOME.

@@ -102,6 +102,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pyinstaller Pillow==12.3.0 cryptography==50.0.1 certifi 'zeroconf>=0.147,<1' 'pystray>=0.19.5,<1'
       - name: Build macOS Apple Silicon server
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
           mkdir -p build
           MACOSX_DEPLOYMENT_TARGET=13.0 swiftc -O -emit-library \
@@ -142,7 +149,7 @@ jobs:
             mac_server_gui.py
 
           /usr/libexec/PlistBuddy -c "Add :NSScreenCaptureUsageDescription string ZorinMacBridge streams this Mac display only to an authenticated LAN client." 'dist/ZorinMacBridge Server.app/Contents/Info.plist' || true
-          codesign --force --deep --sign - 'dist/ZorinMacBridge Server.app'
+          scripts/sign-macos-app.sh 'dist/ZorinMacBridge Server.app'
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-streamer-load
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-update-tls
           mkdir -p release build/dmgroot
@@ -151,6 +158,7 @@ jobs:
           hdiutil create -volname 'ZorinMacBridge Server' \
             -srcfolder build/dmgroot \
             -ov -format UDZO 'release/ZorinMacBridge-Server_macOS-arm64.dmg'
+          scripts/notarize-macos-dmg.sh 'release/ZorinMacBridge-Server_macOS-arm64.dmg'
           (cd release && shasum -a 256 * > SHA256SUMS-macOS-arm64.txt)
       - uses: actions/upload-artifact@v4
         with:
@@ -169,6 +177,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pyinstaller Pillow==12.3.0 cryptography==50.0.1 certifi 'zeroconf>=0.147,<1' 'pystray>=0.19.5,<1'
       - name: Build macOS Intel server
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
           mkdir -p build
           MACOSX_DEPLOYMENT_TARGET=13.0 swiftc -O -emit-library \
@@ -209,7 +224,7 @@ jobs:
             mac_server_gui.py
 
           /usr/libexec/PlistBuddy -c "Add :NSScreenCaptureUsageDescription string ZorinMacBridge streams this Mac display only to an authenticated LAN client." 'dist/ZorinMacBridge Server.app/Contents/Info.plist' || true
-          codesign --force --deep --sign - 'dist/ZorinMacBridge Server.app'
+          scripts/sign-macos-app.sh 'dist/ZorinMacBridge Server.app'
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-streamer-load
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-update-tls
           mkdir -p release build/dmgroot
@@ -218,6 +233,7 @@ jobs:
           hdiutil create -volname 'ZorinMacBridge Server' \
             -srcfolder build/dmgroot \
             -ov -format UDZO 'release/ZorinMacBridge-Server_macOS-x86_64.dmg'
+          scripts/notarize-macos-dmg.sh 'release/ZorinMacBridge-Server_macOS-x86_64.dmg'
           (cd release && shasum -a 256 * > SHA256SUMS-macOS-x86_64.txt)
       - uses: actions/upload-artifact@v4
         with:

@@ -382,14 +382,14 @@ class ServerGUI:
             messagebox.showerror('Invalid port', 'Port must be a number.')
             return
 
-        # Never request Screen Recording automatically from Start Server.
-        # ScreenCaptureKit itself is used by the dedicated video process when a
-        # client opens the video channel. This check is informational only.
+        # Never request Screen Recording automatically from Start Server or Connect.
+        # The H.264 video channel checks this same-process preflight before it
+        # touches ScreenCaptureKit, so a remote connection cannot summon a TCC prompt.
         screen_permission = screen_capture_permission_status()
         if screen_permission is True:
             self._log('Screen Recording preflight: granted')
         elif screen_permission is False:
-            self._log('WARNING: Screen Recording preflight is not granted for this running build. Video may require one-time approval.')
+            self._log('WARNING: Screen Recording is not granted to this exact running build. Remote Connect will not trigger a permission prompt; grant it locally in System Settings and restart the app.')
         else:
             self._log('Screen Recording preflight API unavailable; native video channel will report its own status.')
 

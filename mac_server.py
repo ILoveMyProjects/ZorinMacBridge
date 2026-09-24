@@ -439,10 +439,18 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
     """Stream H.264 from ScreenCaptureKit running inside the main app process.
 
     The native Swift code is a dylib loaded with ctypes, not a child executable.
-    This is deliberate: Screen Recording authorization must belong to the same
-    ZorinMacBridge Server process that the user approved in macOS Settings.
-    Video still uses its own TLS connection, independent from input and files.
+    Screen Recording authorization therefore belongs to ZorinMacBridge Server.
+    Crucially, never trigger the macOS permission prompt from a remote Connect:
+    if this exact running build is not already authorized, fail before touching
+    ScreenCaptureKit and tell the client what the operator must do locally.
     """
+    permission = screen_capture_permission_status()
+    if permission is False:
+        raise RuntimeError(
+            'Screen Recording is not granted to this exact ZorinMacBridge Server build. '
+            'Open Privacy & Security > Screen Recording on the Mac, enable ZorinMacBridge Server, '
+            'then fully quit and reopen the app. The server will not request permission from a remote Connect.'
+        )
     native = NativeStreamerLibrary()
     data_r, data_w = os.pipe()
     log_r, log_w = os.pipe()
@@ -467,6 +475,7 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
         raise RuntimeError('failed to create in-process ScreenCaptureKit streamer')
 
     result: dict[str, int] = {'code': -999}
+    native_messages: list[str] = []
 
     def run_native() -> None:
         try:
@@ -481,6 +490,9 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
                 for raw in iter(stream.readline, b''):
                     line = raw.decode('utf-8', 'replace').rstrip()
                     if line:
+                        native_messages.append(line)
+                        if len(native_messages) > 20:
+                            del native_messages[:-20]
                         log('[video/native] ' + line)
         except Exception:
             pass
@@ -499,8 +511,11 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
                 try:
                     header = _read_exact_file(stream, 4)
                 except EOFError:
+                    runner.join(timeout=0.25)
                     code = result.get('code', -999)
-                    raise RuntimeError(f'native in-process H.264 streamer stopped (code={code})')
+                    detail = next((m for m in reversed(native_messages) if m.startswith(('fatal=', 'stream-stopped', 'encode-error', 'pipe-write-error'))), '')
+                    suffix = f': {detail}' if detail else ''
+                    raise RuntimeError(f'native in-process H.264 streamer stopped (code={code}){suffix}')
                 size = struct.unpack('!I', header)[0]
                 if not (1 <= size <= 16 * 1024 * 1024):
                     raise RuntimeError(f'invalid native H.264 access-unit size: {size}')
