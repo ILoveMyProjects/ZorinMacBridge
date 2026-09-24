@@ -109,15 +109,17 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
 
         let newStream = SCStream(filter: filter, configuration: config, delegate: self)
         try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
-        stateLock.lock()
-        if finished {
-            stateLock.unlock()
-            return
-        }
-        stream = newStream
-        stateLock.unlock()
+        guard installStreamUnlessFinished(newStream) else { return }
         try await newStream.startCapture()
         log("stream-started width=\(width) height=\(height) fps=\(fps) bitrate=\(bitrate)")
+    }
+
+    private func installStreamUnlessFinished(_ newStream: SCStream) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        if finished { return false }
+        stream = newStream
+        return true
     }
 
     private func createEncoder(width: Int32, height: Int32) throws {

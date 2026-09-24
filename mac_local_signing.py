@@ -84,6 +84,33 @@ def _load_cert_hashes(cert_pem: bytes) -> tuple[str, str, str]:
     return sha1, sha256, cn
 
 
+
+def _user_keychain_search_list() -> list[str]:
+    proc = _run(['/usr/bin/security', 'list-keychains', '-d', 'user'], check=False)
+    if proc.returncode != 0:
+        return []
+    result: list[str] = []
+    for raw in (proc.stdout or '').splitlines():
+        value = raw.strip().strip('"')
+        if value:
+            result.append(value)
+    return result
+
+
+def _ensure_keychain_searchable(keychain: Path) -> None:
+    """Put the app-owned keychain in the user's search list exactly once.
+
+    codesign may report errSecItemNotFound for a perfectly valid identity in a
+    custom keychain when that keychain is not in the user's search list.  Keep
+    the normal login/system entries and prepend only our private keychain.
+    """
+    current = _user_keychain_search_list()
+    wanted = str(keychain)
+    if wanted in current:
+        return
+    _run(['/usr/bin/security', 'list-keychains', '-d', 'user', '-s', wanted, *current])
+
+
 def _create_identity_files() -> None:
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
@@ -162,8 +189,16 @@ def _create_identity_files() -> None:
     # files), unlocked only when signing is needed, and never leaves this Mac.
     _run([
         '/usr/bin/security', 'import', str(P12_PATH), '-k', str(KEYCHAIN_PATH),
-        '-P', p12_password, '-A',
+        '-P', p12_password, '-A', '-T', '/usr/bin/codesign', '-T', '/usr/bin/security',
+        '-t', 'cert', '-f', 'pkcs12',
     ])
+    _ensure_keychain_searchable(KEYCHAIN_PATH)
+    private_key = _run(
+        ['/usr/bin/security', 'find-key', '-a', str(KEYCHAIN_PATH)],
+        check=False,
+    )
+    if private_key.returncode != 0:
+        raise LocalSigningError('The persistent signing private key was not imported into its keychain.')
 
 
 def ensure_local_identity() -> LocalIdentity:
@@ -204,6 +239,8 @@ def ensure_local_identity() -> LocalIdentity:
         cert_pem = CERT_PATH.read_bytes()
         cert_sha1, cert_sha256, common_name = _load_cert_hashes(cert_pem)
         _run(['/usr/bin/security', 'unlock-keychain', '-p', keychain_password, str(KEYCHAIN_PATH)])
+
+    _ensure_keychain_searchable(KEYCHAIN_PATH)
 
     cert_listing = _run(
         ['/usr/bin/security', 'find-certificate', '-a', '-Z', '-c', common_name, str(KEYCHAIN_PATH)]
@@ -283,15 +320,14 @@ def sign_app_locally(app: Path) -> LocalIdentity:
         for path in sorted(nested, key=lambda p: len(str(p)), reverse=True):
             _run([
                 '/usr/bin/codesign', '--force', '--timestamp=none',
-                '--keychain', str(identity.keychain), '--sign', identity.cert_sha1, str(path),
+                '--sign', identity.common_name, str(path),
             ])
 
         with tempfile.TemporaryDirectory(prefix='zmb-local-sign-') as tmp:
             req = _write_requirement(identity, Path(tmp))
             _run([
                 '/usr/bin/codesign', '--force', '--deep', '--options', 'runtime', '--timestamp=none',
-                '--keychain', str(identity.keychain), '--sign', identity.cert_sha1,
-                '--requirements', str(req), str(app),
+                '--sign', identity.common_name, '--requirements', str(req), str(app),
             ], timeout=180.0)
 
         verify_app_local_identity(app, identity)

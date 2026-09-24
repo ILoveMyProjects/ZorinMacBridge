@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.2
+
+- Fixed the remaining macOS CI transport-signing failure where `codesign` could report `The specified item could not be found in the keychain` even though `security find-identity` saw the imported identity.
+- The ephemeral signing keychain is now explicitly added to the user keychain search list and temporarily made the default keychain before any `codesign` call.
+- Transport signing now selects the identity by its certificate common name, verifies the matching private key is present, and prints keychain diagnostics if signing still fails.
+- The persistent per-Mac local signing keychain is also added to the user's keychain search list so the same errSecItemNotFound failure cannot reappear during an actual in-app update.
+- Removed the Swift 6 async-context `NSLock.lock()/unlock()` warnings in the ScreenCaptureKit startup path by moving the lock operation into a synchronous helper.
+
 ## 0.6.1
 
 - Fixed the macOS GitHub Actions signing failure `The specified item could not be found in the keychain` on macOS 15 runners.

@@ -40,10 +40,15 @@ def main() -> None:
     assert 'scripts/sign-macos-transport.sh' in workflow
     transport = Path('scripts/sign-macos-transport.sh').read_text(encoding='utf-8')
     local_signing = Path('mac_local_signing.py').read_text(encoding='utf-8')
-    assert '\nsecurity set-key-partition-list' not in transport
-    assert "'set-key-partition-list'" not in local_signing
+    assert 'security list-keychains -d user -s "$KEYCHAIN"' in transport
+    assert 'mapfile' not in transport
+    assert 'readarray' not in transport
+    assert 'security default-keychain -d user -s "$KEYCHAIN"' in transport
+    assert 'security find-key -a "$KEYCHAIN"' in transport
+    assert "_ensure_keychain_searchable(KEYCHAIN_PATH)" in local_signing
     assert 'security import "$TMP/identity.p12"' in transport
-    assert ' -A ' in transport or ' -A >/dev/null' in transport
+    assert ' -A ' in transport or ' -A \\' in transport
+    assert '--sign "$IDENTITY"' in transport
     assert "'-A'" in local_signing
     assert "--local-sign-app 'build/local-sign-test/ZorinMacBridge Server.app'" in workflow
     assert 'security add-trusted-cert -d -r trustRoot -p codeSign' in workflow
