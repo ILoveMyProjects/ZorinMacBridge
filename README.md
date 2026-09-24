@@ -131,7 +131,7 @@ Closing ZorinMacBridge still stops the server. Disabling **Launch at login** rem
 
 macOS controls Screen Recording and mouse/keyboard control through its privacy/TCC system. ZorinMacBridge cannot silently grant itself those permissions. In v0.5.2+, the server window has explicit **Request Screen Recording Access** and **Request Mouse/Keyboard Access** buttons. Those APIs are invoked only by a local click on the Mac; a remote connection never triggers a privacy prompt.
 
-For permissions to survive application updates reliably, macOS needs to recognize the new build as the same application. Ad-hoc signed builds do not provide a stable code identity across changed versions. For private/internal use, ZorinMacBridge now supports a persistent self-signed code-signing identity generated entirely on Zorin/Linux. The project keeps the bundle identifier stable as:
+For permissions to survive application updates reliably, macOS needs to recognize the new build as the same application. Ad-hoc signed builds do not provide a stable code identity across changed versions. For private/internal use, ZorinMacBridge uses a persistent self-signed code-signing identity created locally on each Mac. The private key never leaves that Mac. The project keeps the bundle identifier stable as:
 
 ```text
 com.ilovemyprojects.zorinmacbridge.server
@@ -145,7 +145,7 @@ com.apple.developer.persistent-content-capture
 
 Apple requires explicit approval before an app can use that entitlement. Do not add it to release signing until Apple has approved the entitlement for the developer account.
 
-Until releases use a stable signing identity, macOS may treat a newly downloaded build as a different executable and ask for privacy approval again even when a similarly named entry is already enabled in System Settings.
+The transport signature from GitHub is not used as the installed identity. Before installation, v0.6+ re-signs the staged app with that Mac's persistent local identity so normal later updates can keep the same designated requirement.
 
 ## Remote controls
 

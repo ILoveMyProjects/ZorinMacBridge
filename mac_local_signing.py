@@ -153,15 +153,16 @@ def _create_identity_files() -> None:
         except OSError:
             pass
     _run(['/usr/bin/security', 'create-keychain', '-p', keychain_password, str(KEYCHAIN_PATH)])
-    _run(['/usr/bin/security', 'set-keychain-settings', '-lut', '31536000', str(KEYCHAIN_PATH)])
+    _run(['/usr/bin/security', 'set-keychain-settings', '-lut', '600', str(KEYCHAIN_PATH)])
     _run(['/usr/bin/security', 'unlock-keychain', '-p', keychain_password, str(KEYCHAIN_PATH)])
+    # Use an isolated app-owned keychain. On macOS 15,
+    # `security set-key-partition-list` can fail with errSecItemNotFound even
+    # immediately after a successful PKCS#12 import. Importing with `-A` avoids
+    # that brittle mutation. The keychain is private (0700 directory / 0600
+    # files), unlocked only when signing is needed, and never leaves this Mac.
     _run([
         '/usr/bin/security', 'import', str(P12_PATH), '-k', str(KEYCHAIN_PATH),
-        '-P', p12_password, '-T', '/usr/bin/codesign', '-T', '/usr/bin/security',
-    ])
-    _run([
-        '/usr/bin/security', 'set-key-partition-list',
-        '-S', 'apple-tool:,apple:,codesign:', '-s', '-k', keychain_password, str(KEYCHAIN_PATH),
+        '-P', p12_password, '-A',
     ])
 
 
@@ -266,35 +267,37 @@ def sign_app_locally(app: Path) -> LocalIdentity:
             'The installer/migration must authorize that one-time trust step before signing.'
         )
     _run(['/usr/bin/security', 'unlock-keychain', '-p', identity.keychain_password, str(identity.keychain)])
+    try:
+        # Remove a stale quarantine marker from the staged copy. The transport DMG is
+        # still integrity-checked before this point; this prevents the locally signed
+        # copy from inheriting a release-download quarantine identity that no longer
+        # matches its new local signature.
+        if Path('/usr/bin/xattr').exists():
+            _run(['/usr/bin/xattr', '-dr', 'com.apple.quarantine', str(app)], check=False)
 
-    # Remove a stale quarantine marker from the staged copy. The transport DMG is
-    # still integrity-checked before this point; this prevents the locally signed
-    # copy from inheriting a release-download quarantine identity that no longer
-    # matches its new local signature.
-    if Path('/usr/bin/xattr').exists():
-        _run(['/usr/bin/xattr', '-dr', 'com.apple.quarantine', str(app)], check=False)
+        nested: list[Path] = []
+        contents = app / 'Contents'
+        for path in contents.rglob('*'):
+            if path.is_file() and path.suffix in ('.dylib', '.so'):
+                nested.append(path)
+        for path in sorted(nested, key=lambda p: len(str(p)), reverse=True):
+            _run([
+                '/usr/bin/codesign', '--force', '--timestamp=none',
+                '--keychain', str(identity.keychain), '--sign', identity.cert_sha1, str(path),
+            ])
 
-    nested: list[Path] = []
-    contents = app / 'Contents'
-    for path in contents.rglob('*'):
-        if path.is_file() and path.suffix in ('.dylib', '.so'):
-            nested.append(path)
-    for path in sorted(nested, key=lambda p: len(str(p)), reverse=True):
-        _run([
-            '/usr/bin/codesign', '--force', '--timestamp=none',
-            '--keychain', str(identity.keychain), '--sign', identity.cert_sha1, str(path),
-        ])
+        with tempfile.TemporaryDirectory(prefix='zmb-local-sign-') as tmp:
+            req = _write_requirement(identity, Path(tmp))
+            _run([
+                '/usr/bin/codesign', '--force', '--deep', '--options', 'runtime', '--timestamp=none',
+                '--keychain', str(identity.keychain), '--sign', identity.cert_sha1,
+                '--requirements', str(req), str(app),
+            ], timeout=180.0)
 
-    with tempfile.TemporaryDirectory(prefix='zmb-local-sign-') as tmp:
-        req = _write_requirement(identity, Path(tmp))
-        _run([
-            '/usr/bin/codesign', '--force', '--deep', '--options', 'runtime', '--timestamp=none',
-            '--keychain', str(identity.keychain), '--sign', identity.cert_sha1,
-            '--requirements', str(req), str(app),
-        ], timeout=180.0)
-
-    verify_app_local_identity(app, identity)
-    return identity
+        verify_app_local_identity(app, identity)
+        return identity
+    finally:
+        _run(['/usr/bin/security', 'lock-keychain', str(identity.keychain)], check=False)
 
 
 def verify_app_local_identity(app: Path, identity: LocalIdentity | None = None) -> None:

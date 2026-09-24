@@ -143,14 +143,18 @@ jobs:
             mac_server_gui.py
 
           /usr/libexec/PlistBuddy -c "Add :NSScreenCaptureUsageDescription string ZorinMacBridge streams this Mac display only to an authenticated LAN client." 'dist/ZorinMacBridge Server.app/Contents/Info.plist' || true
+          echo '=== macOS phase: transport signing ==='
           scripts/sign-macos-transport.sh 'dist/ZorinMacBridge Server.app'
+          echo '=== macOS phase: frozen-app self tests ==='
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-streamer-load
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-update-tls
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-permission-apis
+          echo '=== macOS phase: create persistent local identity ==='
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-local-signing-identity
           LOCAL_CERT="$HOME/Library/Application Support/ZorinMacBridge/CodeSigning/local-signing-cert.pem"
           test -f "$LOCAL_CERT"
           sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$LOCAL_CERT"
+          echo '=== macOS phase: persistent local-sign round trip ==='
           rm -rf 'build/local-sign-test'
           mkdir -p 'build/local-sign-test'
           ditto 'dist/ZorinMacBridge Server.app' 'build/local-sign-test/ZorinMacBridge Server.app'
@@ -221,14 +225,18 @@ jobs:
             mac_server_gui.py
 
           /usr/libexec/PlistBuddy -c "Add :NSScreenCaptureUsageDescription string ZorinMacBridge streams this Mac display only to an authenticated LAN client." 'dist/ZorinMacBridge Server.app/Contents/Info.plist' || true
+          echo '=== macOS phase: transport signing ==='
           scripts/sign-macos-transport.sh 'dist/ZorinMacBridge Server.app'
+          echo '=== macOS phase: frozen-app self tests ==='
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-streamer-load
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-update-tls
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-permission-apis
+          echo '=== macOS phase: create persistent local identity ==='
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-local-signing-identity
           LOCAL_CERT="$HOME/Library/Application Support/ZorinMacBridge/CodeSigning/local-signing-cert.pem"
           test -f "$LOCAL_CERT"
           sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$LOCAL_CERT"
+          echo '=== macOS phase: persistent local-sign round trip ==='
           rm -rf 'build/local-sign-test'
           mkdir -p 'build/local-sign-test'
           ditto 'dist/ZorinMacBridge Server.app' 'build/local-sign-test/ZorinMacBridge Server.app'

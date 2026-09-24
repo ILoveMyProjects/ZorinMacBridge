@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.1
+
+- Fixed the macOS GitHub Actions signing failure `The specified item could not be found in the keychain` on macOS 15 runners.
+- Removed the brittle `security set-key-partition-list` dependency from both ephemeral transport signing and persistent per-Mac local signing.
+- Imported signing identities into dedicated keychains with explicit non-interactive ACLs, and added an identity-presence check before `codesign` runs.
+- Added phase markers around transport/local signing in the release workflow so future keychain failures identify the exact failing stage.
+- Kept the v0.6 per-Mac persistent identity design: release artifacts are transport-signed only; installed updates are re-signed on the Mac with its persistent local identity.
+
 ## 0.6.0
 
 - Replaced the Linux/GitHub-secret macOS signing setup with an automatic persistent **per-Mac local code identity**.

@@ -26,7 +26,7 @@ This prevents each GitHub release build from becoming a new privacy identity on 
 
 ## Migration from v0.5.x
 
-v0.6.0 is the migration release. Older updaters can install its transport-signed app. On the first v0.6.0 launch, if the app in `/Applications` does not yet use the Mac's persistent local identity, ZorinMacBridge automatically:
+v0.6.1 is the first migration release intended for publication. Older updaters can install its transport-signed app. On the first v0.6.1 launch, if the app in `/Applications` does not yet use the Mac's persistent local identity, ZorinMacBridge automatically:
 
 1. creates/reuses the local identity;
 2. stages a copy of the installed app;
