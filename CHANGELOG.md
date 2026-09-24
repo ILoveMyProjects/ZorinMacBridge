@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.3
+
+- Fixed a diagnostics bug where desktop-session failures could be hidden by the very short streaming socket timeout, causing the Linux client to report only `Server closed the connection`.
+- Server-side error packets now temporarily use a safe write timeout so the real failure reaches the client before disconnect.
+- Linux client preserves the last server-reported error and includes it in the final disconnect reason.
+- macOS server now prefers the absolute system path `/usr/sbin/screencapture` instead of relying only on GUI-process `PATH`.
+- Added first-frame diagnostics to the macOS log: CoreGraphics initialization, capture backend, first capture, and first frame sent.
+- Added a macOS Screen Recording preflight before the server starts. If permission is missing, the app requests permission and tells the user to enable it and reopen the app instead of accepting desktop sessions that immediately fail.
+- Added a non-blocking Accessibility permission warning for remote mouse/keyboard control.
+- Screen-capture failures now include a direct macOS Privacy & Security remediation hint.
+
+## 0.3.2
+
+- Replaced the old "open GitHub Releases" update flow with a real user-initiated in-app updater.
+- Linux client now downloads the latest `.deb`, verifies its SHA-256 checksum, requests administrator authorization through PolicyKit/`pkexec`, and installs the package.
+- macOS server now downloads the correct Apple Silicon/Intel `.dmg`, verifies SHA-256, requests standard macOS administrator authorization, and replaces the app in `/Applications`.
+- Both apps offer a restart after a successful update. Restarting the macOS GUI does **not** start the remote-desktop server; the user must still click **Start server** manually.
+- Update downloads/installations never run automatically or in the background.
+- Added clearer updater progress/error reporting to the existing logs/status UI.
+
 ## 0.3.1
 
 - Added a **Logs** tab to the Linux client with timestamps, severity levels, copy, save, and clear actions.

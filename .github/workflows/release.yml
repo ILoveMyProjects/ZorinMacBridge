@@ -23,6 +23,12 @@ jobs:
           sudo apt-get install -y python3-tk
           python -m pip install --upgrade pip
           python -m pip install pyinstaller Pillow==12.3.0 'zeroconf>=0.147,<1' 'pystray>=0.19.5,<1'
+      - name: Run tests
+        run: |
+          python test_protocol.py
+          python test_support.py
+          python test_updater.py
+          python -m py_compile *.py
       - name: Build Linux client
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed \

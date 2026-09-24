@@ -135,6 +135,44 @@ def rel_join(parent: str, name: str) -> str:
     return name if not parent else f'{parent.rstrip("/")}/{name}'
 
 
+
+
+def screen_capture_permission_status() -> bool | None:
+    # Return True/False on supported macOS versions, None if unavailable.
+    try:
+        cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+        fn = getattr(cg, 'CGPreflightScreenCaptureAccess')
+        fn.argtypes = []
+        fn.restype = ctypes.c_bool
+        return bool(fn())
+    except Exception:
+        return None
+
+
+def request_screen_capture_permission() -> bool | None:
+    # Ask macOS for screen-capture consent when the API is available.
+    try:
+        cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+        fn = getattr(cg, 'CGRequestScreenCaptureAccess')
+        fn.argtypes = []
+        fn.restype = ctypes.c_bool
+        return bool(fn())
+    except Exception:
+        return None
+
+
+def accessibility_permission_status() -> bool | None:
+    # Return whether this process is trusted for Accessibility event posting.
+    try:
+        app = ctypes.CDLL('/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices')
+        fn = getattr(app, 'AXIsProcessTrusted')
+        fn.argtypes = []
+        fn.restype = ctypes.c_bool
+        return bool(fn())
+    except Exception:
+        return None
+
+
 class CGPoint(ctypes.Structure):
     _fields_ = [('x', ctypes.c_double), ('y', ctypes.c_double)]
 
@@ -325,9 +363,10 @@ class ScreenGrabber:
     def __init__(self, max_width: int, quality: int) -> None:
         self.max_width = max_width
         self.quality = quality
-        exe = shutil.which('screencapture')
+        preferred = Path('/usr/sbin/screencapture')
+        exe = str(preferred) if preferred.is_file() else shutil.which('screencapture')
         if not exe:
-            raise RuntimeError('macOS screencapture utility not found')
+            raise RuntimeError('macOS screencapture utility not found (expected /usr/sbin/screencapture)')
         self.exe = exe
         self.path = Path(tempfile.gettempdir()) / f'zorin-mac-bridge-{os.getpid()}-{uuid.uuid4().hex}.jpg'
 
@@ -346,7 +385,17 @@ class ScreenGrabber:
         )
         if proc.returncode != 0:
             msg = proc.stderr.decode('utf-8', 'replace').strip()
-            raise RuntimeError(f'screencapture failed: {msg or proc.returncode}')
+            detail = msg or f'exit code {proc.returncode}'
+            raise RuntimeError(
+                'screencapture failed: ' + detail + '. '
+                'Check System Settings → Privacy & Security → Screen Recording (or Screen & System Audio Recording) '
+                'and allow ZorinMacBridge Server, then quit and reopen the app.'
+            )
+        if not self.path.is_file() or self.path.stat().st_size == 0:
+            raise RuntimeError(
+                'screencapture produced no image. Check macOS Screen Recording permission for '
+                'ZorinMacBridge Server, then quit and reopen the app.'
+            )
         with Image.open(self.path) as im:
             im = im.convert('RGB')
             if self.max_width and im.width > self.max_width:
@@ -378,13 +427,18 @@ def recv_available(sock: ssl.SSLSocket, reader: PacketReader) -> list[tuple[int,
 
 def desktop_session(sock: ssl.SSLSocket, fps: float, max_width: int, quality: int, *, log=print) -> None:
     log('[desktop] connected')
+    log('[desktop] initializing CoreGraphics input')
     inp = MacInput()
+    log('[desktop] CoreGraphics input initialized')
     clipboard = MacClipboard()
+    log('[desktop] initializing screen capture backend')
     grabber = ScreenGrabber(max_width=max_width, quality=quality)
+    log(f'[desktop] screen capture backend: {grabber.exe}')
     reader = PacketReader()
-    sock.settimeout(0.002)
+    sock.settimeout(0.02)
     interval = 1.0 / max(1.0, min(float(fps), 20.0))
     next_frame = 0.0
+    first_frame = True
     try:
         while True:
             for kind, payload in recv_available(sock, reader):
@@ -410,8 +464,13 @@ def desktop_session(sock: ssl.SSLSocket, fps: float, max_width: int, quality: in
 
             now = time.monotonic()
             if now >= next_frame:
+                if first_frame:
+                    log('[desktop] capturing first frame')
                 width, height, jpeg = grabber.capture()
                 send_frame(sock, width, height, jpeg)
+                if first_frame:
+                    log(f'[desktop] first frame sent: {width}x{height}, {len(jpeg)} bytes')
+                    first_frame = False
                 next_frame = now + interval
             else:
                 time.sleep(min(0.003, next_frame - now))
@@ -422,10 +481,20 @@ def desktop_session(sock: ssl.SSLSocket, fps: float, max_width: int, quality: in
 
 
 def send_error(sock: ssl.SSLSocket, message: str) -> None:
+    previous_timeout = None
     try:
+        previous_timeout = sock.gettimeout()
+        # Desktop streaming uses a short read timeout. Do not reuse it for
+        # diagnostics or the real server error may be lost before disconnect.
+        sock.settimeout(2.0)
         sock.sendall(pack_packet(ERROR, message.encode('utf-8', 'replace')))
     except Exception:
         pass
+    finally:
+        try:
+            sock.settimeout(previous_timeout)
+        except Exception:
+            pass
 
 
 def list_dir(share: Path, rel: str) -> list[dict]:

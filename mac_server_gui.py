@@ -3,16 +3,20 @@ from __future__ import annotations
 
 import re
 import subprocess
+import os
 import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from mac_server import DEFAULT_SHARE, ensure_certificate, is_lan_ip, serve
+from mac_server import (
+    DEFAULT_SHARE, accessibility_permission_status, ensure_certificate, is_lan_ip,
+    request_screen_capture_permission, screen_capture_permission_status, serve,
+)
 from discovery import LanAdvertiser
 from resources import resource_path, set_tk_icon
 from tray_icon import TrayController
-from updates import check_for_updates, current_version, open_release_page
+from updates import check_for_updates, current_version, install_update
 
 
 def private_ipv4_addresses() -> list[str]:
@@ -94,6 +98,7 @@ class ServerGUI:
 
     def check_updates(self) -> None:
         self.status_var.set('Checking for updates…')
+        self._log('Manual update check requested.')
 
         def worker() -> None:
             try:
@@ -105,17 +110,73 @@ class ServerGUI:
         threading.Thread(target=worker, daemon=True).start()
 
     def _show_update_result(self, info) -> None:
-        if info.available:
-            if messagebox.askyesno(
-                'ZorinMacBridge update',
-                f'Version {info.latest} is available.\nInstalled: {info.current}\n\nOpen the release page?',
-            ):
-                open_release_page(info.page_url)
-        else:
+        if not info.available:
             messagebox.showinfo('ZorinMacBridge update', f'You are up to date (version {info.current}).')
-        self.status_var.set('Running' if self.thread and self.thread.is_alive() else 'Stopped')
+            self.status_var.set('Running' if self.thread and self.thread.is_alive() else 'Stopped')
+            return
+
+        if not messagebox.askyesno(
+            'ZorinMacBridge update',
+            f'Version {info.latest} is available.\nInstalled: {info.current}\n\nDownload, verify, and install it now?',
+        ):
+            self.status_var.set('Running' if self.thread and self.thread.is_alive() else 'Stopped')
+            return
+
+        if self.thread and self.thread.is_alive():
+            if not messagebox.askyesno(
+                'Stop server for update',
+                'The remote-desktop server must be stopped while the application is updated.\n\nStop it and continue?',
+            ):
+                self.status_var.set('Running')
+                return
+            self.stop()
+
+        self.status_var.set(f'Installing ZorinMacBridge {info.latest}…')
+        self._log(f'User approved update {info.current} → {info.latest}.')
+
+        def progress(message: str) -> None:
+            self._log('Updater: ' + message)
+            self.root.after(0, lambda m=message: self.status_var.set(m))
+
+        def worker() -> None:
+            try:
+                result = install_update(info, progress=progress)
+                self.root.after(0, lambda: self._update_installed(result))
+            except Exception as exc:
+                self.root.after(0, lambda error=str(exc): self._show_update_install_error(error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_installed(self, result) -> None:
+        self.status_var.set(f'Updated to {result.installed}. Restart recommended.')
+        self._log(f'Update installed successfully: {result.current} → {result.installed}')
+        if messagebox.askyesno(
+            'Update installed',
+            f'ZorinMacBridge {result.installed} was installed successfully.\n\nQuit and reopen the app now?',
+        ):
+            self._restart_after_update()
+
+    def _restart_after_update(self) -> None:
+        pid = os.getpid()
+        helper = f'while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open -a "ZorinMacBridge Server"'
+        subprocess.Popen(
+            ['/bin/sh', '-c', helper],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.on_close()
+
+    def _show_update_install_error(self, error: str) -> None:
+        self._log('Update installation failed: ' + error)
+        messagebox.showerror(
+            'Update installation failed',
+            'The update was not installed.\n\n' + error,
+        )
+        self.status_var.set('Stopped')
 
     def _show_update_error(self, error: str) -> None:
+        self._log('Update check failed: ' + error)
         messagebox.showerror(
             'Update check failed',
             'The manual update check could not reach GitHub Releases.\n\n' + error,
@@ -220,6 +281,29 @@ class ServerGUI:
         except ValueError:
             messagebox.showerror('Invalid port', 'Port must be a number.')
             return
+
+        screen_permission = screen_capture_permission_status()
+        if screen_permission is False:
+            self._log('Screen Recording permission is not granted. Requesting macOS consent…')
+            request_screen_capture_permission()
+            messagebox.showwarning(
+                'Screen Recording permission required',
+                'ZorinMacBridge Server needs Screen Recording permission to stream the Mac display.\n\n'
+                'Open System Settings → Privacy & Security → Screen Recording '
+                '(or Screen & System Audio Recording), enable ZorinMacBridge Server, '
+                'then quit and reopen ZorinMacBridge Server before starting the server.',
+            )
+            return
+        elif screen_permission is True:
+            self._log('Screen Recording permission: granted')
+        else:
+            self._log('Screen Recording permission: preflight API unavailable; continuing')
+
+        accessibility = accessibility_permission_status()
+        if accessibility is False:
+            self._log('WARNING: Accessibility permission is not granted; remote mouse/keyboard input may not work.')
+        elif accessibility is True:
+            self._log('Accessibility permission: granted')
 
         advertise = bool(self.advertise_var.get())
         share = Path(self.share_var.get())

@@ -171,7 +171,15 @@ Tray support is best-effort because Linux desktop environments differ. If the tr
 
 There is **no automatic or background update check**.
 
-Choose **Help → Check for updates** manually. Only then does the app contact the GitHub Releases API. If a newer version exists, the app offers to open the release page.
+Choose **Help → Check for updates** manually. Only then does the app contact the GitHub Releases API. If a newer version exists, the app asks whether you want to install it. After approval it:
+
+1. downloads the platform-specific release package and matching SHA-256 checksum file;
+2. verifies the package checksum;
+3. asks the operating system for administrator authorization;
+4. installs the update;
+5. offers to restart the application.
+
+The updater does **not** open a browser or require the user to find release files manually.
 
 You can also update by re-running the one-command installer:
 
@@ -187,7 +195,7 @@ curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/mast
 curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/master/install-macos.sh | bash
 ```
 
-The macOS installer updates the app in `/Applications` but **does not start it automatically**.
+The macOS installer updates the app in `/Applications` but **does not start the remote-desktop server automatically**. The in-app updater can reopen the GUI after an update, but the server remains stopped until the user manually selects **Start server**.
 
 ## Security model
 
@@ -260,4 +268,18 @@ MIT — see [LICENSE](LICENSE).
 
 The Linux client includes a **Logs** tab. If **Connect** immediately changes to **Disconnected**, open **Logs** and inspect the most recent entries. The log records the TCP connection, TLS handshake, TLS fingerprint verification, authentication result, server-reported session errors, and disconnect reason. Session passwords are never written to the log.
 
-Use **Copy all** to copy the log into a bug report, or **Save…** to write it to a local `.log` file.
+The macOS server window also contains a live log. For a healthy desktop connection it should progress through entries similar to:
+
+```text
+[desktop] connected
+[desktop] initializing CoreGraphics input
+[desktop] CoreGraphics input initialized
+[desktop] initializing screen capture backend
+[desktop] screen capture backend: /usr/sbin/screencapture
+[desktop] capturing first frame
+[desktop] first frame sent: ...
+```
+
+If Screen Recording permission is missing, **Start server** now stops before listening and asks you to enable **ZorinMacBridge Server** in **System Settings → Privacy & Security → Screen Recording** (the label may be **Screen & System Audio Recording** on some macOS versions). Quit and reopen the app after changing this permission. Accessibility permission is also required for remote mouse and keyboard control.
+
+Use **Copy all** in the Linux Logs tab to copy the client log into a bug report, or **Save…** to write it to a local `.log` file.

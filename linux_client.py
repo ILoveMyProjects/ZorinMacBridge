@@ -14,6 +14,8 @@ import ssl
 import struct
 import threading
 import traceback
+import subprocess
+import sys
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -24,7 +26,7 @@ from PIL import Image, ImageTk
 from discovery import discover_servers
 from resources import resource_path, set_tk_icon
 from tray_icon import TrayController
-from updates import check_for_updates, open_release_page
+from updates import check_for_updates, install_update
 
 from protocol import (
     AUTH, AUTH_FAIL, AUTH_OK, CLIPBOARD_DATA, CLIPBOARD_GET, CLIPBOARD_SET,
@@ -353,6 +355,42 @@ class ClientApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _install_update(self, info) -> None:
+        self.status_var.set(f'Installing ZorinMacBridge {info.latest}…')
+        self._log('INFO', f'User approved update {info.current} → {info.latest}.')
+
+        def progress(message: str) -> None:
+            self._log('INFO', f'Updater: {message}')
+            self.ui_queue.put(('update_progress', message))
+
+        def worker() -> None:
+            try:
+                result = install_update(info, progress=progress)
+                self.ui_queue.put(('update_installed', result))
+            except Exception as exc:
+                self._log('ERROR', f'Update install failed: {type(exc).__name__}: {exc}')
+                self.ui_queue.put(('update_install_error', str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _restart_after_update(self) -> None:
+        if not getattr(sys, 'frozen', False):
+            messagebox.showinfo(
+                'Restart required',
+                'The update was installed system-wide. This copy is running from source, so close it and launch ZorinMacBridge Client from the application menu.',
+            )
+            return
+        exe = sys.executable
+        pid = os.getpid()
+        command = f'while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; exec "$1"'
+        subprocess.Popen(
+            ['/bin/sh', '-c', command, 'zorinmacbridge-restart', exe],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.on_close()
+
     def show_about(self) -> None:
         from updates import current_version
         messagebox.showinfo(
@@ -446,6 +484,7 @@ class ClientApp:
             sock = self._secure_connect('desktop')
             sock.settimeout(0.02)
             reader = PacketReader()
+            last_server_error = ''
             self.ui_queue.put(('connected',))
             while not self.stop_event.is_set():
                 sent = 0
@@ -459,6 +498,8 @@ class ClientApp:
                 try:
                     data = sock.recv(65536)
                     if not data:
+                        if last_server_error:
+                            raise ConnectionError(f'Server closed after reporting: {last_server_error}')
                         raise ConnectionError('Server closed the connection')
                     for kind, payload in reader.feed(data):
                         if kind == FRAME and len(payload) > 8:
@@ -468,6 +509,7 @@ class ClientApp:
                             self.ui_queue.put(('clipboard', payload.decode('utf-8', 'replace')))
                         elif kind == ERROR:
                             server_error = payload.decode('utf-8', 'replace')
+                            last_server_error = server_error
                             self._log('ERROR', f'Server reported: {server_error}')
                             self.ui_queue.put(('error', server_error))
                 except (socket.timeout, ssl.SSLWantReadError):
@@ -539,16 +581,35 @@ class ClientApp:
                     self._log('ERROR', f'LAN discovery error: {item[1]}')
                 elif item[0] == 'update':
                     info = item[1]
+                    self._log('INFO', f'Update check completed: installed={info.current}, latest={info.latest}, available={info.available}')
                     if info.available:
                         if messagebox.askyesno(
                             'ZorinMacBridge update',
-                            f'Version {info.latest} is available.\nInstalled: {info.current}\n\nOpen the release page?',
+                            f'Version {info.latest} is available.\nInstalled: {info.current}\n\nDownload, verify, and install it now?',
                         ):
-                            open_release_page(info.page_url)
+                            self._install_update(info)
+                        else:
+                            self.status_var.set('Update cancelled.')
                     else:
                         messagebox.showinfo('ZorinMacBridge update', f'You are up to date (version {info.current}).')
-                    self.status_var.set('Update check completed.')
-                    self._log('INFO', f'Update check completed: installed={info.current}, latest={info.latest}, available={info.available}')
+                        self.status_var.set('Update check completed.')
+                elif item[0] == 'update_progress':
+                    self.status_var.set(item[1])
+                elif item[0] == 'update_installed':
+                    result = item[1]
+                    self.status_var.set(f'Updated to {result.installed}. Restart recommended.')
+                    self._log('INFO', f'Update installed successfully: {result.current} → {result.installed}')
+                    if messagebox.askyesno(
+                        'Update installed',
+                        f'ZorinMacBridge {result.installed} was installed successfully.\n\nRestart the client now?',
+                    ):
+                        self._restart_after_update()
+                elif item[0] == 'update_install_error':
+                    self.status_var.set('Update installation failed.')
+                    messagebox.showerror(
+                        'Update installation failed',
+                        'The update was not installed.\n\n' + item[1],
+                    )
                 elif item[0] == 'update_error':
                     self.status_var.set('Update check failed.')
                     messagebox.showerror(

@@ -69,11 +69,15 @@ If you do not want the Mac to advertise its presence on the LAN, disable **Adver
 
 The applications do not check for updates at startup or in the background.
 
-When the user explicitly selects **Check for updates**, the application sends an HTTPS request to the public GitHub Releases API for `ILoveMyProjects/ZorinMacBridge`. This is the only application feature designed to contact a public Internet service.
+When the user explicitly selects **Check for updates**, the application sends an HTTPS request to the public GitHub Releases API for `ILoveMyProjects/ZorinMacBridge`. If the user then explicitly approves installation, the updater downloads the matching release package and checksum file from GitHub, verifies SHA-256, and invokes the operating system's normal administrator-authorization mechanism before replacing the installed package/app.
+
+The updater never runs at startup or on a timer. It does not install a daemon, service, LaunchAgent, login item, or background updater.
 
 If this behavior is not desired, do not use the update-check command. The remote desktop and file transfer continue to work on an isolated LAN without Internet access.
 
 The one-command installation/update scripts also contact GitHub because they download the latest public release package.
+
+SHA-256 files protect against accidental corruption or mismatch between downloaded files. They are published in the same GitHub Release as the binaries; they are not a substitute for independent release signing. The current macOS build is ad-hoc signed rather than Developer-ID signed/notarized.
 
 ## Tray / menu-bar integration
 
