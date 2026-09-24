@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0
+
+- Replaced the Linux client presentation layer with a native **GTK4 + libadwaita** interface for Zorin OS / GNOME.
+- Reworked the remote file browser with system folder/file icons, native list rows, path display, and GTK file/folder pickers.
+- Kept the existing TLS/control/H.264/file-transfer backend while changing the Linux UI layer.
+- Changed the Linux `.deb` to install the native Python/GTK client and declare Zorin/Ubuntu system dependencies through APT instead of freezing the GUI with PyInstaller.
+- Preserved one-command installation and the in-app `.deb` updater.
+- Added **Open Shared Folder** to the macOS server window and Server menu.
+- Added **Command+Shift+O** on macOS to open the configured share directory in Finder.
+- The default share remains `~/ZorinMac-Share`.
+
+## 0.4.4
+
+- Added an explicit **Capture keyboard & mouse** switch to the Linux client; input is view-only until enabled.
+- Added double-click on the remote desktop image to enter full-screen mode.
+- Added **Alt+Esc** as a local-only full-screen escape shortcut.
+- Input state is released when capture is disabled, full-screen changes, or the client disconnects to reduce stuck modifier/button states on macOS.
+
 ## 0.4.3
 
 - Fixed repeated Screen Recording prompts when a client opened the video channel.

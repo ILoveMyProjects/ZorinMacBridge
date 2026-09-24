@@ -1,4 +1,4 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")"
-exec .venv/bin/python linux_client.py
+exec /usr/bin/python3 linux_client_gtk.py "$@"

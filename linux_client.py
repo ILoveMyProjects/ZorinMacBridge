@@ -111,6 +111,7 @@ class ClientApp:
         self.status_var = tk.StringVar(value='Disconnected')
         self.remote_path_var = tk.StringVar(value='/')
         self.linux_shortcuts_var = tk.BooleanVar(value=True)
+        self.capture_input_var = tk.BooleanVar(value=False)
         self.machine_var = tk.StringVar(value='')
         self.discovered_by_label = {}
         self.selected_server_id = ''
@@ -134,9 +135,12 @@ class ClientApp:
         self.file_entries: dict[str, dict] = {}
         self.tray = None
         self.disconnect_requested = False
+        self.fullscreen_active = False
+        self.mouse_buttons_down: set[int] = set()
 
         self._build_ui()
         self._build_menu()
+        self.root.bind_all('<Alt-Escape>', self._exit_fullscreen, add='+')
         self.tray = TrayController(
             self.root,
             'ZorinMacBridge Client',
@@ -170,10 +174,12 @@ class ClientApp:
         help_menu.add_command(label='Check for updates…', command=self.check_updates)
         help_menu.add_command(label='About', command=self.show_about)
         menu.add_cascade(label='Help', menu=help_menu)
+        self.menu_bar = menu
         self.root.configure(menu=menu)
 
     def _build_ui(self) -> None:
         top = ttk.Frame(self.root, padding=8)
+        self.top_frame = top
         top.pack(fill='x')
 
         ttk.Label(top, text='Discovered Mac:').grid(row=0, column=0, sticky='w')
@@ -204,6 +210,7 @@ class ClientApp:
         top.columnconfigure(5, weight=1)
 
         options = ttk.Frame(self.root, padding=(8, 0, 8, 6))
+        self.options_frame = options
         options.pack(fill='x')
         ttk.Checkbutton(
             options,
@@ -213,19 +220,29 @@ class ClientApp:
         ).pack(side='left')
         ttk.Checkbutton(options, text='Remember this Mac (fingerprint + password in system keyring)',
                         variable=self.remember_credentials_var).pack(side='left', padx=(12, 0))
+        ttk.Checkbutton(
+            options,
+            text='Capture keyboard & mouse',
+            variable=self.capture_input_var,
+            command=self._capture_input_changed,
+        ).pack(side='left', padx=(12, 0))
         ttk.Button(options, text='Clipboard Linux → Mac', command=self.push_clipboard).pack(side='right', padx=(4, 0))
         ttk.Button(options, text='Clipboard Mac → Linux', command=self.pull_clipboard).pack(side='right')
 
-        ttk.Label(self.root, textvariable=self.status_var, padding=(8, 0, 8, 6)).pack(fill='x')
+        self.status_label = ttk.Label(self.root, textvariable=self.status_var, padding=(8, 0, 8, 6))
+        self.status_label.pack(fill='x')
 
         pane = ttk.Panedwindow(self.root, orient='vertical')
+        self.main_pane = pane
         pane.pack(fill='both', expand=True, padx=8, pady=(0, 8))
 
         desk_frame = ttk.Frame(pane)
+        self.desktop_frame = desk_frame
         pane.add(desk_frame, weight=5)
         self.canvas = tk.Canvas(desk_frame, bg='black', highlightthickness=0, takefocus=True)
         self.canvas.pack(fill='both', expand=True)
         self.canvas.bind('<Configure>', lambda e: self._redraw())
+        self.canvas.bind('<Double-Button-1>', self._toggle_fullscreen)
         self.canvas.bind('<Motion>', self._mouse_move)
         for b in (1, 2, 3):
             self.canvas.bind(f'<ButtonPress-{b}>', lambda e, b=b: self._mouse_button(b, True, e))
@@ -239,6 +256,7 @@ class ClientApp:
         self.canvas.bind('<FocusOut>', lambda e: self._release_local_modifiers())
 
         lower_tabs = ttk.Notebook(pane)
+        self.lower_tabs = lower_tabs
         pane.add(lower_tabs, weight=2)
 
         files = ttk.Frame(lower_tabs, padding=4)
@@ -487,6 +505,8 @@ class ClientApp:
             messagebox.showerror('Connection', str(exc))
             return
         self.disconnect_requested = False
+        self.fullscreen_active = False
+        self.mouse_buttons_down: set[int] = set()
         self.remember_credentials_active = bool(self.remember_credentials_var.get())
         if not self.selected_server_id:
             self.selected_server_id = f'{ip}:{port}'
@@ -498,7 +518,9 @@ class ClientApp:
         self.net_thread.start()
 
     def disconnect(self) -> None:
-        self._release_local_modifiers()
+        if self.fullscreen_active:
+            self._exit_fullscreen()
+        self._release_remote_input_state()
         self.disconnect_requested = True
         self.stop_event.set()
         self.connected = False
@@ -639,7 +661,7 @@ class ClientApp:
                     self._append_log(item[1])
                 elif item[0] == 'connected':
                     self.connected = True
-                    self.status_var.set('Connected — click the desktop image to control the Mac')
+                    self.status_var.set('Connected — view only; enable Capture keyboard & mouse to control the Mac')
                     self._log('INFO', 'Desktop session connected.')
                     self.refresh_files()
                 elif item[0] == 'disconnected':
@@ -745,6 +767,74 @@ class ClientApp:
         self.last_photo = photo
         self.display_rect = (x, y, dw, dh)
 
+    def _capture_input_changed(self) -> None:
+        enabled = bool(self.capture_input_var.get())
+        if not enabled:
+            self._release_remote_input_state()
+            if self.connected:
+                self.status_var.set('Connected — view only')
+            self._log('INFO', 'Remote keyboard/mouse capture disabled; desktop is view-only.')
+            return
+        self.canvas.focus_set()
+        if self.connected:
+            self.status_var.set('Connected — keyboard & mouse capture enabled')
+        self._log('INFO', 'Remote keyboard/mouse capture enabled.')
+
+    def _release_remote_input_state(self) -> None:
+        # Release keys first so a local toggle/full-screen escape cannot leave a
+        # modifier logically held on the Mac. Mouse releases are best effort.
+        self._release_local_modifiers()
+        if self.connected:
+            x, y, w, h = self.display_rect
+            px = 0.5
+            py = 0.5
+            try:
+                if w > 0 and h > 0:
+                    px = min(1.0, max(0.0, (self.canvas.winfo_pointerx() - self.canvas.winfo_rootx() - x) / w))
+                    py = min(1.0, max(0.0, (self.canvas.winfo_pointery() - self.canvas.winfo_rooty() - y) / h))
+            except tk.TclError:
+                pass
+            for button in list(self.mouse_buttons_down):
+                self._enqueue(pack_packet(MOUSE_BUTTON, struct.pack('!BBff', button, 0, px, py)))
+        self.mouse_buttons_down.clear()
+
+    def _toggle_fullscreen(self, event=None) -> str:
+        if self.fullscreen_active:
+            return self._exit_fullscreen(event)
+        self.fullscreen_active = True
+        self._release_remote_input_state()
+        self.top_frame.pack_forget()
+        self.options_frame.pack_forget()
+        self.status_label.pack_forget()
+        try:
+            self.main_pane.forget(self.lower_tabs)
+        except tk.TclError:
+            pass
+        self.root.configure(menu='')
+        self.root.attributes('-fullscreen', True)
+        self.canvas.focus_set()
+        self.root.after_idle(self._redraw)
+        self._log('INFO', 'Entered full-screen desktop view. Press Alt+Esc to exit.')
+        return 'break'
+
+    def _exit_fullscreen(self, event=None) -> str | None:
+        if not self.fullscreen_active:
+            return None
+        self._release_remote_input_state()
+        self.root.attributes('-fullscreen', False)
+        self.root.configure(menu=self.menu_bar)
+        self.top_frame.pack(fill='x', before=self.main_pane)
+        self.options_frame.pack(fill='x', before=self.main_pane)
+        self.status_label.pack(fill='x', before=self.main_pane)
+        try:
+            self.main_pane.add(self.lower_tabs, weight=2)
+        except tk.TclError:
+            pass
+        self.fullscreen_active = False
+        self.root.after_idle(self._redraw)
+        self._log('INFO', 'Exited full-screen desktop view.')
+        return 'break'
+
     def _norm_xy(self, event) -> tuple[float, float] | None:
         x, y, w, h = self.display_rect
         if w <= 0 or h <= 0:
@@ -762,17 +852,27 @@ class ClientApp:
             pass
 
     def _mouse_move(self, event) -> None:
+        if not self.capture_input_var.get():
+            return
         pos = self._norm_xy(event)
         if pos:
             self._enqueue(pack_packet(MOUSE_MOVE, struct.pack('!ff', *pos)))
 
     def _mouse_button(self, button: int, down: bool, event) -> None:
+        if not self.capture_input_var.get():
+            return
         self.canvas.focus_set()
         pos = self._norm_xy(event)
         if pos:
+            if down:
+                self.mouse_buttons_down.add(button)
+            else:
+                self.mouse_buttons_down.discard(button)
             self._enqueue(pack_packet(MOUSE_BUTTON, struct.pack('!BBff', button, int(down), pos[0], pos[1])))
 
     def _send_scroll(self, dx: int, dy: int) -> None:
+        if not self.capture_input_var.get():
+            return
         self._enqueue(pack_packet(SCROLL, struct.pack('!ii', dx, dy)))
 
     def _map_keysym(self, keysym: str) -> str:
@@ -792,6 +892,14 @@ class ClientApp:
         return any(k.startswith(('Meta_', 'Control_', 'Alt_')) for k in self.modifiers_down)
 
     def _key_press(self, event) -> str:
+        # Alt+Esc is reserved locally as the emergency/full-screen escape chord.
+        if event.keysym == 'Escape' and self.fullscreen_active and (
+            (event.state & 0x0008) or 'Alt_L' in self.modifiers_down or 'Alt_R' in self.modifiers_down
+        ):
+            self._exit_fullscreen(event)
+            return 'break'
+        if not self.capture_input_var.get():
+            return 'break'
         keysym = self._map_keysym(event.keysym)
         if keysym in MODIFIER_KEYS or keysym in {'Meta_L', 'Meta_R'}:
             if keysym not in self.modifiers_down:
@@ -816,6 +924,8 @@ class ClientApp:
         return 'break'
 
     def _key_release(self, event) -> str:
+        if not self.capture_input_var.get():
+            return 'break'
         keysym = self._map_keysym(event.keysym)
         key_lower = keysym.lower() if len(keysym) == 1 else keysym
         command_was_down = self._command_down()

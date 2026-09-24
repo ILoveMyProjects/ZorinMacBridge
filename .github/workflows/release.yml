@@ -14,56 +14,53 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install build dependencies
+      - name: Install native Zorin/GNOME test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-tk
-          python -m pip install --upgrade pip
-          python -m pip install pyinstaller Pillow==12.3.0 av==18.1.0 certifi keyring==25.6.0 'secretstorage>=3.3,<4' 'zeroconf>=0.147,<1' 'pystray>=0.19.5,<1'
-      - name: Run tests
+          sudo apt-get install -y \
+            python3 python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
+            python3-pil python3-pil.imagetk python3-av python3-certifi \
+            python3-keyring python3-secretstorage python3-zeroconf python3-pystray \
+            python3-tk wl-clipboard xclip xvfb pkexec
+      - name: Run Linux tests
         run: |
-          python test_protocol.py
-          python test_support.py
-          python test_updater.py
-          python -m py_compile *.py
-      - name: Build Linux client
+          /usr/bin/python3 -m compileall -q .
+          /usr/bin/python3 test_protocol.py
+          /usr/bin/python3 test_support.py
+          /usr/bin/python3 test_updater.py
+          /usr/bin/python3 test_native_ui.py
+          /usr/bin/python3 -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); from gi.repository import Gtk, Adw; import av; av.CodecContext.create('h264','r'); import keyring; print('GTK4/libadwaita + H.264 runtime OK')"
+          bash -n install-linux.sh
+      - name: Build native Zorin/Ubuntu DEB
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed \
-            --name ZorinMacBridge-Client \
-            --add-data 'assets/client.png:assets' \
-            --add-data 'VERSION:.' \
-            --collect-all PIL \
-            --collect-all av \
-            --collect-all certifi \
-            --collect-all keyring \
-            --collect-all secretstorage \
-            --collect-all jeepney \
-            --collect-all zeroconf \
-            --collect-all pystray \
-            --collect-all Xlib \
-            --hidden-import PIL._tkinter_finder \
-            --hidden-import pystray._xorg \
-            linux_client.py
-
-
+          set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           if [ "$VERSION" = "$GITHUB_REF_NAME" ]; then VERSION="$(cat VERSION)"; fi
 
           PKG="build/deb"
-          mkdir -p "$PKG/DEBIAN" \
+          APP="$PKG/usr/lib/zorinmacbridge"
+          mkdir -p "$PKG/DEBIAN" "$APP/assets" \
                    "$PKG/usr/bin" \
                    "$PKG/usr/share/applications" \
                    "$PKG/usr/share/icons/hicolor/256x256/apps"
 
-          install -m 0755 dist/ZorinMacBridge-Client "$PKG/usr/bin/zorinmacbridge"
+          chmod 0755 "$PKG/DEBIAN"
+          install -m 0644 linux_client_gtk.py linux_client.py protocol.py discovery.py resources.py \
+            tray_icon.py updates.py settings.py secret_store.py "$APP/"
+          install -m 0644 VERSION "$APP/VERSION"
+          install -m 0644 assets/client.png "$APP/assets/client.png"
+
+          cat > "$PKG/usr/bin/zorinmacbridge" <<'EOF'
+          #!/bin/sh
+          exec /usr/bin/python3 /usr/lib/zorinmacbridge/linux_client_gtk.py "$@"
+          EOF
+          chmod 0755 "$PKG/usr/bin/zorinmacbridge"
+
           install -m 0644 packaging/linux/zorinmacbridge.desktop "$PKG/usr/share/applications/zorinmacbridge.desktop"
-          python - <<'PY'
+          /usr/bin/python3 - <<'PYPNG'
           from PIL import Image
           Image.open('assets/client.png').convert('RGBA').resize((256,256), Image.Resampling.LANCZOS).save('build/client-256.png')
-          PY
+          PYPNG
           install -m 0644 build/client-256.png "$PKG/usr/share/icons/hicolor/256x256/apps/zorinmacbridge.png"
 
           cat > "$PKG/DEBIAN/control" <<CTRL
@@ -73,27 +70,21 @@ jobs:
           Priority: optional
           Architecture: amd64
           Maintainer: ILoveMyProjects
-          Description: LAN-first Linux client for ZorinMacBridge macOS remote desktop
+          Depends: python3 (>= 3.12), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, libadwaita-1-0, python3-pil, python3-pil.imagetk, python3-av, python3-certifi, python3-keyring, python3-secretstorage, python3-zeroconf, python3-pystray, python3-tk, wl-clipboard, xclip, pkexec
+          Description: Native GTK4/libadwaita LAN client for ZorinMacBridge
+           Remote macOS desktop, keyboard/mouse, clipboard and shared-folder transfer
+           with a Zorin/GNOME-native interface.
           CTRL
 
           mkdir -p release
-          dpkg-deb --build "$PKG" "release/ZorinMacBridge-Client_linux-amd64.deb"
-          cp dist/ZorinMacBridge-Client "release/ZorinMacBridge-Client_linux-amd64"
-          chmod +x "release/ZorinMacBridge-Client_linux-amd64"
+          dpkg-deb --root-owner-group --build "$PKG" "release/ZorinMacBridge-Client_linux-amd64.deb"
           (cd release && sha256sum * > SHA256SUMS-linux.txt)
-      - name: Verify Linux frozen runtime
+      - name: Verify DEB layout
         run: |
           set -euo pipefail
-          echo "Running the actual frozen client video dependency self-test..."
-          if ! timeout 30s dist/ZorinMacBridge-Client --self-test-video; then
-            echo "ERROR: the frozen client cannot initialize its video runtime." >&2
-            echo "Archive entries relevant to Pillow/Tk/PyAV:" >&2
-            pyi-archive_viewer -r -l dist/ZorinMacBridge-Client > build/linux-archive-contents.txt || true
-            grep -Ei "PIL|tkinter|(^|[^A-Za-z])av([._/]|[^A-Za-z]|$)|ffmpeg|libav" build/linux-archive-contents.txt | tail -250 >&2 || true
-            exit 1
-          fi
-          echo "OK: frozen client initialized Pillow/Tk and a PyAV H.264 decoder."
-          dist/ZorinMacBridge-Client --self-test-update-tls
+          dpkg-deb --info release/ZorinMacBridge-Client_linux-amd64.deb
+          dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/linux_client_gtk.py'
+          dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/share/applications/zorinmacbridge.desktop'
       - uses: actions/upload-artifact@v4
         with:
           name: linux-amd64

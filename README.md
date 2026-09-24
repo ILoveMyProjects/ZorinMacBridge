@@ -14,7 +14,12 @@ The remote session does **not** require a vendor cloud, relay, account, telemetr
 
 > **Status:** experimental. This project is still under active development and has not received an independent security audit.
 
-Release v0.4.1 also verifies the **actual frozen Linux executable** can initialize Pillow/Tk and a PyAV H.264 decoder before GitHub publishes the installer.
+## Native Zorin/GNOME client UI
+
+v0.5 moves the Linux client to **GTK4 + libadwaita**. On Zorin OS / Ubuntu, controls, spacing, dialogs, switches and file browsing now use the desktop's native GTK/libadwaita theme instead of the old raw Tkinter interface.
+
+The `.deb` declares the required Ubuntu/Zorin runtime packages, so the one-command installer still handles everything through `apt`. The client uses system symbolic icons and native file dialogs.
+
 
 ## Install
 
@@ -42,7 +47,7 @@ The installer detects Apple Silicon vs Intel, downloads the correct `.dmg`, veri
 
 The public macOS builds are currently ad-hoc signed unless the release workflow is configured with a stable Apple signing identity. See **Stable macOS permissions** below.
 
-## What v0.4 changes
+## Remote desktop architecture
 
 The old prototype captured individual JPEG screenshots and sent them on the same connection used for mouse and keyboard input. That design could eventually fill the TLS socket buffer and block/disconnect the whole remote session.
 
@@ -136,12 +141,21 @@ Until releases use a stable signing identity, macOS may treat a newly downloaded
 ## Remote controls
 
 - continuous H.264 macOS screen stream;
-- mouse movement, left/right/middle click, drag and drop;
-- scrolling;
-- keyboard input;
+- explicit **Capture keyboard & mouse** switch in the Linux client;
+- mouse movement, left/right/middle click, drag and drop when input capture is enabled;
+- scrolling and keyboard input when input capture is enabled;
 - Linux-friendly shortcut mapping;
 - bidirectional text clipboard;
 - file and complete-folder transfer.
+
+The client starts in **view-only mode**. Enable **Capture keyboard & mouse** when you want local input to control the Mac. Turning it off immediately releases any keys/modifiers/buttons the client believes are held down.
+
+### Full-screen remote desktop
+
+- **Double-click** the remote desktop image to enter full-screen mode.
+- Press **Alt+Esc** to leave full-screen mode.
+- **Alt+Esc is reserved locally** while full-screen is active and is not sent to the Mac.
+- Entering or leaving full-screen releases held remote input state to avoid a stuck Alt/Ctrl/Command key.
 
 ### Keyboard mapping
 
@@ -170,6 +184,8 @@ Clipboard synchronization is currently text-only.
 
 ## Shared files and folders
 
+The Linux **Files** page is now a native GTK/libadwaita-style browser with system folder/file icons, the current remote path, upload/download actions, parent navigation, refresh, and native Zorin/GNOME file/folder pickers.
+
 The default macOS share is:
 
 ```text
@@ -186,6 +202,8 @@ From Linux you can:
 - download complete directory trees.
 
 Remote file access is restricted to the configured share root. Symlinks are skipped.
+
+On the Mac server, click **Open Shared Folder** (or press **Command+Shift+O**) to open the configured share directly in Finder. The default is `~/ZorinMac-Share`.
 
 File transfer is explicit rather than automatic two-way source synchronization. This avoids silently overwriting newer project files when both machines have changed the same path.
 
@@ -248,6 +266,8 @@ Manual downloads:
 Normal users should use the installers above.
 
 ## Linux client
+
+The source client uses the native Zorin/Ubuntu GTK stack. The setup script installs the required system packages, then `run_client.sh` launches the GTK4/libadwaita client.
 
 ```bash
 git clone https://github.com/ILoveMyProjects/ZorinMacBridge.git

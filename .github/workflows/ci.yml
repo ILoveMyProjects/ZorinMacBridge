@@ -9,17 +9,21 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install test dependencies
-        run: python -m pip install -r requirements.txt
+      - name: Install Linux/Zorin runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
+            python3-pil python3-pil.imagetk python3-av python3-certifi \
+            python3-keyring python3-secretstorage python3-zeroconf python3-pystray \
+            python3-tk wl-clipboard xclip xvfb pkexec
       - name: Syntax and protocol tests
         run: |
-          python -m compileall -q .
-          python test_protocol.py
-          python test_support.py
-          python test_updater.py
-          python -c "import av; av.CodecContext.create('h264', 'r'); import keyring"
+          /usr/bin/python3 -m compileall -q .
+          /usr/bin/python3 test_protocol.py
+          /usr/bin/python3 test_support.py
+          /usr/bin/python3 test_updater.py
+          /usr/bin/python3 test_native_ui.py
+          /usr/bin/python3 -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); from gi.repository import Gtk, Adw; import av; av.CodecContext.create('h264','r'); import keyring; print('GTK4/libadwaita + H.264 runtime OK')"
           bash -n install-linux.sh
           bash -n install-macos.sh

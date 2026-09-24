@@ -74,6 +74,7 @@ class ServerGUI:
                 ('Show window', self.show_window),
                 ('Start server', self.start),
                 ('Stop server', self.stop),
+                ('Open Shared Folder', self.open_shared_folder),
                 ('Check for updates', self.check_updates),
                 ('Quit', self.on_close),
             ],
@@ -96,6 +97,8 @@ class ServerGUI:
         server_menu.add_command(label='Start server', command=self.start)
         server_menu.add_command(label='Stop server', command=self.stop)
         server_menu.add_separator()
+        server_menu.add_command(label='Open Shared Folder', command=self.open_shared_folder, accelerator='⌘⇧O')
+        server_menu.add_separator()
         server_menu.add_command(label='Exit', command=self.on_close)
         menu.add_cascade(label='Server', menu=server_menu)
 
@@ -104,6 +107,8 @@ class ServerGUI:
         help_menu.add_command(label='About', command=self.show_about)
         menu.add_cascade(label='Help', menu=help_menu)
         self.root.configure(menu=menu)
+        self.root.bind_all('<Command-Shift-o>', lambda _e: self.open_shared_folder())
+        self.root.bind_all('<Meta-Shift-o>', lambda _e: self.open_shared_folder())
 
     def show_window(self) -> None:
         self.root.deiconify()
@@ -226,7 +231,10 @@ class ServerGUI:
 
         ttk.Label(outer, text='Shared folder').grid(row=4, column=0, sticky='w', pady=4)
         ttk.Entry(outer, textvariable=self.share_var).grid(row=4, column=1, sticky='ew', pady=4)
-        ttk.Button(outer, text='Choose…', command=self.choose_share).grid(row=4, column=2, padx=(8, 0), pady=4)
+        share_actions = ttk.Frame(outer)
+        share_actions.grid(row=4, column=2, padx=(8, 0), pady=4)
+        ttk.Button(share_actions, text='Open', command=self.open_shared_folder).pack(side='left')
+        ttk.Button(share_actions, text='Choose…', command=self.choose_share).pack(side='left', padx=(6, 0))
 
         ttk.Label(outer, text='Session password').grid(row=5, column=0, sticky='w', pady=4)
         self.password_entry = ttk.Entry(outer, textvariable=self.password_var, show='•')
@@ -279,6 +287,18 @@ class ServerGUI:
         outer.rowconfigure(15, weight=1)
 
         self.root.protocol('WM_DELETE_WINDOW', self.on_close)
+
+
+    def open_shared_folder(self) -> None:
+        """Open the configured transfer folder in Finder."""
+        try:
+            path = Path(self.share_var.get()).expanduser().resolve()
+            path.mkdir(parents=True, exist_ok=True)
+            subprocess.Popen(['/usr/bin/open', str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._log(f'Opened shared folder in Finder: {path}')
+        except Exception as exc:
+            self._log(f'Could not open shared folder: {exc}')
+            messagebox.showerror('Open Shared Folder', f'Could not open the shared folder.\n\n{exc}')
 
     def toggle_password(self) -> None:
         self.password_entry.configure(show='' if self.show_password_var.get() else '•')
