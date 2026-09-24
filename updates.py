@@ -5,12 +5,16 @@ import json
 import os
 import platform
 import shutil
+import ssl
 import subprocess
 import tempfile
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+
+import certifi
 
 from resources import resource_path
 
@@ -72,12 +76,66 @@ def _request(url: str) -> urllib.request.Request:
     )
 
 
+def _ca_bundle() -> str:
+    """Return the bundled Mozilla CA bundle used for HTTPS update traffic.
+
+    The frozen macOS app must not depend on whichever CA paths happen to be
+    visible to the embedded Python/OpenSSL runtime.  certifi is packaged with
+    the app and gives us a deterministic trust store while keeping certificate
+    verification fully enabled.
+    """
+    path = Path(certifi.where())
+    if not path.is_file():
+        raise RuntimeError(f'Bundled CA certificate file was not found: {path}')
+    return str(path)
+
+
+def _https_context() -> ssl.SSLContext:
+    return ssl.create_default_context(cafile=_ca_bundle())
+
+
+def _urlopen(request: urllib.request.Request, timeout: float):
+    url = request.full_url
+    try:
+        if url.lower().startswith('https://'):
+            return urllib.request.urlopen(request, timeout=timeout, context=_https_context())
+        # Local file:// URLs are used by the updater unit tests and do not use TLS.
+        return urllib.request.urlopen(request, timeout=timeout)
+    except ssl.SSLCertVerificationError as exc:
+        raise RuntimeError(
+            'TLS certificate verification failed while contacting GitHub for updates. '
+            f'Bundled CA file: {_ca_bundle()}. Error: {exc}'
+        ) from exc
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, 'reason', None)
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            raise RuntimeError(
+                'TLS certificate verification failed while contacting GitHub for updates. '
+                f'Bundled CA file: {_ca_bundle()}. Error: {reason}'
+            ) from exc
+        raise
+
+
+def updater_tls_self_test() -> str:
+    """Verify that a frozen build contains a usable CA bundle and SSL context.
+
+    This intentionally performs no network request.  The release workflow runs
+    it inside the finished executable to catch missing certifi data before a
+    release is published.
+    """
+    cafile = _ca_bundle()
+    context = _https_context()
+    if context.verify_mode != ssl.CERT_REQUIRED or not context.check_hostname:
+        raise RuntimeError('Updater TLS context is not enforcing certificate verification.')
+    return cafile
+
+
 def check_for_updates(timeout: float = 8.0) -> UpdateInfo:
     """Perform an explicit, user-initiated GitHub release check.
 
     This function is intentionally never called in the background or at app start.
     """
-    with urllib.request.urlopen(_request(LATEST_API), timeout=timeout) as response:
+    with _urlopen(_request(LATEST_API), timeout=timeout) as response:
         data = json.load(response)
 
     latest = str(data.get('tag_name') or '').strip().lstrip('vV')
@@ -135,7 +193,7 @@ def _emit(progress: ProgressCallback | None, message: str) -> None:
 
 def _download(asset: ReleaseAsset, target: Path, progress: ProgressCallback | None, timeout: float) -> None:
     _emit(progress, f'Downloading {asset.name}…')
-    with urllib.request.urlopen(_request(asset.download_url), timeout=timeout) as response, target.open('wb') as out:
+    with _urlopen(_request(asset.download_url), timeout=timeout) as response, target.open('wb') as out:
         total_header = response.headers.get('Content-Length')
         total = int(total_header) if total_header and total_header.isdigit() else asset.size
         received = 0

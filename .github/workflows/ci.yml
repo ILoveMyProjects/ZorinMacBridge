@@ -19,6 +19,7 @@ jobs:
           python -m compileall -q .
           python test_protocol.py
           python test_support.py
+          python test_updater.py
           python -c "import av; av.CodecContext.create('h264', 'r'); import keyring"
           bash -n install-linux.sh
           bash -n install-macos.sh

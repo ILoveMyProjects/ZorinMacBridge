@@ -5,40 +5,87 @@ import VideoToolbox
 import CoreMedia
 import CoreVideo
 
-private func writeStderr(_ text: String) {
-    let line = (text + "\n").data(using: .utf8) ?? Data()
-    try? FileHandle.standardError.write(contentsOf: line)
-}
-
-private func be32(_ value: UInt32) -> Data {
-    var v = value.bigEndian
-    return Data(bytes: &v, count: MemoryLayout<UInt32>.size)
-}
-
 @available(macOS 13.0, *)
 final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     private let fps: Int32
     private let maxWidth: Int
     private let bitrate: Int
-    private let output = FileHandle.standardOutput
+    private let output: FileHandle
+    private let logOutput: FileHandle
     private let sampleQueue = DispatchQueue(label: "com.ilovemyprojects.zorinmacbridge.capture", qos: .userInteractive)
     private let writeQueue = DispatchQueue(label: "com.ilovemyprojects.zorinmacbridge.streamwrite", qos: .userInteractive)
+    private let done = DispatchSemaphore(value: 0)
+    private let stateLock = NSLock()
     private var stream: SCStream?
     private var compression: VTCompressionSession?
-    private var stopped = false
+    private var finished = false
+    private var resultCode: Int32 = 0
 
-    init(fps: Int32, maxWidth: Int, bitrate: Int) {
+    init(fps: Int32, maxWidth: Int, bitrate: Int, outputFD: Int32, logFD: Int32) {
         self.fps = max(1, min(fps, 60))
         self.maxWidth = max(640, maxWidth)
         self.bitrate = max(1_000_000, bitrate)
+        self.output = FileHandle(fileDescriptor: outputFD, closeOnDealloc: true)
+        self.logOutput = FileHandle(fileDescriptor: logFD, closeOnDealloc: true)
         super.init()
     }
 
     deinit {
-        stop()
+        requestStop(code: 0, reason: nil)
     }
 
-    func start() async throws {
+    private func log(_ text: String) {
+        let line = (text + "\n").data(using: .utf8) ?? Data()
+        do {
+            try logOutput.write(contentsOf: line)
+        } catch {
+            // Logging must never take the capture process down.
+        }
+    }
+
+    func runBlocking() -> Int32 {
+        Task {
+            do {
+                try await self.start()
+            } catch {
+                self.requestStop(code: 2, reason: "fatal=\(error.localizedDescription)")
+            }
+        }
+        done.wait()
+        // Drain queued writes before closing the pipe ends so the Python side
+        // receives complete access units and then observes EOF deterministically.
+        writeQueue.sync {}
+        try? output.close()
+        try? logOutput.close()
+        return resultCode
+    }
+
+    func requestStop(code: Int32 = 0, reason: String? = nil) {
+        stateLock.lock()
+        if finished {
+            stateLock.unlock()
+            return
+        }
+        finished = true
+        resultCode = code
+        let activeStream = stream
+        let activeCompression = compression
+        stream = nil
+        compression = nil
+        stateLock.unlock()
+
+        if let reason { log(reason) }
+        if let activeStream {
+            activeStream.stopCapture(completionHandler: nil)
+        }
+        if let activeCompression {
+            VTCompressionSessionCompleteFrames(activeCompression, untilPresentationTimeStamp: .invalid)
+            VTCompressionSessionInvalidate(activeCompression)
+        }
+        done.signal()
+    }
+
+    private func start() async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         guard let display = content.displays.first else {
             throw NSError(domain: "ZorinMacBridge", code: 1, userInfo: [NSLocalizedDescriptionKey: "No display available for ScreenCaptureKit"])
@@ -60,25 +107,17 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         config.capturesAudio = false
 
-        let stream = SCStream(filter: filter, configuration: config, delegate: self)
-        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
-        self.stream = stream
-        try await stream.startCapture()
-        writeStderr("stream-started width=\(width) height=\(height) fps=\(fps) bitrate=\(bitrate)")
-    }
-
-    func stop() {
-        if stopped { return }
-        stopped = true
-        if let stream {
-            stream.stopCapture(completionHandler: nil)
+        let newStream = SCStream(filter: filter, configuration: config, delegate: self)
+        try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
+        stateLock.lock()
+        if finished {
+            stateLock.unlock()
+            return
         }
-        if let compression {
-            VTCompressionSessionCompleteFrames(compression, untilPresentationTimeStamp: .invalid)
-            VTCompressionSessionInvalidate(compression)
-        }
-        compression = nil
-        stream = nil
+        stream = newStream
+        stateLock.unlock()
+        try await newStream.startCapture()
+        log("stream-started width=\(width) height=\(height) fps=\(fps) bitrate=\(bitrate)")
     }
 
     private func createEncoder(width: Int32, height: Int32) throws {
@@ -118,11 +157,18 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
             VTCompressionSessionInvalidate(session)
             throw NSError(domain: "ZorinMacBridge", code: Int(prep), userInfo: [NSLocalizedDescriptionKey: "VTCompressionSessionPrepareToEncodeFrames failed: \(prep)"])
         }
+        stateLock.lock()
         compression = session
+        stateLock.unlock()
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
-        guard outputType == .screen, sampleBuffer.isValid, let compression else { return }
+        guard outputType == .screen, sampleBuffer.isValid else { return }
+        stateLock.lock()
+        let activeCompression = compression
+        let isFinished = finished
+        stateLock.unlock()
+        guard !isFinished, let activeCompression else { return }
 
         if let attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
            let attachments = attachmentsArray.first,
@@ -136,7 +182,7 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         let duration = CMTime(value: 1, timescale: CMTimeScale(fps))
         let status = VTCompressionSessionEncodeFrame(
-            compression,
+            activeCompression,
             imageBuffer: imageBuffer,
             presentationTimeStamp: pts,
             duration: duration,
@@ -145,13 +191,12 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
             infoFlagsOut: nil
         )
         if status != noErr {
-            writeStderr("encode-error status=\(status)")
+            log("encode-error status=\(status)")
         }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        writeStderr("stream-stopped error=\(error.localizedDescription)")
-        exit(3)
+        requestStop(code: 3, reason: "stream-stopped error=\(error.localizedDescription)")
     }
 
     private func handleEncoded(_ sampleBuffer: CMSampleBuffer) {
@@ -208,7 +253,7 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
             return CMBlockBufferCopyDataBytes(dataBuffer, atOffset: 0, dataLength: total, destination: base)
         }
         guard copyStatus == kCMBlockBufferNoErr else {
-            writeStderr("block-copy-error status=\(copyStatus)")
+            log("block-copy-error status=\(copyStatus)")
             return
         }
 
@@ -232,58 +277,58 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         guard !annexB.isEmpty, annexB.count <= 16 * 1024 * 1024 else { return }
         writeQueue.async { [weak self] in
             guard let self else { return }
+            self.stateLock.lock()
+            let isFinished = self.finished
+            self.stateLock.unlock()
+            if isFinished { return }
             do {
-                try self.output.write(contentsOf: be32(UInt32(annexB.count)))
+                var length = UInt32(annexB.count).bigEndian
+                let lengthData = Data(bytes: &length, count: MemoryLayout<UInt32>.size)
+                try self.output.write(contentsOf: lengthData)
                 try self.output.write(contentsOf: annexB)
             } catch {
-                writeStderr("stdout-write-error=\(error.localizedDescription)")
-                exit(4)
+                self.requestStop(code: 4, reason: "pipe-write-error=\(error.localizedDescription)")
             }
         }
     }
 }
 
-private struct Options {
-    var fps: Int32 = 30
-    var maxWidth: Int = 2560
-    var bitrate: Int = 8_000_000
+private func takeStreamer(_ handle: UnsafeMutableRawPointer) -> H264ScreenStreamer {
+    return Unmanaged<H264ScreenStreamer>.fromOpaque(handle).takeUnretainedValue()
 }
 
-private func parseOptions() -> Options {
-    var opts = Options()
-    let args = CommandLine.arguments
-    var i = 1
-    while i < args.count {
-        switch args[i] {
-        case "--fps" where i + 1 < args.count:
-            opts.fps = Int32(args[i + 1]) ?? opts.fps
-            i += 2
-        case "--max-width" where i + 1 < args.count:
-            opts.maxWidth = Int(args[i + 1]) ?? opts.maxWidth
-            i += 2
-        case "--bitrate" where i + 1 < args.count:
-            opts.bitrate = Int(args[i + 1]) ?? opts.bitrate
-            i += 2
-        default:
-            i += 1
-        }
-    }
-    return opts
+@_cdecl("zmb_streamer_create")
+public func zmb_streamer_create(_ fps: Int32, _ maxWidth: Int32, _ bitrate: Int32, _ outputFD: Int32, _ logFD: Int32) -> UnsafeMutableRawPointer? {
+    guard #available(macOS 13.0, *) else { return nil }
+    let streamer = H264ScreenStreamer(
+        fps: fps,
+        maxWidth: Int(maxWidth),
+        bitrate: Int(bitrate),
+        outputFD: outputFD,
+        logFD: logFD
+    )
+    return Unmanaged.passRetained(streamer).toOpaque()
 }
 
-if #available(macOS 13.0, *) {
-    let options = parseOptions()
-    let streamer = H264ScreenStreamer(fps: options.fps, maxWidth: options.maxWidth, bitrate: options.bitrate)
-    Task {
-        do {
-            try await streamer.start()
-        } catch {
-            writeStderr("fatal=\(error.localizedDescription)")
-            exit(2)
-        }
+@_cdecl("zmb_streamer_run")
+public func zmb_streamer_run(_ handle: UnsafeMutableRawPointer?) -> Int32 {
+    guard let handle else { return 10 }
+    if #available(macOS 13.0, *) {
+        return takeStreamer(handle).runBlocking()
     }
-    dispatchMain()
-} else {
-    writeStderr("fatal=macOS 13 or newer is required for ScreenCaptureKit streaming")
-    exit(2)
+    return 11
+}
+
+@_cdecl("zmb_streamer_stop")
+public func zmb_streamer_stop(_ handle: UnsafeMutableRawPointer?) {
+    guard let handle else { return }
+    if #available(macOS 13.0, *) {
+        takeStreamer(handle).requestStop(code: 0, reason: nil)
+    }
+}
+
+@_cdecl("zmb_streamer_destroy")
+public func zmb_streamer_destroy(_ handle: UnsafeMutableRawPointer?) {
+    guard let handle else { return }
+    Unmanaged<H264ScreenStreamer>.fromOpaque(handle).release()
 }

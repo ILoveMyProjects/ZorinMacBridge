@@ -22,7 +22,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y python3-tk
           python -m pip install --upgrade pip
-          python -m pip install pyinstaller Pillow==12.3.0 av==18.1.0 keyring==25.6.0 'secretstorage>=3.3,<4' 'zeroconf>=0.147,<1' 'pystray>=0.19.5,<1'
+          python -m pip install pyinstaller Pillow==12.3.0 av==18.1.0 certifi keyring==25.6.0 'secretstorage>=3.3,<4' 'zeroconf>=0.147,<1' 'pystray>=0.19.5,<1'
       - name: Run tests
         run: |
           python test_protocol.py
@@ -37,6 +37,7 @@ jobs:
             --add-data 'VERSION:.' \
             --collect-all PIL \
             --collect-all av \
+            --collect-all certifi \
             --collect-all keyring \
             --collect-all secretstorage \
             --collect-all jeepney \
@@ -92,6 +93,7 @@ jobs:
             exit 1
           fi
           echo "OK: frozen client initialized Pillow/Tk and a PyAV H.264 decoder."
+          dist/ZorinMacBridge-Client --self-test-update-tls
       - uses: actions/upload-artifact@v4
         with:
           name: linux-amd64
@@ -107,19 +109,19 @@ jobs:
       - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pyinstaller Pillow==12.3.0 cryptography==50.0.1 'zeroconf>=0.147,<1' 'pystray>=0.19.5,<1'
+          python -m pip install pyinstaller Pillow==12.3.0 cryptography==50.0.1 certifi 'zeroconf>=0.147,<1' 'pystray>=0.19.5,<1'
       - name: Build macOS Apple Silicon server
         run: |
           mkdir -p build
-          MACOSX_DEPLOYMENT_TARGET=13.0 swiftc -O \
+          MACOSX_DEPLOYMENT_TARGET=13.0 swiftc -O -emit-library \
             -framework ScreenCaptureKit \
             -framework VideoToolbox \
             -framework CoreMedia \
             -framework CoreVideo \
             -framework AppKit \
-            native/macos/ZMBStreamer.swift \
-            -o build/zmb-macos-streamer
-          test -x build/zmb-macos-streamer
+            native/macos/ZMBStreamerLib.swift \
+            -o build/libzmb_streamer.dylib
+          test -f build/libzmb_streamer.dylib
 
           mkdir -p build/AppIcon.iconset
           sips -z 16 16 assets/server.png --out build/AppIcon.iconset/icon_16x16.png >/dev/null
@@ -140,8 +142,9 @@ jobs:
             --icon build/server.icns \
             --add-data 'assets/server.png:assets' \
             --add-data 'VERSION:.' \
-            --add-binary 'build/zmb-macos-streamer:.' \
+            --add-binary 'build/libzmb_streamer.dylib:.' \
             --collect-all cryptography \
+            --collect-all certifi \
             --collect-all zeroconf \
             --collect-all pystray \
             --hidden-import pystray._darwin \
@@ -149,6 +152,8 @@ jobs:
 
           /usr/libexec/PlistBuddy -c "Add :NSScreenCaptureUsageDescription string ZorinMacBridge streams this Mac display only to an authenticated LAN client." 'dist/ZorinMacBridge Server.app/Contents/Info.plist' || true
           codesign --force --deep --sign - 'dist/ZorinMacBridge Server.app'
+          'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-streamer-load
+          'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-update-tls
           mkdir -p release build/dmgroot
           cp -R 'dist/ZorinMacBridge Server.app' build/dmgroot/
           ln -s /Applications build/dmgroot/Applications
@@ -171,19 +176,19 @@ jobs:
       - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pyinstaller Pillow==12.3.0 cryptography==50.0.1 'zeroconf>=0.147,<1' 'pystray>=0.19.5,<1'
+          python -m pip install pyinstaller Pillow==12.3.0 cryptography==50.0.1 certifi 'zeroconf>=0.147,<1' 'pystray>=0.19.5,<1'
       - name: Build macOS Intel server
         run: |
           mkdir -p build
-          MACOSX_DEPLOYMENT_TARGET=13.0 swiftc -O \
+          MACOSX_DEPLOYMENT_TARGET=13.0 swiftc -O -emit-library \
             -framework ScreenCaptureKit \
             -framework VideoToolbox \
             -framework CoreMedia \
             -framework CoreVideo \
             -framework AppKit \
-            native/macos/ZMBStreamer.swift \
-            -o build/zmb-macos-streamer
-          test -x build/zmb-macos-streamer
+            native/macos/ZMBStreamerLib.swift \
+            -o build/libzmb_streamer.dylib
+          test -f build/libzmb_streamer.dylib
 
           mkdir -p build/AppIcon.iconset
           sips -z 16 16 assets/server.png --out build/AppIcon.iconset/icon_16x16.png >/dev/null
@@ -204,8 +209,9 @@ jobs:
             --icon build/server.icns \
             --add-data 'assets/server.png:assets' \
             --add-data 'VERSION:.' \
-            --add-binary 'build/zmb-macos-streamer:.' \
+            --add-binary 'build/libzmb_streamer.dylib:.' \
             --collect-all cryptography \
+            --collect-all certifi \
             --collect-all zeroconf \
             --collect-all pystray \
             --hidden-import pystray._darwin \
@@ -213,6 +219,8 @@ jobs:
 
           /usr/libexec/PlistBuddy -c "Add :NSScreenCaptureUsageDescription string ZorinMacBridge streams this Mac display only to an authenticated LAN client." 'dist/ZorinMacBridge Server.app/Contents/Info.plist' || true
           codesign --force --deep --sign - 'dist/ZorinMacBridge Server.app'
+          'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-streamer-load
+          'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-update-tls
           mkdir -p release build/dmgroot
           cp -R 'dist/ZorinMacBridge Server.app' build/dmgroot/
           ln -s /Applications build/dmgroot/Applications

@@ -1,3 +1,4 @@
+certifi>=2024.8.30,<2028
 Pillow==12.3.0
 zeroconf>=0.147,<1
 pystray>=0.19.5,<1

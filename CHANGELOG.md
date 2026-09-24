@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.3
+
+- Fixed repeated Screen Recording prompts when a client opened the video channel.
+- Removed the separate `zmb-macos-streamer` capture subprocess.
+- ScreenCaptureKit and VideoToolbox now run from a Swift dynamic library loaded into the main `ZorinMacBridge Server.app` process.
+- Screen Recording TCC authorization now belongs to the same app process that the user grants in System Settings.
+- Added a frozen macOS release self-test that verifies the in-process streaming dylib can be loaded before a release is published.
+- Kept video on its own TLS connection; only the capture/encoding execution location changed.
+
+## 0.4.2
+
+- Fixed macOS `Check for updates` failing with `CERTIFICATE_VERIFY_FAILED` in frozen builds.
+- Update HTTPS now uses a bundled `certifi` CA trust store with certificate and hostname verification enabled.
+- Added frozen-app updater TLS self-tests to Linux and both macOS release builds.
+- Release builds now explicitly package `certifi`.
+
 ## 0.4.1
 
 - Fixed the Linux release verification step that falsely reported PyAV as missing even after a successful PyInstaller build.

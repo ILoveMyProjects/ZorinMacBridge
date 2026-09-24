@@ -30,7 +30,7 @@ import PIL._tkinter_finder  # noqa: F401
 from discovery import discover_servers
 from resources import resource_path, set_tk_icon
 from tray_icon import TrayController
-from updates import check_for_updates, install_update
+from updates import check_for_updates, install_update, updater_tls_self_test
 from settings import client_record, save_client_record
 from secret_store import get_password as get_saved_password, set_password as save_password_secret
 
@@ -1198,6 +1198,14 @@ def _self_test_video() -> int:
 def main() -> None:
     if '--self-test-video' in sys.argv:
         raise SystemExit(_self_test_video())
+    if '--self-test-update-tls' in sys.argv:
+        try:
+            cafile = updater_tls_self_test()
+            print(f'SELFTEST OK: updater TLS trust store initialized from {cafile}')
+            raise SystemExit(0)
+        except Exception as exc:
+            print(f'SELFTEST FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)
+            raise SystemExit(1)
     root = tk.Tk()
     ClientApp(root)
     root.mainloop()

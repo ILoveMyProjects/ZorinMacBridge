@@ -346,18 +346,41 @@ class MacClipboard:
         return data.decode('utf-8', 'replace')
 
 
-def streamer_executable() -> Path:
-    """Return the bundled native ScreenCaptureKit/VideoToolbox helper."""
+def streamer_library() -> Path:
+    """Return the bundled in-process ScreenCaptureKit/VideoToolbox library.
+
+    Screen capture must execute inside the main ZorinMacBridge Server process so
+    macOS TCC sees one stable app identity. A separate capture subprocess can be
+    treated as separate responsible code and trigger another Screen Recording
+    prompt when a client opens the video channel.
+    """
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-        candidate = Path(getattr(sys, '_MEIPASS')) / 'zmb-macos-streamer'
+        candidate = Path(getattr(sys, '_MEIPASS')) / 'libzmb_streamer.dylib'
     else:
-        candidate = Path(__file__).resolve().parent / 'build' / 'zmb-macos-streamer'
+        candidate = Path(__file__).resolve().parent / 'build' / 'libzmb_streamer.dylib'
     if not candidate.is_file():
         raise RuntimeError(
-            'Native H.264 streaming helper is missing. Release builds must bundle '
-            'zmb-macos-streamer; source builds can compile it with scripts/build-macos-streamer.sh.'
+            'Native in-process H.264 streaming library is missing. Release builds must bundle '
+            'libzmb_streamer.dylib; source builds can compile it with scripts/build-macos-streamer.sh.'
         )
     return candidate
+
+
+class NativeStreamerLibrary:
+    """ctypes wrapper around the Swift dylib loaded into this server process."""
+    def __init__(self) -> None:
+        self.path = streamer_library()
+        self.lib = ctypes.CDLL(str(self.path))
+        self.lib.zmb_streamer_create.argtypes = [
+            ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32
+        ]
+        self.lib.zmb_streamer_create.restype = ctypes.c_void_p
+        self.lib.zmb_streamer_run.argtypes = [ctypes.c_void_p]
+        self.lib.zmb_streamer_run.restype = ctypes.c_int32
+        self.lib.zmb_streamer_stop.argtypes = [ctypes.c_void_p]
+        self.lib.zmb_streamer_stop.restype = None
+        self.lib.zmb_streamer_destroy.argtypes = [ctypes.c_void_p]
+        self.lib.zmb_streamer_destroy.restype = None
 
 
 def _read_exact_file(stream, size: int) -> bytes:
@@ -413,64 +436,97 @@ def control_session(sock: ssl.SSLSocket, *, log=print) -> None:
 
 
 def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int, *, log=print) -> None:
-    """Stream hardware-encoded H.264 on its own TLS connection.
+    """Stream H.264 from ScreenCaptureKit running inside the main app process.
 
-    Keeping video on a dedicated socket prevents slow rendering from blocking
-    mouse/keyboard input, clipboard traffic, or file transfers.
+    The native Swift code is a dylib loaded with ctypes, not a child executable.
+    This is deliberate: Screen Recording authorization must belong to the same
+    ZorinMacBridge Server process that the user approved in macOS Settings.
+    Video still uses its own TLS connection, independent from input and files.
     """
-    helper = streamer_executable()
-    cmd = [
-        str(helper),
-        '--fps', str(max(1, min(int(round(fps)), 60))),
-        '--max-width', str(max(640, int(max_width))),
-        '--bitrate', str(max(1_000_000, int(bitrate))),
-    ]
-    log('[video] starting ScreenCaptureKit + VideoToolbox H.264 stream')
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        stdin=subprocess.DEVNULL,
-        bufsize=0,
-    )
-    assert proc.stdout is not None
-    assert proc.stderr is not None
+    native = NativeStreamerLibrary()
+    data_r, data_w = os.pipe()
+    log_r, log_w = os.pipe()
+    # Give Swift its own descriptors so Python can close its local write ends.
+    native_data_w = os.dup(data_w)
+    native_log_w = os.dup(log_w)
+    os.close(data_w)
+    os.close(log_w)
 
-    def stderr_worker() -> None:
+    handle = native.lib.zmb_streamer_create(
+        max(1, min(int(round(fps)), 60)),
+        max(640, int(max_width)),
+        max(1_000_000, int(bitrate)),
+        native_data_w,
+        native_log_w,
+    )
+    if not handle:
+        os.close(data_r)
+        os.close(log_r)
+        os.close(native_data_w)
+        os.close(native_log_w)
+        raise RuntimeError('failed to create in-process ScreenCaptureKit streamer')
+
+    result: dict[str, int] = {'code': -999}
+
+    def run_native() -> None:
         try:
-            for raw in iter(proc.stderr.readline, b''):
-                line = raw.decode('utf-8', 'replace').rstrip()
-                if line:
-                    log('[video/native] ' + line)
+            result['code'] = int(native.lib.zmb_streamer_run(handle))
+        except Exception as exc:
+            result['code'] = -998
+            log(f'[video/native] dylib run failed: {exc}')
+
+    def log_worker() -> None:
+        try:
+            with os.fdopen(log_r, 'rb', buffering=0) as stream:
+                for raw in iter(stream.readline, b''):
+                    line = raw.decode('utf-8', 'replace').rstrip()
+                    if line:
+                        log('[video/native] ' + line)
         except Exception:
             pass
 
-    threading.Thread(target=stderr_worker, daemon=True).start()
+    runner = threading.Thread(target=run_native, name='zmb-native-video', daemon=True)
+    logger = threading.Thread(target=log_worker, name='zmb-native-video-log', daemon=True)
+    log('[video] starting in-process ScreenCaptureKit + VideoToolbox H.264 stream')
+    runner.start()
+    logger.start()
+
     sock.settimeout(10.0)
     frames = 0
     try:
-        while True:
-            header = _read_exact_file(proc.stdout, 4)
-            size = struct.unpack('!I', header)[0]
-            if not (1 <= size <= 16 * 1024 * 1024):
-                raise RuntimeError(f'invalid native H.264 access-unit size: {size}')
-            payload = _read_exact_file(proc.stdout, size)
-            sock.sendall(pack_packet(VIDEO_H264, payload))
-            frames += 1
-            if frames == 1:
-                log(f'[video] first H.264 access unit sent ({len(payload)} bytes)')
-    except EOFError:
-        rc = proc.poll()
-        raise RuntimeError(f'native H.264 streamer exited unexpectedly (code={rc})')
+        with os.fdopen(data_r, 'rb', buffering=0) as stream:
+            while True:
+                try:
+                    header = _read_exact_file(stream, 4)
+                except EOFError:
+                    code = result.get('code', -999)
+                    raise RuntimeError(f'native in-process H.264 streamer stopped (code={code})')
+                size = struct.unpack('!I', header)[0]
+                if not (1 <= size <= 16 * 1024 * 1024):
+                    raise RuntimeError(f'invalid native H.264 access-unit size: {size}')
+                payload = _read_exact_file(stream, size)
+                sock.sendall(pack_packet(VIDEO_H264, payload))
+                frames += 1
+                if frames == 1:
+                    log(f'[video] first H.264 access unit sent ({len(payload)} bytes)')
     finally:
         try:
-            proc.terminate()
-            proc.wait(timeout=2)
+            native.lib.zmb_streamer_stop(handle)
         except Exception:
+            pass
+        runner.join(timeout=3.0)
+        try:
+            native.lib.zmb_streamer_destroy(handle)
+        except Exception:
+            pass
+        # These descriptors are owned by Swift FileHandle and normally close
+        # when runBlocking returns. Close defensively if they are still open.
+        for fd in (native_data_w, native_log_w):
             try:
-                proc.kill()
-            except Exception:
+                os.close(fd)
+            except OSError:
                 pass
+        logger.join(timeout=1.0)
         log('[video] disconnected')
 
 

@@ -58,7 +58,7 @@ file TLS sockets     ◄─────────────► files / folde
 
 The video path uses:
 
-- **ScreenCaptureKit** for continuous macOS display capture;
+- **ScreenCaptureKit** for continuous macOS display capture **inside the main server process**;
 - **VideoToolbox** for real-time H.264 encoding on the Mac;
 - **PyAV/FFmpeg** for H.264 decoding on Linux;
 - a dedicated TLS video connection so slow video rendering cannot block mouse/keyboard traffic.
@@ -71,7 +71,7 @@ Default video settings are currently **30 fps**, up to **2560 px wide**, with an
 
 1. Install **ZorinMacBridge Server**.
 2. Open it locally once.
-3. Grant **Screen Recording** when macOS asks.
+3. Grant **Screen Recording** to **ZorinMacBridge Server** when macOS asks. v0.4.3 keeps capture inside that same app process, so connecting a client does not launch a second capture executable that needs separate TCC approval.
 4. Grant **Accessibility** under **System Settings → Privacy & Security → Accessibility** so remote mouse and keyboard events are allowed.
 5. Enter a session password of at least 12 characters.
 6. Keep **Remember password verifier on this Mac** enabled.
@@ -259,7 +259,7 @@ chmod +x scripts/setup-source-linux.sh run_client.sh
 
 ## macOS server
 
-macOS 13+ and Xcode Command Line Tools are required for the native ScreenCaptureKit/VideoToolbox streamer.
+macOS 13+ and Xcode Command Line Tools are required for the native in-process ScreenCaptureKit/VideoToolbox streaming library.
 
 ```bash
 git clone https://github.com/ILoveMyProjects/ZorinMacBridge.git
@@ -276,14 +276,18 @@ python test_protocol.py
 python test_support.py
 python test_updater.py
 python -m compileall -q .
-swiftc -frontend -parse native/macos/ZMBStreamer.swift
+swiftc -frontend -parse native/macos/ZMBStreamerLib.swift
 ```
 
-The final macOS compilation of the native streamer is performed on the macOS GitHub Actions runners because ScreenCaptureKit and VideoToolbox are macOS frameworks.
+The final macOS compilation of the native streaming dylib is performed on the macOS GitHub Actions runners because ScreenCaptureKit and VideoToolbox are macOS frameworks. The dylib is loaded into `ZorinMacBridge Server.app` with `ctypes`; it is not launched as a child capture process.
 
 ## Troubleshooting
 
 The Linux client includes a **Logs** tab. Connection logs show TCP, TLS, fingerprint verification, authentication, control-channel state, H.264 video-channel state, decode errors, and disconnect reasons. Passwords are never written to the logs.
+
+If macOS asks for Screen Recording **when you press Connect**, make sure you are on v0.4.3 or newer. v0.4.0-v0.4.2 launched a separate native capture executable, which could be treated as separate TCC-responsible code. v0.4.3 runs ScreenCaptureKit in the main server process instead.
+
+Because GitHub builds are currently ad-hoc signed, installing a *new release* can still require a one-time Screen Recording approval for that new build. Stable permission continuity across releases requires stable Developer ID signing.
 
 If video works but mouse/keyboard does not, check the Mac server log for:
 

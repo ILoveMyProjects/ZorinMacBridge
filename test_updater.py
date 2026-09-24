@@ -4,7 +4,7 @@ import hashlib
 import tempfile
 from pathlib import Path
 
-from updates import ReleaseAsset, UpdateInfo, _download_and_verify
+from updates import ReleaseAsset, UpdateInfo, _download_and_verify, updater_tls_self_test
 
 
 def file_asset(path: Path) -> ReleaseAsset:
@@ -12,6 +12,8 @@ def file_asset(path: Path) -> ReleaseAsset:
 
 
 def main() -> None:
+    cafile = updater_tls_self_test()
+    assert Path(cafile).is_file()
     with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as dest_tmp:
         source = Path(source_tmp)
         package = source / 'ZorinMacBridge-Client_linux-amd64.deb'

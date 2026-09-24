@@ -4,19 +4,21 @@ from __future__ import annotations
 import re
 import subprocess
 import os
+import sys
 import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from mac_server import (
+    NativeStreamerLibrary,
     DEFAULT_SHARE, accessibility_permission_status, ensure_certificate, is_lan_ip,
     screen_capture_permission_status, serve,
 )
 from discovery import LanAdvertiser
 from resources import resource_path, set_tk_icon
 from tray_icon import TrayController
-from updates import check_for_updates, current_version, install_update
+from updates import check_for_updates, current_version, install_update, updater_tls_self_test
 from settings import (PasswordVerifier, load_server_password_verifier, load_server_settings,
                       persistent_server_id, save_server_password, update_server_settings)
 
@@ -442,6 +444,22 @@ class ServerGUI:
 
 
 def main() -> None:
+    if '--self-test-streamer-load' in sys.argv:
+        try:
+            native = NativeStreamerLibrary()
+            print(f'SELFTEST OK: in-process streamer library loaded from {native.path}')
+            raise SystemExit(0)
+        except Exception as exc:
+            print(f'SELFTEST FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)
+            raise SystemExit(1)
+    if '--self-test-update-tls' in sys.argv:
+        try:
+            cafile = updater_tls_self_test()
+            print(f'SELFTEST OK: updater TLS trust store initialized from {cafile}')
+            raise SystemExit(0)
+        except Exception as exc:
+            print(f'SELFTEST FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)
+            raise SystemExit(1)
     root = tk.Tk()
     ServerGUI(root)
     root.mainloop()

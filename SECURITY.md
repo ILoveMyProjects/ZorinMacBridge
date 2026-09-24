@@ -40,6 +40,8 @@ Remote file operations are constrained to the configured share root (default `~/
 
 Screen Recording and Accessibility are macOS privacy/TCC permissions. ZorinMacBridge does not attempt to bypass or silently grant them.
 
+As of v0.4.3, ScreenCaptureKit runs inside the main `ZorinMacBridge Server.app` process through an embedded Swift dynamic library. The project intentionally does not launch a separate screen-capture executable, because a separate process can be treated as distinct responsible code by macOS privacy controls.
+
 Stable permissions across application updates depend on stable macOS code identity. Ad-hoc signed builds may be treated as different code after updates. Production releases should use a stable Developer ID Application identity and notarization.
 
 Apple also provides the restricted `com.apple.developer.persistent-content-capture` entitlement for VNC applications that need persistent screen-capture access. The entitlement requires Apple approval before it may be used.
