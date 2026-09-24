@@ -21,7 +21,7 @@ The remote desktop session itself does **not** require a cloud account, vendor r
 Copy and paste one command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/main/install-linux.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/master/install-linux.sh | bash
 ```
 
 The installer downloads the latest `.deb`, verifies its published SHA-256 checksum, installs it with `apt`, and adds **ZorinMacBridge Client** to the application menu.
@@ -35,7 +35,7 @@ To update later, either use **Help → Check for updates** in the app or run the
 Copy and paste one command on the Mac:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/main/install-macos.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/master/install-macos.sh | bash
 ```
 
 The installer automatically detects Apple Silicon vs Intel, downloads the correct `.dmg`, verifies its published SHA-256 checksum, and installs **ZorinMacBridge Server** into `/Applications`.
@@ -178,13 +178,13 @@ You can also update by re-running the one-command installer:
 ### Linux
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/main/install-linux.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/master/install-linux.sh | bash
 ```
 
 ### macOS
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/main/install-macos.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/master/install-macos.sh | bash
 ```
 
 The macOS installer updates the app in `/Applications` but **does not start it automatically**.
@@ -255,3 +255,9 @@ python -m compileall -q .
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Troubleshooting connection failures
+
+The Linux client includes a **Logs** tab. If **Connect** immediately changes to **Disconnected**, open **Logs** and inspect the most recent entries. The log records the TCP connection, TLS handshake, TLS fingerprint verification, authentication result, server-reported session errors, and disconnect reason. Session passwords are never written to the log.
+
+Use **Copy all** to copy the log into a bug report, or **Save…** to write it to a local `.log` file.

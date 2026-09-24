@@ -13,9 +13,11 @@ import socket
 import ssl
 import struct
 import threading
+import traceback
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter.scrolledtext import ScrolledText
 
 from PIL import Image, ImageTk
 
@@ -117,6 +119,7 @@ class ClientApp:
         self.remote_path = ''
         self.file_entries: dict[str, dict] = {}
         self.tray = None
+        self.disconnect_requested = False
 
         self._build_ui()
         self._build_menu()
@@ -137,6 +140,7 @@ class ClientApp:
         self.root.after(20, self._process_ui_queue)
         self.root.after(700, self.discover_macs)
         self.root.protocol('WM_DELETE_WINDOW', self.on_close)
+        self._log('INFO', 'ZorinMacBridge Client started.')
 
     def _build_menu(self) -> None:
         menu = tk.Menu(self.root)
@@ -218,8 +222,11 @@ class ClientApp:
         self.canvas.bind('<Button-1>', lambda e: self.canvas.focus_set(), add='+')
         self.canvas.bind('<FocusOut>', lambda e: self._release_local_modifiers())
 
-        files = ttk.Frame(pane, padding=4)
-        pane.add(files, weight=2)
+        lower_tabs = ttk.Notebook(pane)
+        pane.add(lower_tabs, weight=2)
+
+        files = ttk.Frame(lower_tabs, padding=4)
+        lower_tabs.add(files, text='Files')
 
         nav = ttk.Frame(files)
         nav.pack(fill='x', pady=(0, 4))
@@ -254,6 +261,54 @@ class ClientApp:
             justify='left',
         ).pack(pady=(10, 0))
 
+        logs = ttk.Frame(lower_tabs, padding=6)
+        lower_tabs.add(logs, text='Logs')
+        log_toolbar = ttk.Frame(logs)
+        log_toolbar.pack(fill='x', pady=(0, 6))
+        ttk.Button(log_toolbar, text='Copy all', command=self.copy_logs).pack(side='left')
+        ttk.Button(log_toolbar, text='Save…', command=self.save_logs).pack(side='left', padx=(6, 0))
+        ttk.Button(log_toolbar, text='Clear', command=self.clear_logs).pack(side='left', padx=(6, 0))
+        ttk.Label(
+            log_toolbar,
+            text='Passwords are never written to this log.',
+        ).pack(side='right')
+        self.log_text = ScrolledText(logs, wrap='word', height=10, state='disabled')
+        self.log_text.pack(fill='both', expand=True)
+
+    def _log(self, level: str, message: str) -> None:
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        clean = str(message).replace('\r', '\\r')
+        self.ui_queue.put(('log', f'{timestamp} [{level}] {clean}'))
+
+    def _append_log(self, line: str) -> None:
+        self.log_text.configure(state='normal')
+        self.log_text.insert('end', line.rstrip() + '\n')
+        self.log_text.see('end')
+        self.log_text.configure(state='disabled')
+
+    def clear_logs(self) -> None:
+        self.log_text.configure(state='normal')
+        self.log_text.delete('1.0', 'end')
+        self.log_text.configure(state='disabled')
+
+    def copy_logs(self) -> None:
+        text = self.log_text.get('1.0', 'end-1c')
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.status_var.set('Logs copied to clipboard.')
+
+    def save_logs(self) -> None:
+        target = filedialog.asksaveasfilename(
+            title='Save ZorinMacBridge client logs',
+            defaultextension='.log',
+            filetypes=[('Log files', '*.log'), ('Text files', '*.txt'), ('All files', '*.*')],
+            initialfile='zorinmacbridge-client.log',
+        )
+        if not target:
+            return
+        Path(target).write_text(self.log_text.get('1.0', 'end-1c'), encoding='utf-8')
+        self.status_var.set(f'Logs saved to {target}')
+
     def show_window(self) -> None:
         self.root.deiconify()
         self.root.lift()
@@ -269,26 +324,31 @@ class ClientApp:
         self.ip_var.set(server.ip)
         self.port_var.set(str(server.port))
         self.status_var.set(f'Selected {server.name} at {server.ip}:{server.port}. Verify TLS fingerprint on the Mac.')
+        self._log('INFO', f'Discovery selection: {server.name} at {server.ip}:{server.port}')
 
     def discover_macs(self) -> None:
         self.status_var.set('Searching the local network for running Macs…')
+        self._log('INFO', 'Starting LAN discovery scan.')
 
         def worker() -> None:
             try:
                 servers = discover_servers(2.5)
                 self.ui_queue.put(('discovery', servers))
             except Exception as exc:
+                self._log('ERROR', f'LAN discovery failed: {type(exc).__name__}: {exc}')
                 self.ui_queue.put(('discovery_error', str(exc)))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def check_updates(self) -> None:
         self.status_var.set('Checking GitHub Releases for updates…')
+        self._log('INFO', 'Manual update check requested.')
 
         def worker() -> None:
             try:
                 self.ui_queue.put(('update', check_for_updates()))
             except Exception as exc:
+                self._log('ERROR', f'Update check failed: {type(exc).__name__}: {exc}')
                 self.ui_queue.put(('update_error', str(exc)))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -317,54 +377,71 @@ class ClientApp:
 
     def _secure_connect(self, role: str) -> ssl.SSLSocket:
         ip, port, password, expected_fp = self._connection_params()
+        self._log('INFO', f'Opening {role} connection to {ip}:{port}')
         parsed_ip = ipaddress.ip_address(ip.split('%', 1)[0])
         family = socket.AF_INET6 if parsed_ip.version == 6 else socket.AF_INET
         raw = socket.socket(family, socket.SOCK_STREAM)
         raw.settimeout(8)
+        self._log('DEBUG', 'Connecting TCP socket…')
         raw.connect((ip, port))
+        self._log('DEBUG', 'TCP connection established; starting TLS handshake.')
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         sock = ctx.wrap_socket(raw, server_hostname='ZorinMac-Bridge')
+        self._log('INFO', f'TLS established: {sock.version()} / {sock.cipher()[0] if sock.cipher() else "unknown cipher"}')
         cert = sock.getpeercert(binary_form=True)
         actual_fp = hashlib.sha256(cert).hexdigest().upper()
+        self._log('DEBUG', f'Server TLS fingerprint: {format_fp(actual_fp)}')
         if not hmac.compare_digest(actual_fp, expected_fp.upper()):
             sock.close()
+            self._log('ERROR', 'TLS fingerprint mismatch. Connection rejected.')
             raise ConnectionError(
                 f'TLS fingerprint DOES NOT MATCH.\nExpected: {format_fp(expected_fp)}\nReceived: {format_fp(actual_fp)}'
             )
+        self._log('INFO', 'TLS fingerprint verified.')
+        self._log('DEBUG', f'Sending authentication request for role={role!r}.')
         sock.sendall(pack_json(AUTH, {'password': password, 'role': role}))
         kind, payload = recv_one_blocking(sock)
         if kind == AUTH_FAIL:
             sock.close()
+            self._log('ERROR', f'Authentication failed for role={role!r}: {payload.decode("utf-8", "replace")}')
             raise PermissionError(payload.decode('utf-8', 'replace'))
         if kind != AUTH_OK:
             sock.close()
+            self._log('ERROR', f'Unexpected authentication response packet type: {kind}')
             raise ConnectionError('Invalid server response during authentication')
+        self._log('INFO', f'Authentication successful for role={role!r}.')
         return sock
 
     def connect(self) -> None:
         if self.connected or (self.net_thread is not None and self.net_thread.is_alive()):
             return
         try:
-            self._connection_params()
+            ip, port, _password, expected_fp = self._connection_params()
         except Exception as exc:
+            self._log('ERROR', f'Connection parameters rejected: {exc}')
             messagebox.showerror('Connection', str(exc))
             return
+        self.disconnect_requested = False
         self.stop_event.clear()
         self.status_var.set('Connecting…')
+        self._log('INFO', f'Connect requested: {ip}:{port}; expected fingerprint {format_fp(expected_fp)}')
         self.net_thread = threading.Thread(target=self._network_loop, daemon=True)
         self.net_thread.start()
 
     def disconnect(self) -> None:
         self._release_local_modifiers()
+        self.disconnect_requested = True
         self.stop_event.set()
         self.connected = False
         self.status_var.set('Disconnected')
+        self._log('INFO', 'Disconnect requested by user.')
 
     def _network_loop(self) -> None:
         sock = None
+        disconnect_reason = ''
         try:
             sock = self._secure_connect('desktop')
             sock.settimeout(0.02)
@@ -390,10 +467,15 @@ class ClientApp:
                         elif kind == CLIPBOARD_DATA:
                             self.ui_queue.put(('clipboard', payload.decode('utf-8', 'replace')))
                         elif kind == ERROR:
-                            self.ui_queue.put(('error', payload.decode('utf-8', 'replace')))
+                            server_error = payload.decode('utf-8', 'replace')
+                            self._log('ERROR', f'Server reported: {server_error}')
+                            self.ui_queue.put(('error', server_error))
                 except (socket.timeout, ssl.SSLWantReadError):
                     pass
         except Exception as exc:
+            disconnect_reason = f'{type(exc).__name__}: {exc}'
+            self._log('ERROR', f'Desktop connection failed: {disconnect_reason}')
+            self._log('DEBUG', traceback.format_exc().rstrip())
             self.ui_queue.put(('error', str(exc)))
         finally:
             try:
@@ -401,24 +483,37 @@ class ClientApp:
                     sock.close()
             except Exception:
                 pass
-            self.ui_queue.put(('disconnected',))
+            if self.disconnect_requested and not disconnect_reason:
+                disconnect_reason = 'Disconnected by user'
+            elif not disconnect_reason:
+                disconnect_reason = 'Desktop session ended'
+            self.ui_queue.put(('disconnected', disconnect_reason))
 
     def _process_ui_queue(self) -> None:
         latest_frame = None
         try:
             while True:
                 item = self.ui_queue.get_nowait()
-                if item[0] == 'frame':
+                if item[0] == 'log':
+                    self._append_log(item[1])
+                elif item[0] == 'frame':
                     latest_frame = item
                 elif item[0] == 'connected':
                     self.connected = True
                     self.status_var.set('Connected — click the desktop image to control the Mac')
+                    self._log('INFO', 'Desktop session connected.')
                     self.refresh_files()
                 elif item[0] == 'disconnected':
                     self.connected = False
-                    self.status_var.set('Disconnected')
+                    reason = item[1] if len(item) > 1 else 'Session ended'
+                    if reason == 'Disconnected by user':
+                        self.status_var.set('Disconnected')
+                    else:
+                        self.status_var.set(f'Disconnected — {reason}')
+                    self._log('INFO', f'Desktop session disconnected: {reason}')
                 elif item[0] == 'error':
                     self.status_var.set(f'Error: {item[1]}')
+                    self._log('ERROR', item[1])
                 elif item[0] == 'files':
                     self._show_files(item[1])
                 elif item[0] == 'info':
@@ -434,11 +529,14 @@ class ClientApp:
                         self.machine_var.set(values[0])
                         self._machine_selected()
                         self.status_var.set(f'Found {len(servers)} running Mac server(s) on the LAN.')
+                        self._log('INFO', f'LAN discovery found {len(servers)} server(s): ' + ', '.join(s.label for s in servers))
                     else:
                         self.machine_var.set('')
                         self.status_var.set('No running ZorinMacBridge server found on the LAN.')
+                        self._log('INFO', 'LAN discovery found no running servers.')
                 elif item[0] == 'discovery_error':
                     self.status_var.set(f'LAN discovery error: {item[1]}')
+                    self._log('ERROR', f'LAN discovery error: {item[1]}')
                 elif item[0] == 'update':
                     info = item[1]
                     if info.available:
@@ -450,6 +548,7 @@ class ClientApp:
                     else:
                         messagebox.showinfo('ZorinMacBridge update', f'You are up to date (version {info.current}).')
                     self.status_var.set('Update check completed.')
+                    self._log('INFO', f'Update check completed: installed={info.current}, latest={info.latest}, available={info.available}')
                 elif item[0] == 'update_error':
                     self.status_var.set('Update check failed.')
                     messagebox.showerror(
@@ -468,6 +567,7 @@ class ClientApp:
                 self._redraw()
             except Exception as exc:
                 self.status_var.set(f'Frame error: {exc}')
+                self._log('ERROR', f'Frame decode/render error: {type(exc).__name__}: {exc}')
         self.root.after(20, self._process_ui_queue)
 
     def _redraw(self) -> None:
@@ -643,7 +743,8 @@ class ClientApp:
                 raise RuntimeError('Invalid file-list response')
             self.ui_queue.put(('files', unpack_json(payload)))
         except Exception as exc:
-            self.ui_queue.put(('error', f'Pliki: {exc}'))
+            self._log('ERROR', f'File list failed: {type(exc).__name__}: {exc}')
+            self.ui_queue.put(('error', f'Files: {exc}'))
         finally:
             if sock:
                 sock.close()
@@ -718,6 +819,7 @@ class ClientApp:
     def _upload_files_worker(self, paths: list[Path], remote_dir: str) -> None:
         sock = None
         try:
+            self._log('INFO', f'Uploading {len(paths)} selected file(s) to Mac path /{remote_dir}.')
             sock = self._secure_connect('file')
             reader = PacketReader()
             for path in paths:
@@ -725,8 +827,10 @@ class ClientApp:
                     continue
                 self._upload_one(sock, reader, path, remote_join(remote_dir, path.name))
             self.ui_queue.put(('info', f'Uploaded {len(paths)} file(s).'))
+            self._log('INFO', f'Upload completed: {len(paths)} selected file(s).')
             self._refresh_files_worker(remote_dir)
         except Exception as exc:
+            self._log('ERROR', f'Upload failed: {type(exc).__name__}: {exc}')
             self.ui_queue.put(('error', f'Upload: {exc}'))
         finally:
             if sock:
@@ -743,6 +847,7 @@ class ClientApp:
     def _upload_folder_worker(self, root: Path, remote_dir: str) -> None:
         sock = None
         try:
+            self._log('INFO', f'Uploading folder {root} to Mac path /{remote_dir}.')
             if root.is_symlink() or not root.is_dir():
                 raise ValueError('Invalid folder')
             sock = self._secure_connect('file')
@@ -766,8 +871,10 @@ class ClientApp:
                     self._upload_one(sock, reader, local, remote_join(current_remote, name))
                     files_sent += 1
             self.ui_queue.put(('info', f'Folder {root.name}: uploaded {files_sent} file(s).'))
+            self._log('INFO', f'Folder upload completed: {root.name} ({files_sent} file(s)).')
             self._refresh_files_worker(remote_dir)
         except Exception as exc:
+            self._log('ERROR', f'Folder upload failed: {type(exc).__name__}: {exc}')
             self.ui_queue.put(('error', f'Folder upload: {exc}'))
         finally:
             if sock:
@@ -787,11 +894,13 @@ class ClientApp:
     def _create_remote_folder_worker(self, path: str) -> None:
         sock = None
         try:
+            self._log('INFO', f'Creating remote folder /{path}.')
             sock = self._secure_connect('file')
             reader = PacketReader()
             self._mkdir_remote(sock, reader, path)
             self._refresh_files_worker(self.remote_path)
         except Exception as exc:
+            self._log('ERROR', f'Create remote folder failed: {type(exc).__name__}: {exc}')
             self.ui_queue.put(('error', f'New folder: {exc}'))
         finally:
             if sock:
@@ -853,11 +962,14 @@ class ClientApp:
     def _download_file_worker(self, remote: str, dest: Path) -> None:
         sock = None
         try:
+            self._log('INFO', f'Downloading Mac file /{remote} to {dest}.')
             sock = self._secure_connect('file')
             reader = PacketReader()
             self._download_one(sock, reader, remote, dest)
             self.ui_queue.put(('info', f'Downloaded: {dest}'))
+            self._log('INFO', f'File download completed: {dest}.')
         except Exception as exc:
+            self._log('ERROR', f'Download failed: {type(exc).__name__}: {exc}')
             self.ui_queue.put(('error', f'Download: {exc}'))
         finally:
             if sock:
@@ -885,11 +997,14 @@ class ClientApp:
     def _download_folder_worker(self, remote: str, local_root: Path) -> None:
         sock = None
         try:
+            self._log('INFO', f'Downloading Mac folder /{remote} to {local_root}.')
             sock = self._secure_connect('file')
             reader = PacketReader()
             count = self._download_tree(sock, reader, remote, local_root)
             self.ui_queue.put(('info', f'Downloaded folder: {local_root} ({count} file(s))'))
+            self._log('INFO', f'Folder download completed: {local_root} ({count} file(s)).')
         except Exception as exc:
+            self._log('ERROR', f'Folder download failed: {type(exc).__name__}: {exc}')
             self.ui_queue.put(('error', f'Folder download: {exc}'))
         finally:
             if sock:

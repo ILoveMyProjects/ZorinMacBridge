@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.1
+
+- Added a **Logs** tab to the Linux client with timestamps, severity levels, copy, save, and clear actions.
+- Client logs now show LAN discovery, TCP connect, TLS handshake, certificate fingerprint verification, authentication, session disconnect reason, update checks, and file-transfer failures.
+- Passwords are never written to the client log.
+- The macOS server now forwards session exceptions (for example screen-capture failures) to the connected client before closing the connection when possible.
+- macOS server GUI logs now include accepted connections, TLS completion, authentication role, and desktop-session lifecycle.
+- Fixed README installer URLs to use the repository's `master` branch.
+
+
 ## 0.3.0 - 2026-09-24
 
 Desktop UX and controlled-discovery update:

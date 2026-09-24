@@ -376,8 +376,8 @@ def recv_available(sock: ssl.SSLSocket, reader: PacketReader) -> list[tuple[int,
     return packets
 
 
-def desktop_session(sock: ssl.SSLSocket, fps: float, max_width: int, quality: int) -> None:
-    print('[desktop] connected')
+def desktop_session(sock: ssl.SSLSocket, fps: float, max_width: int, quality: int, *, log=print) -> None:
+    log('[desktop] connected')
     inp = MacInput()
     clipboard = MacClipboard()
     grabber = ScreenGrabber(max_width=max_width, quality=quality)
@@ -418,7 +418,7 @@ def desktop_session(sock: ssl.SSLSocket, fps: float, max_width: int, quality: in
     finally:
         inp.release_all()
         grabber.close()
-        print('[desktop] disconnected')
+        log('[desktop] disconnected')
 
 
 def send_error(sock: ssl.SSLSocket, message: str) -> None:
@@ -545,19 +545,22 @@ def file_session(sock: ssl.SSLSocket, share: Path) -> None:
             current_upload_tmp.unlink(missing_ok=True)
 
 
-def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: str, share: Path, args) -> None:
+def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: str, share: Path, args, log=print) -> None:
     peer_ip = addr[0]
     if not is_lan_ip(peer_ip):
-        print(f'[reject] non-LAN peer {peer_ip}')
+        log(f'[reject] non-LAN peer {peer_ip}')
         raw.close()
         return
     sock = None
     try:
+        log(f'[client {peer_ip}] TCP connection accepted')
         raw.settimeout(10)
         sock = context.wrap_socket(raw, server_side=True)
+        log(f'[client {peer_ip}] TLS handshake completed')
         kind, payload = recv_one_blocking(sock)
         if kind != AUTH:
             sock.sendall(pack_packet(AUTH_FAIL, b'auth required'))
+            log(f'[client {peer_ip}] rejected: authentication packet required')
             return
         auth = unpack_json(payload)
         supplied = str(auth.get('password', ''))
@@ -565,20 +568,26 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
         if not hmac.compare_digest(supplied, password):
             time.sleep(1.0)
             sock.sendall(pack_packet(AUTH_FAIL, b'bad password'))
-            print(f'[auth] failed from {peer_ip}')
+            log(f'[auth] failed from {peer_ip}')
             return
         if role not in {'desktop', 'file'}:
             sock.sendall(pack_packet(AUTH_FAIL, b'bad role'))
+            log(f'[client {peer_ip}] rejected: bad role {role!r}')
             return
         sock.sendall(pack_json(AUTH_OK, {'role': role, 'server': 'ZorinMac-Bridge'}))
+        log(f'[client {peer_ip}] authenticated role={role}')
         if role == 'desktop':
-            desktop_session(sock, args.fps, args.max_width, args.quality)
+            desktop_session(sock, args.fps, args.max_width, args.quality, log=log)
         else:
             file_session(sock, share)
     except (ssl.SSLError, ConnectionError, OSError) as exc:
-        print(f'[client {peer_ip}] {exc}')
+        log(f'[client {peer_ip}] {type(exc).__name__}: {exc}')
+        if sock is not None:
+            send_error(sock, f'{type(exc).__name__}: {exc}')
     except Exception as exc:
-        print(f'[client {peer_ip}] ERROR: {exc}')
+        log(f'[client {peer_ip}] ERROR {type(exc).__name__}: {exc}')
+        if sock is not None:
+            send_error(sock, f'{type(exc).__name__}: {exc}')
     finally:
         try:
             if sock is not None:
@@ -630,7 +639,7 @@ def serve(bind: str, port: int, share: Path, fps: float, max_width: int, quality
                 continue
             threading.Thread(
                 target=handle_client,
-                args=(raw, addr, context, password, share, args),
+                args=(raw, addr, context, password, share, args, log),
                 daemon=True,
             ).start()
     finally:
