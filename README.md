@@ -14,6 +14,8 @@ The remote session does **not** require a vendor cloud, relay, account, telemetr
 
 > **Status:** experimental. This project is still under active development and has not received an independent security audit.
 
+Release v0.4.1 also verifies the **actual frozen Linux executable** can initialize Pillow/Tk and a PyAV H.264 decoder before GitHub publishes the installer.
+
 ## Install
 
 ### Zorin OS / Ubuntu — Client

@@ -80,23 +80,18 @@ jobs:
           cp dist/ZorinMacBridge-Client "release/ZorinMacBridge-Client_linux-amd64"
           chmod +x "release/ZorinMacBridge-Client_linux-amd64"
           (cd release && sha256sum * > SHA256SUMS-linux.txt)
-      - name: Verify Linux frozen bundle
+      - name: Verify Linux frozen runtime
         run: |
           set -euo pipefail
-          echo "Inspecting the complete nested PyInstaller archive..."
-          pyi-archive_viewer -r -l dist/ZorinMacBridge-Client > build/linux-archive-contents.txt
-          if ! grep -F 'PIL._tkinter_finder' build/linux-archive-contents.txt; then
-            echo "ERROR: PIL._tkinter_finder is missing from the frozen client." >&2
-            echo "Relevant PIL/Tk entries found in the archive:" >&2
-            grep -Ei 'PIL|tkinter|tk' build/linux-archive-contents.txt | tail -200 >&2 || true
+          echo "Running the actual frozen client video dependency self-test..."
+          if ! timeout 30s dist/ZorinMacBridge-Client --self-test-video; then
+            echo "ERROR: the frozen client cannot initialize its video runtime." >&2
+            echo "Archive entries relevant to Pillow/Tk/PyAV:" >&2
+            pyi-archive_viewer -r -l dist/ZorinMacBridge-Client > build/linux-archive-contents.txt || true
+            grep -Ei "PIL|tkinter|(^|[^A-Za-z])av([._/]|[^A-Za-z]|$)|ffmpeg|libav" build/linux-archive-contents.txt | tail -250 >&2 || true
             exit 1
           fi
-          echo "OK: PIL._tkinter_finder is present in the frozen client."
-          if ! grep -E '(^|[./])av([./]|$)' build/linux-archive-contents.txt >/dev/null; then
-            echo "ERROR: PyAV is missing from the frozen client." >&2
-            exit 1
-          fi
-          echo "OK: PyAV is present in the frozen client."
+          echo "OK: frozen client initialized Pillow/Tk and a PyAV H.264 decoder."
       - uses: actions/upload-artifact@v4
         with:
           name: linux-amd64

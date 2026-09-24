@@ -1174,7 +1174,30 @@ class ClientApp:
         self.root.destroy()
 
 
+def _self_test_video() -> int:
+    """Exercise the frozen client's video dependencies without opening the GUI.
+
+    This is used by the release workflow after PyInstaller finishes.  It catches
+    missing dynamic Pillow/Tk helpers, missing PyAV extension modules/shared
+    libraries, and an unavailable H.264 decoder in the *actual frozen binary*.
+    """
+    try:
+        # The explicit top-level imports already verify ImageTk and
+        # PIL._tkinter_finder. Creating the codec additionally forces PyAV and
+        # its FFmpeg bindings to initialize in the frozen application.
+        decoder = av.CodecContext.create('h264', 'r')
+        if decoder is None:
+            raise RuntimeError('PyAV did not create an H.264 decoder')
+        print('SELFTEST OK: Pillow/Tk + PyAV H.264 decoder initialized')
+        return 0
+    except Exception as exc:
+        print(f'SELFTEST FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)
+        return 1
+
+
 def main() -> None:
+    if '--self-test-video' in sys.argv:
+        raise SystemExit(_self_test_video())
     root = tk.Tk()
     ClientApp(root)
     root.mainloop()
