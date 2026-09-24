@@ -44,11 +44,27 @@ sign_probe "$TMP/codesign-probe"
 echo '[transport-sign] explicit DR probe OK'
 
 if [ "$SELF_TEST" -eq 1 ]; then
-  echo '[transport-sign] probing stable per-Mac explicit DR shape'
+  echo '[transport-sign] probing stable per-Mac explicit DR shape with nested framework'
   TEST_APP="$TMP/ZorinMacBridge Server.app"
-  mkdir -p "$TEST_APP/Contents/MacOS"
+  TEST_FRAMEWORK="$TEST_APP/Contents/Frameworks/ZMBProbe.framework"
+  mkdir -p "$TEST_APP/Contents/MacOS" "$TEST_FRAMEWORK/Versions/A/Resources"
   cp /usr/bin/true "$TEST_APP/Contents/MacOS/ZorinMacBridge Server"
-  chmod u+w "$TEST_APP/Contents/MacOS/ZorinMacBridge Server"
+  cp /usr/bin/true "$TEST_FRAMEWORK/Versions/A/ZMBProbe"
+  chmod u+w "$TEST_APP/Contents/MacOS/ZorinMacBridge Server" "$TEST_FRAMEWORK/Versions/A/ZMBProbe"
+  ln -s A "$TEST_FRAMEWORK/Versions/Current"
+  ln -s Versions/Current/ZMBProbe "$TEST_FRAMEWORK/ZMBProbe"
+  ln -s Versions/Current/Resources "$TEST_FRAMEWORK/Resources"
+  cat > "$TEST_FRAMEWORK/Versions/A/Resources/Info.plist" <<'FPLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.ilovemyprojects.zorinmacbridge.signingprobe</string>
+  <key>CFBundleExecutable</key><string>ZMBProbe</string>
+  <key>CFBundlePackageType</key><string>FMWK</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+</dict></plist>
+FPLIST
   cat > "$TEST_APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -59,20 +75,28 @@ if [ "$SELF_TEST" -eq 1 ]; then
   <key>ZMBLocalIdentity</key><string>0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef</string>
 </dict></plist>
 PLIST
+  # Simulate PyInstaller: nested code is already signed before the outer bundle.
+  codesign --force --timestamp=none --sign - "$TEST_FRAMEWORK"
+  codesign --force --timestamp=none --sign - "$TEST_APP/Contents/MacOS/ZorinMacBridge Server"
+
   LOCAL_REQ="$TMP/local.req"
   LOCAL_EXPR="$TMP/local.expr"
   printf '%s\n' 'designated => identifier "com.ilovemyprojects.zorinmacbridge.server" and info[ZMBLocalIdentity] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"' > "$LOCAL_REQ"
   printf '%s\n' 'identifier "com.ilovemyprojects.zorinmacbridge.server" and info[ZMBLocalIdentity] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"' > "$LOCAL_EXPR"
-  codesign --force --timestamp=none --sign - "$TEST_APP/Contents/MacOS/ZorinMacBridge Server"
-  codesign --force --deep --options runtime --timestamp=none --sign - --requirements "$LOCAL_REQ" "$TEST_APP"
+
+  # Critical regression check: do NOT touch already-signed nested code. Re-sign
+  # only the outer app so its resource envelope records the existing nested signatures.
+  codesign --force --timestamp=none --sign - --requirements "$LOCAL_REQ" "$TEST_APP"
   codesign --verify --deep --strict --verbose=2 "$TEST_APP"
   codesign --verify --deep --strict -R "$LOCAL_EXPR" "$TEST_APP"
+  codesign --verify --strict --verbose=2 "$TEST_FRAMEWORK"
   LOCAL_SHOWN="$(codesign -d -r- "$TEST_APP" 2>&1)"
   printf '%s\n' "$LOCAL_SHOWN" | grep -Fq 'info[ZMBLocalIdentity]'
   if printf '%s\n' "$LOCAL_SHOWN" | grep -Fq 'cdhash '; then
     echo 'ERROR: local stable DR self-test fell back to a build-bound cdhash.' >&2
     exit 1
   fi
+  echo '[transport-sign] nested framework remained valid'
   echo '[transport-sign] stable local DR probe OK'
   echo '[transport-sign] self-test OK'
   exit 0
@@ -89,17 +113,16 @@ if [ "$ACTUAL_BUNDLE_ID" != "$BUNDLE_ID" ]; then
   exit 1
 fi
 
-echo '[transport-sign] signing nested native libraries ad-hoc'
-while IFS= read -r -d '' item; do
-  codesign --force --timestamp=none --sign - "$item"
-done < <(find "$APP/Contents" -type f \( -name '*.dylib' -o -name '*.so' \) -print0)
-
 REQ="$TMP/app.req"
 REQ_EXPR="$TMP/app.expr"
 printf 'designated => identifier "%s"\n' "$BUNDLE_ID" > "$REQ"
 printf 'identifier "%s"\n' "$BUNDLE_ID" > "$REQ_EXPR"
-echo '[transport-sign] signing application bundle with explicit transport DR'
-codesign --force --deep --options runtime --timestamp=none \
-  --sign - --requirements "$REQ" "$APP"
+echo '[transport-sign] preserving PyInstaller nested signatures'
+echo '[transport-sign] signing only the outer application bundle with explicit transport DR'
+# PyInstaller already signs its collected Mach-O files and nested framework bundles.
+# Re-signing individual .so/.dylib files here invalidates the resource envelopes of
+# containing bundles such as Python.framework. Sign only the outer app, inside-out.
+codesign --force --timestamp=none --sign - --requirements "$REQ" "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 codesign --verify --deep --strict -R "$REQ_EXPR" "$APP"
+echo '[transport-sign] OK'

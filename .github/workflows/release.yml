@@ -10,7 +10,17 @@ permissions:
   contents: write
 
 jobs:
+  release-source-check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag and release source
+        run: |
+          set -euo pipefail
+          scripts/verify-release-source.sh
+
   linux-amd64:
+    needs: [release-source-check]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -92,6 +102,7 @@ jobs:
           path: release/*
 
   macos-signing-preflight:
+    needs: [release-source-check]
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4

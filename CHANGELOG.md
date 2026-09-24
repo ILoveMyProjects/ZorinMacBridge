@@ -1,3 +1,18 @@
+## v0.6.8
+
+- Added a release-source gate that prints the checked-out commit, VERSION, tag, and SHA-256 of the macOS signing script before any package build starts.
+- Tag-triggered releases now fail immediately when `v$VERSION` does not match the pushed tag.
+- The release-source gate rejects the obsolete v0.6.6 transport signer (`signing nested native libraries ad-hoc`) and requires the v0.6.7+ outer-bundle-only signing markers.
+- Added the same invariant check for runtime per-Mac signing so nested `.so`/`.dylib` files cannot silently be re-signed again.
+- No change to the v0.6.7 signing algorithm itself; this release prevents an old checkout/tag from masquerading as a newer release.
+
+## v0.6.7
+
+- Fixed macOS release signing for PyInstaller bundles containing nested frameworks.
+- Transport signing no longer re-signs individual `.so`/`.dylib` files after PyInstaller has signed enclosing bundles such as `Python.framework`.
+- Per-Mac stable-DR signing now changes only the outer `.app` signature after updating `Info.plist`; nested code signatures are preserved.
+- macOS signing preflight now includes a real nested-framework regression probe and deep verification.
+
 ## 0.6.6
 
 - Fixed the macOS signing preflight failure `Requirement syntax error(s): line 1:1: unexpected token: designated`.

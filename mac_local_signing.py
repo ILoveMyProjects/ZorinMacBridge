@@ -163,11 +163,6 @@ def _write_requirement_expression(identity: LocalIdentity, directory: Path) -> P
     return path
 
 
-def _sign_adhoc(target: Path) -> None:
-    _run([
-        '/usr/bin/codesign', '--force', '--timestamp=none', '--sign', '-', str(target),
-    ])
-
 
 def sign_app_locally(app: Path) -> LocalIdentity:
     app = Path(app).resolve()
@@ -185,18 +180,15 @@ def sign_app_locally(app: Path) -> LocalIdentity:
     if Path('/usr/bin/xattr').exists():
         _run(['/usr/bin/xattr', '-dr', 'com.apple.quarantine', str(app)], check=False)
 
-    nested: list[Path] = []
-    contents = app / 'Contents'
-    for path in contents.rglob('*'):
-        if path.is_file() and path.suffix in ('.dylib', '.so'):
-            nested.append(path)
-    for path in sorted(nested, key=lambda p: len(str(p)), reverse=True):
-        _sign_adhoc(path)
-
+    # PyInstaller already signs the collected Mach-O files and nested framework
+    # bundles. Touching individual .so/.dylib files here would invalidate the
+    # resource envelope of a containing bundle (notably Python.framework).
+    # Only the outer .app needs a fresh signature after the Info.plist marker
+    # changes; its new resource envelope records the existing nested signatures.
     with tempfile.TemporaryDirectory(prefix='zmb-local-sign-') as tmp:
         req = _write_requirement(identity, Path(tmp))
         _run([
-            '/usr/bin/codesign', '--force', '--deep', '--options', 'runtime', '--timestamp=none',
+            '/usr/bin/codesign', '--force', '--timestamp=none',
             '--sign', '-', '--requirements', str(req), str(app),
         ], timeout=180.0)
 

@@ -45,7 +45,7 @@ curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/mast
 
 The installer detects Apple Silicon vs Intel, downloads the correct `.dmg`, verifies SHA-256, and installs **ZorinMacBridge Server** into `/Applications`.
 
-Starting with v0.6.6, installation uses a **stable explicit macOS designated requirement (DR)** instead of a certificate/keychain identity. No Developer ID, local certificate, GitHub signing secret, or Linux signing setup is required for this private/internal workflow. Each Mac creates one local random identity marker, injects it into the staged app, and re-signs the app ad-hoc with the same explicit DR on every update. GitHub Actions runs a real `codesign` preflight that proves this DR shape before the long macOS builds start.
+Starting with v0.6.7, installation uses a **stable explicit macOS designated requirement (DR)** instead of a certificate/keychain identity. No Developer ID, local certificate, GitHub signing secret, or Linux signing setup is required for this private/internal workflow. Each Mac creates one local random identity marker, injects it into the staged app, and re-signs the app ad-hoc with the same explicit DR on every update. GitHub Actions runs a real `codesign` preflight that proves this DR shape before the long macOS builds start.
 
 ## Remote desktop architecture
 
@@ -145,7 +145,7 @@ com.apple.developer.persistent-content-capture
 
 Apple requires explicit approval before an app can use that entitlement. Do not add it to release signing until Apple has approved the entitlement for the developer account.
 
-The transport signature from GitHub is not used as the installed identity. Before installation, v0.6.6+ injects that Mac's persistent local identity marker and re-signs the staged app with the same explicit designated requirement, so later updates keep the same DR without certificates or keychains.
+The transport signature from GitHub is not used as the installed identity. Before installation, v0.6.7+ injects that Mac's persistent local identity marker and re-signs the staged app with the same explicit designated requirement, so later updates keep the same DR without certificates or keychains.
 
 ## Remote controls
 
@@ -341,7 +341,7 @@ The Linux client includes a **Logs** tab. Connection logs show TCP, TLS, fingerp
 
 If macOS asks for Screen Recording **when you press Connect**, make sure you are on v0.4.3 or newer. v0.4.0-v0.4.2 launched a separate native capture executable, which could be treated as separate TCC-responsible code. v0.4.3 runs ScreenCaptureKit in the main server process instead.
 
-v0.6.6+ re-signs installed updates with the same explicit designated requirement on each Mac. If permissions change after a normal v0.6.6+ update, treat that as a bug and capture the server log plus the `Code signing:` line from the server UI.
+v0.6.7+ re-signs installed updates with the same explicit designated requirement on each Mac. If permissions change after a normal v0.6.7+ update, treat that as a bug and capture the server log plus the `Code signing:` line from the server UI.
 
 If video works but mouse/keyboard does not, check the Mac server log for:
 

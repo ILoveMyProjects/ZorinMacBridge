@@ -28,3 +28,5 @@ jobs:
           /usr/bin/python3 -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); from gi.repository import Gtk, Adw; import av; av.CodecContext.create('h264','r'); import keyring; print('GTK4/libadwaita + H.264 runtime OK')"
           bash -n install-linux.sh
           bash -n install-macos.sh
+          bash -n scripts/verify-release-source.sh
+          scripts/verify-release-source.sh

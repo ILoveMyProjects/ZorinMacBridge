@@ -83,6 +83,17 @@ def main() -> None:
     assert "stage_and_sign(source_app, stage_root)" in updater
     assert "bootstrap_installed_app_identity()" in server
     assert 'gh auth login' not in installer
+
+    # Never mutate individual PyInstaller binaries after their enclosing framework
+    # bundles have been signed. The top-level app is the only item re-signed by
+    # our transport/local-identity layers; recursive verification remains enabled.
+    assert "find \"$APP/Contents\" -type f" not in transport
+    assert "signing nested native libraries" not in transport
+    assert "--deep --options runtime" not in transport
+    assert "preserving PyInstaller nested signatures" in transport
+    assert "nested framework remained valid" in transport
+    assert "contents.rglob('*')" not in local_signing
+    assert "'--deep', '--options', 'runtime'" not in local_signing
     assert 'No certificate, keychain setup, GitHub login, Developer ID, or Linux signing setup is required.' in installer
 
     print('local stable-DR architecture tests: OK')
