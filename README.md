@@ -92,6 +92,7 @@ The Mac never upscales the captured display; these are upper bounds. The server 
 5. Enter a session password of at least 12 characters.
 6. Keep **Remember password verifier on this Mac** enabled.
 7. Click **Start server**.
+8. If you want unattended recovery, use **Enable / Repair** in the **Unattended access / recovery** section and keep the shown SSH fingerprint for the first Zorin pairing.
 
 The Mac stores only a salted PBKDF2 password verifier; it does not store the plaintext session password.
 
@@ -103,6 +104,7 @@ The Mac stores only a salted PBKDF2 password verifier; it does not store the pla
 4. Enter the session password.
 5. Keep **Remember this Mac** enabled.
 6. Connect.
+7. For unattended recovery, open **System → Pair / Configure**, verify the Mac SSH fingerprint, and complete the one-time device pairing.
 
 After a successful connection, the client stores:
 
@@ -112,20 +114,23 @@ After a successful connection, the client stores:
 
 On later connections, discovery can restore the saved fingerprint/password automatically.
 
-## Mac mini / unattended user session
+## Unattended access / recovery (P0)
 
-By default ZorinMacBridge remains manual.
+The remote desktop still runs in the logged-in macOS user session because ScreenCaptureKit and GUI input belong to that session. v0.7.0 adds an **optional** system recovery layer so a failed desktop service does not force you to reconnect a monitor.
 
-For a Mac mini that you do not want to walk over to every time, enable these two options in the server window:
+On the Mac, open **ZorinMacBridge Server → Unattended access / recovery → Enable / Repair** once. macOS asks for administrator authorization. The app then:
 
-- **Launch ZorinMacBridge Server when this macOS user logs in**
-- **Automatically start the server when the app launches**
+- keeps the existing user LaunchAgent for the actual desktop streamer;
+- installs a small root LaunchDaemon for heartbeat/recovery only;
+- enables macOS Remote Login (SSH) as the administration transport;
+- opens **no custom privileged network port**;
+- shows the Mac SSH host fingerprint for first pairing.
 
-This creates a **per-user LaunchAgent/login item**, not a system daemon. It only runs inside a logged-in macOS user session.
+On Zorin, select the same Mac in the normal selector and open **System → Pair / Configure**. Verify the displayed SSH fingerprint against the Mac, then enter the macOS short username/password once. The password is used only for that first SSH login and is not saved. The generated Ed25519 key is restricted with a forced command, so it cannot be used as a general shell key or for SSH tunnelling.
 
-That distinction matters: screen capture and GUI input control operate on a user desktop session. If the Mac reboots and nobody logs in, there is no normal desktop session for ZorinMacBridge to control. If you require access immediately after reboot, configure the Mac so the intended desktop user session becomes logged in, then let ZorinMacBridge start in that session.
+After pairing, the **System** page provides health/status, ZMB start/stop/restart, startup repair, logs, sleep, reboot and shutdown. A paired Mac remains in the same normal selector as **paired/offline** when its desktop mDNS advertisement disappears, so the System page can still be used to recover the desktop service.
 
-Closing ZorinMacBridge still stops the server. Disabling **Launch at login** removes the user LaunchAgent.
+The system layer does not bypass macOS login, FileVault, Screen Recording, or Accessibility. If there is no logged-in GUI session, system administration can remain available but there is no normal desktop to stream. Reboot is blocked by the helper when FileVault state indicates that local unlock may be required.
 
 ## Stable macOS permissions
 
@@ -279,7 +284,10 @@ See [`SIGNING.md`](SIGNING.md) for the architecture.
 - no UPnP/router configuration;
 - file access constrained to the configured share directory;
 - plaintext server password is not stored on the Mac;
-- remembered Linux passwords use the desktop system keyring when available.
+- remembered Linux passwords use the desktop system keyring when available;
+- P0 is optional and uses native macOS SSH rather than a new privileged network listener;
+- P0 device keys are Ed25519 keys restricted to a fixed command gateway;
+- the system helper accepts only a closed administration command set and does not bypass macOS TCC/FileVault.
 
 See [SECURITY.md](SECURITY.md).
 
@@ -329,6 +337,7 @@ python test_support.py
 python test_updater.py
 python test_native_ui.py
 python test_local_signing.py
+python test_p0_admin.py
 python -m compileall -q .
 swiftc -frontend -parse native/macos/ZMBStreamerLib.swift
 ```

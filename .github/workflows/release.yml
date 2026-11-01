@@ -40,8 +40,14 @@ jobs:
           /usr/bin/python3 test_updater.py
           /usr/bin/python3 test_native_ui.py
           /usr/bin/python3 test_local_signing.py
+          /usr/bin/python3 test_p0_admin.py
           /usr/bin/python3 -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); from gi.repository import Gtk, Adw; import av; av.CodecContext.create('h264','r'); import keyring; print('GTK4/libadwaita + H.264 runtime OK')"
           bash -n install-linux.sh
+          bash -n native/macos/admin/install-admin.sh
+          bash -n native/macos/admin/uninstall-admin.sh
+          bash -n native/macos/admin/zmb-admin
+          bash -n native/macos/admin/zmb-admin-ssh
+          bash -n native/macos/admin/zmb-system-daemon
       - name: Build native Zorin/Ubuntu DEB
         run: |
           set -euo pipefail
@@ -57,7 +63,7 @@ jobs:
 
           chmod 0755 "$PKG/DEBIAN"
           install -m 0644 linux_client_gtk.py linux_client.py protocol.py discovery.py resources.py \
-            tray_icon.py updates.py settings.py secret_store.py "$APP/"
+            tray_icon.py updates.py settings.py secret_store.py zmb_admin_backend.py zmb_system_page.py "$APP/"
           install -m 0644 VERSION "$APP/VERSION"
           install -m 0644 assets/client.png "$APP/assets/client.png"
 
@@ -81,10 +87,10 @@ jobs:
           Priority: optional
           Architecture: amd64
           Maintainer: ILoveMyProjects
-          Depends: python3 (>= 3.12), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, libadwaita-1-0, python3-pil, python3-pil.imagetk, python3-av, python3-certifi, python3-keyring, python3-secretstorage, python3-zeroconf, python3-pystray, python3-tk, wl-clipboard, xclip, pkexec
+          Depends: python3 (>= 3.12), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, libadwaita-1-0, python3-pil, python3-pil.imagetk, python3-av, python3-certifi, python3-keyring, python3-secretstorage, python3-zeroconf, python3-pystray, python3-tk, wl-clipboard, xclip, pkexec, openssh-client
           Description: Native GTK4/libadwaita LAN client for ZorinMacBridge
-           Remote macOS desktop, keyboard/mouse, clipboard and shared-folder transfer
-           with a Zorin/GNOME-native interface.
+           Remote macOS desktop, keyboard/mouse, clipboard, shared-folder transfer,
+           and paired unattended recovery with a Zorin/GNOME-native interface.
           CTRL
 
           mkdir -p release
@@ -96,6 +102,8 @@ jobs:
           dpkg-deb --info release/ZorinMacBridge-Client_linux-amd64.deb
           dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/linux_client_gtk.py'
           dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/share/applications/zorinmacbridge.desktop'
+          dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_admin_backend.py'
+          dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_system_page.py'
       - uses: actions/upload-artifact@v4
         with:
           name: linux-amd64
@@ -156,6 +164,7 @@ jobs:
             --icon build/server.icns \
             --add-data 'assets/server.png:assets' \
             --add-data 'VERSION:.' \
+            --add-data 'native/macos/admin:native/macos/admin' \
             --add-binary 'build/libzmb_streamer.dylib:.' \
             --collect-all cryptography \
             --collect-all certifi \
@@ -236,6 +245,7 @@ jobs:
             --icon build/server.icns \
             --add-data 'assets/server.png:assets' \
             --add-data 'VERSION:.' \
+            --add-data 'native/macos/admin:native/macos/admin' \
             --add-binary 'build/libzmb_streamer.dylib:.' \
             --collect-all cryptography \
             --collect-all certifi \

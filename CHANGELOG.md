@@ -1,3 +1,15 @@
+## v0.7.0
+
+- Added P0 unattended administration directly to the main source tree; no runtime patcher, dpkg-divert, second launcher, or separate admin application is used.
+- Added a native **System** page to the GTK4/libadwaita client for pairing, health/status, recovery, logs, sleep, restart, and shutdown.
+- Added restricted Ed25519 device pairing over macOS Remote Login. The dedicated admin key is forced through `/usr/local/libexec/zmb-admin-ssh` and cannot open a general shell or SSH tunnel.
+- Added an optional root LaunchDaemon that exposes no network listener and keeps a heartbeat plus recovery for the user-session ZorinMacBridge server.
+- Added local **Enable / Repair** and **Disable P0** controls to the macOS server. The helper payload is bundled into the normal `.dmg`.
+- Paired Macs remain visible in the normal Mac selector as `paired/offline` when the desktop mDNS service is unavailable, allowing recovery after a desktop-service failure.
+- Linux release packaging now includes the P0 modules and `openssh-client`; macOS release packaging now embeds the P0 helper payload.
+- Added P0 source/security tests and shell/plist validation to CI/release workflows.
+- Existing manual GitHub update behavior is unchanged; P0 ships inside the normal `.deb`/`.dmg` release artifacts.
+
 ## v0.6.8
 
 - Added a release-source gate that prints the checked-out commit, VERSION, tag, and SHA-256 of the macOS signing script before any package build starts.

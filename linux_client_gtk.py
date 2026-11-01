@@ -38,11 +38,14 @@ from linux_client import (
     remote_join,
 )
 from protocol import CLIPBOARD_GET, CLIPBOARD_SET, KEY, MOUSE_BUTTON, MOUSE_MOVE, SCROLL, TEXT, pack_json, pack_packet
+from discovery import DiscoveredServer
 from resources import resource_path
 from settings import client_record
 from secret_store import get_password as get_saved_password
 from tray_icon import TrayController
 from updates import current_version
+from zmb_admin_backend import list_profiles
+from zmb_system_page import SystemController
 
 # GTK4 and the GTK3 AppIndicator backend cannot live in the same process.
 # Prefer pystray's Xorg backend as a best-effort tray icon under X11/XWayland.
@@ -308,9 +311,12 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
 
         self.desktop_page = self._build_desktop_page()
         self.files_page = self._build_files_page()
+        self.system_controller = SystemController(self)
+        self.system_page = self.system_controller.page
         self.logs_page = self._build_logs_page()
         self.stack.add_titled(self.desktop_page, 'desktop', 'Desktop')
         self.stack.add_titled(self.files_page, 'files', 'Files')
+        self.stack.add_titled(self.system_page, 'system', 'System')
         self.stack.add_titled(self.logs_page, 'logs', 'Logs')
         self.stack.set_visible_child_name('desktop')
 
@@ -592,6 +598,29 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         )
         about.present()
 
+    def _merge_paired_admin_servers(self, servers):
+        """Keep paired Macs selectable even when the desktop mDNS service is down."""
+        merged = list(servers)
+        seen_ids = {str(item.server_id) for item in merged if getattr(item, 'server_id', '')}
+        seen_hosts = {(str(item.ip), int(item.port)) for item in merged}
+        for profile in list_profiles():
+            host = str(profile.get('host') or '').strip()
+            if not host:
+                continue
+            sid = str(profile.get('server_id') or '').strip()
+            try:
+                port = int(profile.get('desktop_port') or 45950)
+            except (TypeError, ValueError):
+                port = 45950
+            if (sid and sid in seen_ids) or (host, port) in seen_hosts:
+                continue
+            name = str(profile.get('server_name') or host).strip() or host
+            merged.append(DiscoveredServer(name=name, ip=host, port=port, server_id=sid, paired_only=True))
+            if sid:
+                seen_ids.add(sid)
+            seen_hosts.add((host, port))
+        return sorted(merged, key=lambda item: (item.name.lower(), item.paired_only, item.ip, item.port))
+
     def _initial_discovery(self):
         self.discover_macs()
         return GLib.SOURCE_REMOVE
@@ -734,7 +763,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                 elif kind == 'clipboard':
                     self._set_local_clipboard(item[1])
                 elif kind == 'discovery':
-                    servers = item[1]
+                    servers = self._merge_paired_admin_servers(item[1])
                     self.discovered_by_label = {server.label: server for server in servers}
                     values = list(self.discovered_by_label)
                     self.machine_model.splice(0, self.machine_model.get_n_items(), values)
@@ -742,8 +771,13 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                         self.machine_dropdown.set_selected(0)
                         self.machine_var.set(values[0])
                         self._machine_selected()
-                        self.status_var.set(f'Found {len(servers)} running Mac server(s) on the LAN.')
-                        self._log('INFO', f'LAN discovery found {len(servers)} server(s): ' + ', '.join(s.label for s in servers))
+                        running = sum(1 for s in servers if not getattr(s, 'paired_only', False))
+                        paired_offline = len(servers) - running
+                        if paired_offline:
+                            self.status_var.set(f'Found {running} running Mac server(s); {paired_offline} paired Mac(s) available for recovery.')
+                        else:
+                            self.status_var.set(f'Found {running} running Mac server(s) on the LAN.')
+                        self._log('INFO', f'LAN discovery/recovery list has {len(servers)} Mac(s): ' + ', '.join(s.label for s in servers))
                     else:
                         self.status_var.set('No running ZorinMacBridge server found on the LAN.')
                         self._log('INFO', 'LAN discovery found no running servers.')

@@ -1,0 +1,430 @@
+#!/bin/bash
+set -u
+
+LABEL="com.ilovemyprojects.zorinmacbridge.server"
+ADMIN_LABEL="com.ilovemyprojects.zorinmacbridge.admin"
+APP_NAME="ZorinMacBridge Server"
+APP_PATH="/Applications/ZorinMacBridge Server.app"
+DEFAULT_PORT="45950"
+ADMIN_DIR="/Library/Application Support/ZorinMacBridge/Admin"
+ADMIN_CONFIG="$ADMIN_DIR/config"
+HEARTBEAT_DIR="/var/run/zorinmacbridge-admin"
+HEARTBEAT_FILE="$HEARTBEAT_DIR/heartbeat"
+PAUSE_FILE="$HEARTBEAT_DIR/autoheal.paused"
+DAEMON_LOG="/var/log/zorinmacbridge-admin.log"
+DAEMON_ERR="/var/log/zorinmacbridge-admin.err"
+
+fail() { printf 'error=%s\n' "$1" >&2; exit "${2:-1}"; }
+require_root() { [ "$(/usr/bin/id -u)" -eq 0 ] || fail "zmb-admin must run as root" 77; }
+
+valid_user() {
+  case "$1" in
+    ""|root|loginwindow|_mbsetupuser) return 1 ;;
+  esac
+  printf '%s' "$1" | /usr/bin/grep -Eq '^[A-Za-z0-9._-]+$'
+}
+
+config_value() {
+  local key="$1" default="${2:-}" line
+  [ -f "$ADMIN_CONFIG" ] || { printf '%s\n' "$default"; return; }
+  line="$(/usr/bin/awk -F= -v k="$key" '$1==k {sub(/^[^=]*=/, ""); print; exit}' "$ADMIN_CONFIG" 2>/dev/null || true)"
+  [ -n "$line" ] && printf '%s\n' "$line" || printf '%s\n' "$default"
+}
+
+target_user() {
+  local u
+  u="$(config_value TARGET_USER "")"
+  if valid_user "$u"; then printf '%s\n' "$u"; return 0; fi
+  return 1
+}
+
+console_user() {
+  local u
+  u="$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || true)"
+  if valid_user "$u"; then printf '%s\n' "$u"; return 0; fi
+  return 1
+}
+
+user_home() {
+  local u="$1"
+  /usr/bin/dscl . -read "/Users/$u" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}'
+}
+
+user_uid() { /usr/bin/id -u "$1" 2>/dev/null; }
+
+user_session_available() {
+  local uid="$1"
+  /bin/launchctl print "gui/${uid}" >/dev/null 2>&1
+}
+
+settings_value() {
+  local file="$1" key="$2" default="$3" value
+  [ -f "$file" ] || { printf '%s\n' "$default"; return; }
+  value="$(/usr/bin/sed -nE "s/.*\"${key}\"[[:space:]]*:[[:space:]]*(\"[^\"]*\"|[0-9]+|true|false).*/\1/p" "$file" | /usr/bin/head -n 1)"
+  value="${value#\"}"; value="${value%\"}"
+  [ -n "$value" ] && printf '%s\n' "$value" || printf '%s\n' "$default"
+}
+
+zmb_process_running() {
+  local uid="$1"
+  /usr/bin/pgrep -u "$uid" -f '/Applications/ZorinMacBridge Server\.app/' >/dev/null 2>&1
+}
+
+port_listening() {
+  local port="$1"
+  /usr/sbin/lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | /usr/bin/tail -n +2 | /usr/bin/grep -q .
+}
+
+launch_agent_loaded() {
+  local uid="$1"
+  /bin/launchctl print "gui/${uid}/${LABEL}" >/dev/null 2>&1
+}
+
+admin_daemon_loaded() {
+  /bin/launchctl print "system/${ADMIN_LABEL}" >/dev/null 2>&1
+}
+
+heartbeat_age() {
+  local now hb
+  [ -f "$HEARTBEAT_FILE" ] || { printf '%s\n' -1; return; }
+  hb="$(/bin/cat "$HEARTBEAT_FILE" 2>/dev/null || true)"
+  printf '%s' "$hb" | /usr/bin/grep -Eq '^[0-9]+$' || { printf '%s\n' -1; return; }
+  now="$(/bin/date +%s)"
+  printf '%s\n' "$(( now - hb ))"
+}
+
+remote_login_state() {
+  local out
+  out="$(/usr/sbin/systemsetup -getremotelogin 2>/dev/null || true)"
+  case "$out" in
+    *On*) printf '%s\n' on ;;
+    *Off*) printf '%s\n' off ;;
+    *) printf '%s\n' unknown ;;
+  esac
+}
+
+filevault_state() {
+  local out
+  out="$(/usr/bin/fdesetup status 2>/dev/null || true)"
+  case "$out" in
+    *"FileVault is On"*) printf '%s\n' on ;;
+    *"FileVault is Off"*) printf '%s\n' off ;;
+    *) printf '%s\n' unknown ;;
+  esac
+}
+
+wake_on_network_setting() {
+  local v
+  v="$(/usr/bin/pmset -g custom 2>/dev/null | /usr/bin/awk '$1=="womp" {print $2; exit}')"
+  [ -n "$v" ] && printf '%s\n' "$v" || printf '%s\n' unknown
+}
+
+paired_devices_count() {
+  local u home f
+  u="$(target_user || true)"
+  [ -n "$u" ] || { printf '%s\n' 0; return; }
+  home="$(user_home "$u" || true)"
+  f="$home/.ssh/authorized_keys"
+  [ -f "$f" ] || { printf '%s\n' 0; return; }
+  /usr/bin/grep -c 'ZorinMacBridge-Admin:' "$f" 2>/dev/null || true
+}
+
+status_cmd() {
+  require_root
+  local host osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg
+  host="$(/bin/hostname 2>/dev/null || echo unknown)"
+  osver="$(/usr/bin/sw_vers -productVersion 2>/dev/null || echo unknown)"
+  build="$(/usr/bin/sw_vers -buildVersion 2>/dev/null || echo unknown)"
+  major="${osver%%.*}"
+  arch="$(/usr/bin/uname -m 2>/dev/null || echo unknown)"
+  user="$(target_user || true)"
+  [ -n "$user" ] || user="$(console_user || true)"
+  uid=""; home=""; settings=""; plist=""; port="$DEFAULT_PORT"; bind="unknown"
+  app_installed=0; app_running=0; agent_exists=0; agent_loaded=0; listening=0; session=0
+  auto_start="unknown"; launch_at_login="unknown"
+  [ -d "$APP_PATH" ] && app_installed=1
+
+  if [ -n "$user" ]; then
+    uid="$(user_uid "$user" || true)"
+    home="$(user_home "$user" || true)"
+    if [ -n "$home" ]; then
+      settings="$home/.zorin-mac-bridge/server-settings.json"
+      plist="$home/Library/LaunchAgents/${LABEL}.plist"
+      port="$(settings_value "$settings" port "$DEFAULT_PORT")"
+      bind="$(settings_value "$settings" bind unknown)"
+      auto_start="$(settings_value "$settings" auto_start_server unknown)"
+      launch_at_login="$(settings_value "$settings" launch_at_login unknown)"
+      [ -f "$plist" ] && agent_exists=1
+    fi
+    if [ -n "$uid" ]; then
+      user_session_available "$uid" && session=1 || true
+      zmb_process_running "$uid" && app_running=1 || true
+      launch_agent_loaded "$uid" && agent_loaded=1 || true
+    fi
+  fi
+
+  port_listening "$port" && listening=1 || true
+  daemon_loaded=0; admin_daemon_loaded && daemon_loaded=1 || true
+  hb_age="$(heartbeat_age)"
+  remote_login="$(remote_login_state)"
+  fv="$(filevault_state)"
+  wake="$(wake_on_network_setting)"
+  mem="$(/usr/sbin/sysctl -n hw.memsize 2>/dev/null || echo unknown)"
+  disk="$(/bin/df -k / 2>/dev/null | /usr/bin/awk 'NR==2 {printf "%.0f\n", $4*1024}' || echo unknown)"
+  top_out="$(LC_ALL=C /usr/bin/top -l 1 -n 0 2>/dev/null || true)"
+  cpu_usage="$(printf '%s\n' "$top_out" | /usr/bin/awk '/CPU usage:/ {u=$3; s=$5; gsub(/%/,"",u); gsub(/%/,"",s); if (u ~ /^[0-9.]+$/ && s ~ /^[0-9.]+$/) printf "%.1f", u+s; exit}')"
+  [ -n "$cpu_usage" ] || cpu_usage=unknown
+  memory_summary="$(printf '%s\n' "$top_out" | /usr/bin/awk '/^PhysMem:/ {sub(/^PhysMem:[[:space:]]*/,""); print; exit}')"
+  [ -n "$memory_summary" ] || memory_summary=unknown
+  loadavg="$(/usr/sbin/sysctl -n vm.loadavg 2>/dev/null | /usr/bin/sed 's/^{[[:space:]]*//; s/[[:space:]]*}$//' || true)"
+  [ -n "$loadavg" ] || loadavg=unknown
+  paired="$(paired_devices_count)"
+  autoheal_enabled="$(config_value AUTOHEAL 1)"
+  autoheal_paused=0; [ -f "$PAUSE_FILE" ] && autoheal_paused=1
+  ssh_unlock=0
+  if [ "$arch" = "arm64" ] && printf '%s' "$major" | /usr/bin/grep -Eq '^[0-9]+$' && [ "$major" -ge 26 ] && [ "$remote_login" = "on" ]; then
+    ssh_unlock=1
+  fi
+  if [ "$fv" = "off" ]; then
+    reboot_risk="normal"
+  elif [ "$fv" = "on" ] && [ "$ssh_unlock" = "1" ]; then
+    reboot_risk="filevault-ssh-unlock-eligible"
+  elif [ "$fv" = "on" ]; then
+    reboot_risk="local-filevault-unlock-may-be-required"
+  else
+    reboot_risk="unknown"
+  fi
+
+  printf 'protocol=2\n'
+  printf 'hostname=%s\n' "$host"
+  printf 'macos_version=%s\n' "$osver"
+  printf 'macos_build=%s\n' "$build"
+  printf 'arch=%s\n' "$arch"
+  printf 'target_user=%s\n' "${user:-none}"
+  printf 'target_uid=%s\n' "${uid:-none}"
+  printf 'user_session_available=%s\n' "$session"
+  printf 'app_installed=%s\n' "$app_installed"
+  printf 'zmb_app_running=%s\n' "$app_running"
+  printf 'launch_agent_exists=%s\n' "$agent_exists"
+  printf 'launch_agent_loaded=%s\n' "$agent_loaded"
+  printf 'auto_start_server=%s\n' "$auto_start"
+  printf 'launch_at_login=%s\n' "$launch_at_login"
+  printf 'zmb_bind=%s\n' "$bind"
+  printf 'zmb_port=%s\n' "$port"
+  printf 'zmb_port_listening=%s\n' "$listening"
+  printf 'admin_daemon_loaded=%s\n' "$daemon_loaded"
+  printf 'admin_heartbeat_age_seconds=%s\n' "$hb_age"
+  printf 'remote_login=%s\n' "$remote_login"
+  printf 'filevault=%s\n' "$fv"
+  printf 'filevault_ssh_unlock_eligible=%s\n' "$ssh_unlock"
+  printf 'reboot_risk=%s\n' "$reboot_risk"
+  printf 'wake_on_network_setting=%s\n' "$wake"
+  printf 'paired_devices=%s\n' "$paired"
+  printf 'autoheal_enabled=%s\n' "$autoheal_enabled"
+  printf 'autoheal_paused=%s\n' "$autoheal_paused"
+  printf 'cpu_usage_percent=%s\n' "$cpu_usage"
+  printf 'load_average=%s\n' "$loadavg"
+  printf 'memory_total_bytes=%s\n' "$mem"
+  printf 'memory_summary=%s\n' "$memory_summary"
+  printf 'disk_root_available_bytes=%s\n' "$disk"
+  printf 'uptime=%s\n' "$(/usr/bin/uptime 2>/dev/null | /usr/bin/sed 's/^[[:space:]]*//' | /usr/bin/tr '\n' ' ')"
+}
+
+session_pair() {
+  local user uid
+  user="$(target_user || true)"
+  [ -n "$user" ] || fail "target user is not configured" 69
+  uid="$(user_uid "$user" || true)"
+  [ -n "$uid" ] || fail "cannot resolve target user uid" 69
+  user_session_available "$uid" || fail "target user's GUI session is not logged in" 69
+  printf '%s:%s\n' "$user" "$uid"
+}
+
+write_launch_agent() {
+  local user="$1" uid="$2" home dir plist
+  home="$(user_home "$user" || true)"
+  [ -n "$home" ] || fail "cannot resolve user home" 69
+  dir="$home/Library/LaunchAgents"
+  plist="$dir/${LABEL}.plist"
+  /bin/mkdir -p "$dir"
+  /bin/cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>${LABEL}</string>
+<key>ProgramArguments</key><array><string>/usr/bin/open</string><string>-a</string><string>${APP_NAME}</string></array>
+<key>RunAtLoad</key><true/>
+</dict></plist>
+PLIST
+  /usr/sbin/chown "$user":staff "$plist"
+  /bin/chmod 600 "$plist"
+  if user_session_available "$uid"; then
+    /bin/launchctl bootout "gui/${uid}/${LABEL}" >/dev/null 2>&1 || true
+    /bin/launchctl bootstrap "gui/${uid}" "$plist" >/dev/null 2>&1 || true
+  fi
+}
+
+start_zmb() {
+  require_root
+  local pair user uid
+  pair="$(session_pair)" || exit $?
+  user="${pair%%:*}"; uid="${pair##*:}"
+  [ -d "$APP_PATH" ] || fail "ZorinMacBridge Server is not installed in /Applications" 66
+  /bin/mkdir -p "$HEARTBEAT_DIR"
+  /bin/rm -f "$PAUSE_FILE"
+  /bin/launchctl asuser "$uid" /usr/bin/sudo -u "$user" /usr/bin/open -a "$APP_NAME" >/dev/null 2>&1 || fail "failed to start ZorinMacBridge Server" 70
+  printf 'ok=started\n'
+}
+
+stop_zmb() {
+  require_root
+  local pair user uid i
+  pair="$(session_pair)" || exit $?
+  user="${pair%%:*}"; uid="${pair##*:}"
+  /bin/mkdir -p "$HEARTBEAT_DIR"
+  /usr/bin/touch "$PAUSE_FILE"
+  /bin/chmod 644 "$PAUSE_FILE"
+  /bin/launchctl asuser "$uid" /usr/bin/sudo -u "$user" /usr/bin/osascript -e 'tell application "ZorinMacBridge Server" to quit' >/dev/null 2>&1 || true
+  for i in 1 2 3 4 5; do
+    zmb_process_running "$uid" || { printf 'ok=stopped\n'; return 0; }
+    /bin/sleep 1
+  done
+  /usr/bin/pkill -TERM -u "$uid" -f '/Applications/ZorinMacBridge Server\.app/' >/dev/null 2>&1 || true
+  /bin/sleep 1
+  zmb_process_running "$uid" && fail "ZorinMacBridge Server did not stop" 70
+  printf 'ok=stopped\n'
+}
+
+restart_zmb() {
+  require_root
+  stop_zmb >/dev/null 2>&1 || true
+  /bin/rm -f "$PAUSE_FILE"
+  /bin/sleep 1
+  start_zmb
+}
+
+repair_launch_agent() {
+  require_root
+  local user uid
+  user="$(target_user || true)"
+  [ -n "$user" ] || fail "target user is not configured" 69
+  uid="$(user_uid "$user" || true)"
+  [ -n "$uid" ] || fail "cannot resolve target user uid" 69
+  write_launch_agent "$user" "$uid"
+  if user_session_available "$uid"; then
+    printf 'ok=launch-agent-repaired\nsession_available=1\n'
+  else
+    printf 'ok=launch-agent-written\nsession_available=0\n'
+  fi
+}
+
+autoheal() {
+  require_root
+  local enabled user uid home plist
+  enabled="$(config_value AUTOHEAL 1)"
+  [ "$enabled" = "1" ] || return 0
+  [ ! -f "$PAUSE_FILE" ] || return 0
+  user="$(target_user || true)"; [ -n "$user" ] || return 0
+  uid="$(user_uid "$user" || true)"; [ -n "$uid" ] || return 0
+  user_session_available "$uid" || return 0
+  [ -d "$APP_PATH" ] || return 0
+  home="$(user_home "$user" || true)"; [ -n "$home" ] || return 0
+  plist="$home/Library/LaunchAgents/${LABEL}.plist"
+  if [ ! -f "$plist" ]; then write_launch_agent "$user" "$uid"; fi
+  if ! launch_agent_loaded "$uid"; then
+    /bin/launchctl bootstrap "gui/${uid}" "$plist" >/dev/null 2>&1 || true
+  fi
+  if ! zmb_process_running "$uid"; then
+    /bin/launchctl asuser "$uid" /usr/bin/sudo -u "$user" /usr/bin/open -a "$APP_NAME" >/dev/null 2>&1 || true
+  fi
+}
+
+daemon_tick() {
+  require_root
+  /bin/mkdir -p "$HEARTBEAT_DIR"
+  /bin/chmod 755 "$HEARTBEAT_DIR"
+  /bin/date +%s > "$HEARTBEAT_FILE"
+  /bin/chmod 644 "$HEARTBEAT_FILE"
+  autoheal || true
+}
+
+pairing_list() {
+  require_root
+  local u home f
+  u="$(target_user || true)"; [ -n "$u" ] || return 0
+  home="$(user_home "$u" || true)"; [ -n "$home" ] || return 0
+  f="$home/.ssh/authorized_keys"; [ -f "$f" ] || return 0
+  /usr/bin/grep 'ZorinMacBridge-Admin:' "$f" 2>/dev/null | /usr/bin/sed -nE 's/.*ZorinMacBridge-Admin:([A-Za-z0-9._-]+).*/device_id=\1/p'
+}
+
+unpair_device() {
+  require_root
+  local id="$1" u home f tmp
+  printf '%s' "$id" | /usr/bin/grep -Eq '^[A-Za-z0-9._-]{8,80}$' || fail "invalid device id" 64
+  u="$(target_user || true)"; [ -n "$u" ] || fail "target user is not configured" 69
+  home="$(user_home "$u" || true)"; [ -n "$home" ] || fail "cannot resolve user home" 69
+  f="$home/.ssh/authorized_keys"; [ -f "$f" ] || fail "authorized_keys does not exist" 66
+  tmp="${f}.zmbtmp.$$"
+  /usr/bin/awk -v marker="ZorinMacBridge-Admin:${id}" 'index($0, marker)==0 {print}' "$f" > "$tmp"
+  /usr/sbin/chown "$u":staff "$tmp"
+  /bin/chmod 600 "$tmp"
+  /bin/mv "$tmp" "$f"
+  printf 'ok=unpaired\ndevice_id=%s\n' "$id"
+}
+
+logs_cmd() {
+  require_root
+  printf '%s\n' '--- zmb admin daemon stdout ---'
+  /usr/bin/tail -n 100 "$DAEMON_LOG" 2>/dev/null || true
+  printf '%s\n' '--- zmb admin daemon stderr ---'
+  /usr/bin/tail -n 100 "$DAEMON_ERR" 2>/dev/null || true
+}
+
+case "${1:-}" in
+  status) status_cmd ;;
+  start-zmb) start_zmb ;;
+  stop-zmb) stop_zmb ;;
+  restart-zmb) restart_zmb ;;
+  repair-launch-agent) repair_launch_agent ;;
+  daemon-tick) daemon_tick ;;
+  autoheal) autoheal ;;
+  pairing-list) pairing_list ;;
+  unpair) [ "$#" -eq 2 ] || fail "usage: zmb-admin unpair DEVICE_ID" 64; unpair_device "$2" ;;
+  logs) logs_cmd ;;
+  sleep) require_root; /usr/bin/pmset sleepnow ;;
+  reboot)
+    require_root
+    fv="$(filevault_state)"
+    if [ "$fv" = "off" ]; then
+      /sbin/shutdown -r now
+      exit $?
+    fi
+    osver="$(/usr/bin/sw_vers -productVersion 2>/dev/null || true)"
+    major="${osver%%.*}"
+    arch="$(/usr/bin/uname -m 2>/dev/null || true)"
+    remote_login="$(remote_login_state)"
+    if [ "$fv" = "on" ] && [ "$arch" = "arm64" ] && printf '%s' "$major" | /usr/bin/grep -Eq '^[0-9]+$' && [ "$major" -ge 26 ] && [ "$remote_login" = "on" ]; then
+      /sbin/shutdown -r now
+      exit $?
+    fi
+    fail "reboot blocked: FileVault may require local unlock; use the Mac locally or make remote preboot unlock eligible first" 78
+    ;;
+  shutdown) require_root; /sbin/shutdown -h now ;;
+  *)
+    cat >&2 <<'USAGE'
+Usage: zmb-admin COMMAND
+  status
+  start-zmb
+  stop-zmb
+  restart-zmb
+  repair-launch-agent
+  pairing-list
+  unpair DEVICE_ID
+  logs
+  sleep
+  reboot
+  shutdown
+USAGE
+    exit 64
+    ;;
+esac

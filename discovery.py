@@ -33,10 +33,13 @@ class DiscoveredServer:
     port: int
     version: str = ''
     server_id: str = ''
+    paired_only: bool = False
 
     @property
     def label(self) -> str:
         suffix = f' · v{self.version}' if self.version else ''
+        if self.paired_only:
+            suffix += ' · paired/offline'
         return f'{self.name} — {self.ip}:{self.port}{suffix}'
 
 

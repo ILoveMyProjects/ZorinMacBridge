@@ -1,0 +1,10 @@
+#!/bin/bash
+set -u
+
+# Small root launchd worker. It exposes no network listener.
+# SSH is the transport; this process only keeps a heartbeat and repairs the
+# user-session ZMB component when AUTOHEAL=1.
+while true; do
+  /usr/local/sbin/zmb-admin daemon-tick >/dev/null 2>&1 || true
+  /bin/sleep 15
+done

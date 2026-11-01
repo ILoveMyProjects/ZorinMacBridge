@@ -1,0 +1,27 @@
+#!/bin/bash
+set -u
+
+# ForcedCommand target for the dedicated ZorinMacBridge admin SSH key.
+# The key is intentionally NOT a general shell key.
+orig="${SSH_ORIGINAL_COMMAND:-}"
+case "$orig" in
+  "zmb-admin status") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin status ;;
+  "zmb-admin start-zmb") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin start-zmb ;;
+  "zmb-admin stop-zmb") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin stop-zmb ;;
+  "zmb-admin restart-zmb") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin restart-zmb ;;
+  "zmb-admin repair-launch-agent") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin repair-launch-agent ;;
+  "zmb-admin pairing-list") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin pairing-list ;;
+  "zmb-admin logs") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin logs ;;
+  "zmb-admin sleep") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin sleep ;;
+  "zmb-admin reboot") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin reboot ;;
+  "zmb-admin shutdown") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin shutdown ;;
+  zmb-admin\ unpair\ *)
+    id="${orig#zmb-admin unpair }"
+    printf '%s' "$id" | /usr/bin/grep -Eq '^[A-Za-z0-9._-]{8,80}$' || { echo "invalid device id" >&2; exit 64; }
+    exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin unpair "$id"
+    ;;
+  *)
+    echo "ZorinMacBridge admin key: command denied" >&2
+    exit 126
+    ;;
+esac

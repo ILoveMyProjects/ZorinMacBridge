@@ -32,6 +32,16 @@ This design is intended to stop normal app updates from changing the code identi
 
 Deleting the local signing state causes a new identity to be generated and can therefore require privacy authorization again.
 
+## Optional P0 unattended administration
+
+P0 is disabled until the Mac user explicitly chooses **Enable / Repair** and authorizes the install locally with an administrator password. The root LaunchDaemon does not listen on a TCP/UDP socket. Network administration uses the operating system's Remote Login (SSH) service.
+
+The Zorin client generates a dedicated Ed25519 key per paired Mac. The Mac stores it in `authorized_keys` with `restrict` and a forced command pointing to `/usr/local/libexec/zmb-admin-ssh`. That gateway accepts only the documented ZorinMacBridge administration commands and rejects arbitrary shell commands. The root helper is exposed through a narrow sudoers allow-list.
+
+First pairing still requires verifying the Mac SSH host fingerprint. The macOS account password supplied during pairing is passed to the one-time SSH login through a temporary askpass file with user-only permissions and is deleted immediately afterward; it is not written to the pairing profile.
+
+P0 does not modify the TCC database, grant Screen Recording/Accessibility, bypass the login window, or defeat FileVault. The desktop streamer remains a user-session process. Removing P0 deletes ZorinMacBridge-Admin pairing keys but intentionally leaves macOS Remote Login unchanged because the user may rely on ordinary SSH separately.
+
 ## Updates
 
 There is no background update checker. An update request occurs only after an explicit user action.

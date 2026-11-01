@@ -18,6 +18,8 @@ from mac_server import (
 )
 from discovery import LanAdvertiser
 from resources import resource_path, set_tk_icon
+from mac_admin_setup import (admin_component_state, install_unattended_access,
+                             ssh_host_fingerprints, uninstall_unattended_access)
 from tray_icon import TrayController
 from updates import check_for_updates, current_version, install_update, updater_tls_self_test
 from settings import (PasswordVerifier, load_server_password_verifier, load_server_settings,
@@ -65,6 +67,7 @@ class ServerGUI:
         self.screen_permission_var = tk.StringVar(value='Screen Recording: checking…')
         self.input_permission_var = tk.StringVar(value='Mouse/keyboard control: checking…')
         self.signing_var = tk.StringVar(value='Code signing: checking…')
+        self.admin_status_var = tk.StringVar(value='Unattended access: checking…')
         self.stop_event: threading.Event | None = None
         self.thread: threading.Thread | None = None
         self.advertiser: LanAdvertiser | None = None
@@ -73,6 +76,7 @@ class ServerGUI:
         self._build(ips)
         self._build_menu()
         self.root.after(100, self.refresh_permission_status)
+        self.root.after(180, self.refresh_admin_status)
         self.tray = TrayController(
             self.root,
             'ZorinMacBridge Server',
@@ -226,12 +230,12 @@ class ServerGUI:
             'About ZorinMacBridge',
             f'ZorinMacBridge Server {current_version()}\n\n'
             'LAN-only macOS host with H.264 screen streaming.\n'
-            'Launch-at-login and auto-start are optional and disabled by default.\n'
-            'No system daemon or background update checker is installed.',
+            'Optional unattended administration uses macOS Remote Login plus a local system helper.\n'
+            'No background update checker is installed.',
         )
 
     def _build(self, ips: list[str]) -> None:
-        self.root.geometry('760x700')
+        self.root.geometry('800x820')
         outer = ttk.Frame(self.root, padding=16)
         outer.pack(fill='both', expand=True)
 
@@ -294,8 +298,21 @@ class ServerGUI:
         ttk.Button(permission_actions, text='Restart app', command=self.restart_app).pack(side='left', padx=(8, 0))
         perms.columnconfigure(0, weight=1)
 
+        admin = ttk.LabelFrame(outer, text='Unattended access / recovery', padding=8)
+        admin.grid(row=13, column=0, columnspan=3, sticky='ew', pady=(2, 6))
+        ttk.Label(admin, textvariable=self.admin_status_var, wraplength=650).grid(row=0, column=0, columnspan=3, sticky='w')
+        ttk.Label(
+            admin,
+            text='One-time local setup. Installs a root LaunchDaemon with no network listener; remote administration uses macOS SSH with a restricted per-device key.',
+            wraplength=650,
+        ).grid(row=1, column=0, columnspan=3, sticky='w', pady=(4, 6))
+        ttk.Button(admin, text='Enable / Repair', command=self.enable_unattended_access).grid(row=2, column=0, sticky='w')
+        ttk.Button(admin, text='Copy SSH fingerprint', command=self.copy_ssh_fingerprint).grid(row=2, column=1, padx=(8, 0), sticky='w')
+        ttk.Button(admin, text='Disable P0', command=self.disable_unattended_access).grid(row=2, column=2, padx=(8, 0), sticky='w')
+        admin.columnconfigure(0, weight=1)
+
         buttons = ttk.Frame(outer)
-        buttons.grid(row=13, column=0, columnspan=3, sticky='ew', pady=(8, 8))
+        buttons.grid(row=14, column=0, columnspan=3, sticky='ew', pady=(8, 8))
         self.start_btn = ttk.Button(buttons, text='Start server', command=self.start)
         self.start_btn.pack(side='left')
         self.stop_btn = ttk.Button(buttons, text='Stop server', command=self.stop, state='disabled')
@@ -303,17 +320,112 @@ class ServerGUI:
         ttk.Label(buttons, textvariable=self.status_var).pack(side='right')
 
         note = ('Screen Recording is required for video. Accessibility is required for mouse/keyboard control.\n'
-                'Launch-at-login is a per-user login item, not a system daemon. It requires a logged-in macOS session.\n'
-                'Use only on a trusted LAN. Do not expose port 45950 to the public Internet.')
-        ttk.Label(outer, text=note, wraplength=700).grid(row=14, column=0, columnspan=3, sticky='w', pady=(4, 8))
+                'The desktop streamer still requires a logged-in macOS GUI session; P0 keeps system recovery available independently.\n'
+                'Use only on a trusted LAN. Do not expose ZorinMacBridge or SSH directly to the public Internet.')
+        ttk.Label(outer, text=note, wraplength=700).grid(row=15, column=0, columnspan=3, sticky='w', pady=(4, 8))
 
         self.log = tk.Text(outer, height=12, wrap='word', state='disabled')
-        self.log.grid(row=15, column=0, columnspan=3, sticky='nsew')
+        self.log.grid(row=16, column=0, columnspan=3, sticky='nsew')
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(15, weight=1)
+        outer.rowconfigure(16, weight=1)
 
         self.root.protocol('WM_DELETE_WINDOW', self.on_close)
 
+
+    def refresh_admin_status(self) -> None:
+        try:
+            state = admin_component_state()
+            installed = bool(state.get('installed'))
+            loaded = bool(state.get('daemon_loaded'))
+            remote = str(state.get('remote_login') or 'unknown')
+            if installed and loaded:
+                text = f'P0 system service: ready · Remote Login: {remote}'
+            elif installed:
+                text = f'P0 files installed but system service is not loaded · Remote Login: {remote}'
+            else:
+                text = f'P0 unattended access is not installed · Remote Login: {remote}'
+            self.admin_status_var.set(text)
+        except Exception as exc:
+            self.admin_status_var.set(f'Unattended access status unavailable: {exc}')
+
+    def enable_unattended_access(self) -> None:
+        if not messagebox.askyesno(
+            'Enable unattended access',
+            'Install/repair the ZorinMacBridge P0 system helper and enable macOS Remote Login?\n\n'
+            'macOS will ask for an administrator password. The system helper opens no custom network port.',
+        ):
+            return
+        self.admin_status_var.set('Installing unattended access…')
+
+        def worker() -> None:
+            try:
+                output = install_unattended_access()
+                self.root.after(0, lambda out=output: done(out, None))
+            except Exception as exc:
+                self.root.after(0, lambda err=str(exc): done('', err))
+
+        def done(output: str, error: str | None) -> None:
+            if error:
+                self._log('P0 installation failed: ' + error)
+                messagebox.showerror('Unattended access', 'P0 installation failed.\n\n' + error)
+                self.refresh_admin_status()
+                return
+            self.launch_at_login_var.set(True)
+            self.auto_start_var.set(True)
+            update_server_settings(launch_at_login=True, auto_start_server=True)
+            self._log('P0 unattended access installed/repaired.')
+            if output:
+                self._log(output)
+            self.refresh_admin_status()
+            self.copy_ssh_fingerprint(show_dialog=True)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def disable_unattended_access(self) -> None:
+        if not messagebox.askyesno(
+            'Disable P0 unattended access',
+            'Remove the ZorinMacBridge system helper and all ZorinMacBridge-Admin SSH pairing keys from this Mac?\n\n'
+            'Normal Remote Login and the desktop application are left unchanged.',
+        ):
+            return
+        self.admin_status_var.set('Removing P0 unattended access…')
+
+        def worker() -> None:
+            try:
+                output = uninstall_unattended_access()
+                self.root.after(0, lambda out=output: done(out, None))
+            except Exception as exc:
+                self.root.after(0, lambda err=str(exc): done('', err))
+
+        def done(output: str, error: str | None) -> None:
+            if error:
+                self._log('P0 removal failed: ' + error)
+                messagebox.showerror('Unattended access', 'P0 removal failed.\n\n' + error)
+            else:
+                self._log('P0 unattended access removed.')
+                if output:
+                    self._log(output)
+            self.refresh_admin_status()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def copy_ssh_fingerprint(self, show_dialog: bool = False) -> None:
+        try:
+            fingerprints = ssh_host_fingerprints()
+            if not fingerprints:
+                raise RuntimeError('No macOS SSH host public keys were found. Enable Remote Login first.')
+            text = '\n'.join(fingerprints)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self._log('Copied macOS SSH host fingerprint(s) for P0 pairing.')
+            if show_dialog:
+                messagebox.showinfo(
+                    'Unattended access ready',
+                    'P0 is installed. Compare this SSH fingerprint when pairing from the Zorin System tab.\n\n' + text,
+                )
+        except Exception as exc:
+            self._log('Could not read SSH host fingerprint: ' + str(exc))
+            messagebox.showerror('SSH fingerprint', str(exc))
 
     def open_shared_folder(self) -> None:
         """Open the configured transfer folder in Finder."""

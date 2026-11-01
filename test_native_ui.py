@@ -15,6 +15,13 @@ assert "folder-symbolic" in client
 assert "Gtk.FileDialog" in client
 assert "Double-click" in (root / 'README.md').read_text(encoding='utf-8')
 assert 'def open_shared_folder(' in server
+
+assert 'SystemController' in client
+assert "self.stack.add_titled(self.system_page, 'system', 'System')" in client
+assert 'Enable / Repair' in server
+assert 'Unattended access / recovery' in server
+assert 'zmb_admin_backend.py zmb_system_page.py' in release
+assert "--add-data 'native/macos/admin:native/macos/admin'" in release
 assert 'Request Screen Recording Access' in server
 assert 'Request Mouse/Keyboard Access' in server
 assert "['/usr/bin/open', str(path)]" in server

@@ -16,7 +16,7 @@ jobs:
             python3 python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
             python3-pil python3-pil.imagetk python3-av python3-certifi \
             python3-keyring python3-secretstorage python3-zeroconf python3-pystray \
-            python3-tk wl-clipboard xclip xvfb pkexec
+            python3-tk wl-clipboard xclip xvfb pkexec openssh-client
       - name: Syntax and protocol tests
         run: |
           /usr/bin/python3 -m compileall -q .
@@ -25,8 +25,14 @@ jobs:
           /usr/bin/python3 test_updater.py
           /usr/bin/python3 test_native_ui.py
           /usr/bin/python3 test_local_signing.py
+          /usr/bin/python3 test_p0_admin.py
           /usr/bin/python3 -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); from gi.repository import Gtk, Adw; import av; av.CodecContext.create('h264','r'); import keyring; print('GTK4/libadwaita + H.264 runtime OK')"
           bash -n install-linux.sh
           bash -n install-macos.sh
+          bash -n native/macos/admin/install-admin.sh
+          bash -n native/macos/admin/uninstall-admin.sh
+          bash -n native/macos/admin/zmb-admin
+          bash -n native/macos/admin/zmb-admin-ssh
+          bash -n native/macos/admin/zmb-system-daemon
           bash -n scripts/verify-release-source.sh
           scripts/verify-release-source.sh
