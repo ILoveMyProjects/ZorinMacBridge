@@ -123,6 +123,12 @@ def main() -> None:
     assert 'ZorinMacBridge-Server_macOS-x86_64.dmg' not in release
     assert 'needs: [linux-amd64, macos-arm64]' in release
     assert 'Apple Silicon (arm64) Macs only' in installer
+    assert 'bootstrap_system_job()' in installer
+    assert 'wait_for_launchd_job_gone()' in installer
+    assert '/usr/bin/plutil -lint' in installer
+    assert 'while [ "$attempt" -le 16 ]' in installer
+    assert '/bin/sleep 0.5' in installer
+    assert 'Recent launchd messages for ZorinMacBridge:' in installer
 
     discovery = (ROOT / 'discovery.py').read_text(encoding='utf-8')
     daemon = (ROOT / 'native/macos/admin/zmb-system-daemon').read_text(encoding='utf-8')

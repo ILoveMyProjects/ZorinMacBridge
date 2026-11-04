@@ -1,3 +1,9 @@
+## v0.8.1
+
+- Fixed P0 installation on macOS when `launchctl bootstrap` races a preceding `bootout` and returns `Bootstrap failed: 5: Input/output error`.
+- LaunchDaemon installation now validates plist files, waits boundedly for old jobs to leave the launchd namespace, retries bootstrap, and prints actionable diagnostics on failure.
+- Added static regression coverage for the launchd bootstrap/retry path.
+
 ## v0.8.0
 
 - Audit hardening pass: removed additional GUI-thread blocking operations, bounded discovery/UI/log workloads, added stale-operation invalidation, and added hard native-streamer pipe deadlines.

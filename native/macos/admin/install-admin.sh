@@ -46,6 +46,75 @@ LABEL="com.ilovemyprojects.zorinmacbridge.server"
 ADMIN_LABEL="com.ilovemyprojects.zorinmacbridge.admin"
 UPDATE_LABEL="com.ilovemyprojects.zorinmacbridge.update"
 
+# launchd processes bootout asynchronously on current macOS releases.  A
+# bootstrap issued immediately afterwards can fail with EIO (5) even when the
+# plist is valid.  Keep all launchd registration in one bounded/retrying helper.
+wait_for_launchd_job_gone() {
+  local label="$1" attempt=1
+  while [ "$attempt" -le 20 ]; do
+    if ! /bin/launchctl print "system/${label}" >/dev/null 2>&1; then
+      return 0
+    fi
+    /bin/sleep 0.5
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+bootstrap_system_job() {
+  local label="$1" source_plist="$2" dest_plist="$3"
+  local attempt rc last_err="" err_file
+
+  /usr/bin/plutil -lint "$source_plist" >/dev/null || {
+    echo "Invalid bundled LaunchDaemon plist: $source_plist" >&2
+    return 1
+  }
+
+  /bin/launchctl bootout "system/${label}" >/dev/null 2>&1 || true
+  # bootout can return before launchd has fully released the service label.
+  wait_for_launchd_job_gone "$label" || true
+
+  /usr/bin/install -o root -g wheel -m 0644 "$source_plist" "$dest_plist"
+  /usr/bin/plutil -lint "$dest_plist" >/dev/null || {
+    echo "Installed LaunchDaemon plist failed validation: $dest_plist" >&2
+    return 1
+  }
+  /bin/launchctl enable "system/${label}" >/dev/null 2>&1 || true
+
+  err_file="$(/usr/bin/mktemp /var/tmp/zmb-launchctl.XXXXXX)"
+  attempt=1
+  while [ "$attempt" -le 16 ]; do
+    : > "$err_file"
+    if /bin/launchctl bootstrap system "$dest_plist" 2>"$err_file"; then
+      /bin/rm -f "$err_file"
+      return 0
+    fi
+    rc=$?
+    last_err="$(/bin/cat "$err_file" 2>/dev/null || true)"
+    # If a concurrent/bootstrap retry actually registered it, treat that as
+    # success rather than issuing another registration request.
+    if /bin/launchctl print "system/${label}" >/dev/null 2>&1; then
+      /bin/rm -f "$err_file"
+      return 0
+    fi
+    # EIO/"in progress" after bootout is transient; bounded retries also make
+    # other launchd transition states recover without hanging the installer.
+    /bin/sleep 0.5
+    attempt=$((attempt + 1))
+  done
+
+  echo "ERROR: launchd could not bootstrap ${label}." >&2
+  [ -n "$last_err" ] && printf '%s\n' "$last_err" >&2
+  echo "LaunchDaemon diagnostics:" >&2
+  /usr/bin/plutil -lint "$dest_plist" >&2 || true
+  /bin/ls -ld /Library/LaunchDaemons "$dest_plist" /usr/local/libexec /usr/local/sbin >&2 || true
+  /bin/launchctl print-disabled system >&2 || true
+  echo "Recent launchd messages for ZorinMacBridge:" >&2
+  /usr/bin/log show --style compact --last 2m --predicate 'process == "launchd" AND (eventMessage CONTAINS[c] "zorinmacbridge" OR eventMessage CONTAINS[c] "bootstrap")' 2>/dev/null | /usr/bin/tail -n 80 >&2 || true
+  /bin/rm -f "$err_file"
+  return "${rc:-1}"
+}
+
 /bin/mkdir -p /usr/local/sbin /usr/local/libexec "$ADMIN_DIR"
 /usr/bin/install -o root -g wheel -m 0755 "$HERE/zmb-admin" /usr/local/sbin/zmb-admin
 /usr/bin/install -o root -g wheel -m 0755 "$HERE/zmb-admin-ssh" /usr/local/libexec/zmb-admin-ssh
@@ -97,17 +166,16 @@ SUDOERS
 # semantics. The installed helper performs the atomic write as TARGET_USER.
 /usr/local/sbin/zmb-admin repair-launch-agent >/dev/null
 
-/bin/launchctl bootout "system/${ADMIN_LABEL}" >/dev/null 2>&1 || true
-/usr/bin/install -o root -g wheel -m 0644 "$HERE/com.ilovemyprojects.zorinmacbridge.admin.plist" "/Library/LaunchDaemons/${ADMIN_LABEL}.plist"
-/bin/launchctl bootstrap system "/Library/LaunchDaemons/${ADMIN_LABEL}.plist"
+bootstrap_system_job   "$ADMIN_LABEL"   "$HERE/com.ilovemyprojects.zorinmacbridge.admin.plist"   "/Library/LaunchDaemons/${ADMIN_LABEL}.plist"
 /bin/launchctl kickstart -k "system/${ADMIN_LABEL}" >/dev/null 2>&1 || true
 
-/usr/bin/install -o root -g wheel -m 0644 "$HERE/com.ilovemyprojects.zorinmacbridge.update.plist" "/Library/LaunchDaemons/${UPDATE_LABEL}.plist"
 # Do not unload the updater job from inside an update it is currently performing.
-# The new plist is on disk immediately; normal setup/reboot reloads it.
-if [ "${ZMB_UPDATE_IN_PROGRESS:-0}" != "1" ]; then
-  /bin/launchctl bootout "system/${UPDATE_LABEL}" >/dev/null 2>&1 || true
-  /bin/launchctl bootstrap system "/Library/LaunchDaemons/${UPDATE_LABEL}.plist"
+# The new plist is installed on disk immediately; normal setup/reboot reloads it.
+if [ "${ZMB_UPDATE_IN_PROGRESS:-0}" = "1" ]; then
+  /usr/bin/plutil -lint "$HERE/com.ilovemyprojects.zorinmacbridge.update.plist" >/dev/null
+  /usr/bin/install -o root -g wheel -m 0644     "$HERE/com.ilovemyprojects.zorinmacbridge.update.plist"     "/Library/LaunchDaemons/${UPDATE_LABEL}.plist"
+else
+  bootstrap_system_job     "$UPDATE_LABEL"     "$HERE/com.ilovemyprojects.zorinmacbridge.update.plist"     "/Library/LaunchDaemons/${UPDATE_LABEL}.plist"
   /bin/launchctl kickstart -k "system/${UPDATE_LABEL}" >/dev/null 2>&1 || true
 fi
 
