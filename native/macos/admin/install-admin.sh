@@ -180,17 +180,27 @@ else
 fi
 
 # SSH is the only network-facing admin transport. No custom privileged listener is opened.
-# P0 is not considered installed until Remote Login is actually enabled.
-SYSTEMSETUP_OUT="$(/usr/bin/mktemp /var/tmp/zmb-systemsetup.XXXXXX)"
-cleanup_systemsetup() { /bin/rm -f "$SYSTEMSETUP_OUT"; }
-trap cleanup_systemsetup EXIT
-if ! /usr/sbin/systemsetup -setremotelogin on >"$SYSTEMSETUP_OUT" 2>&1; then
-  echo "ERROR: Could not enable macOS Remote Login (SSH) automatically." >&2
-  /bin/cat "$SYSTEMSETUP_OUT" >&2 || true
-  echo "Open System Settings > General > Sharing > Remote Login, turn it on, then run setup again." >&2
-  exit 78
+# On current macOS, `systemsetup -setremotelogin on` requires Full Disk Access
+# for the invoking process. Administrator privileges alone are not enough.
+# Therefore P0 installation must remain successful when macOS requires the user
+# to flip Remote Login once in System Settings. Everything else is installed so
+# that enabling the switch immediately makes remote recovery usable.
+REMOTE_LOGIN_STATE="manual_required"
+if /usr/bin/nc -G 1 -z 127.0.0.1 22 >/dev/null 2>&1; then
+  REMOTE_LOGIN_STATE="on"
+else
+  SYSTEMSETUP_OUT="$(/usr/bin/mktemp /var/tmp/zmb-systemsetup.XXXXXX)"
+  cleanup_systemsetup() { /bin/rm -f "$SYSTEMSETUP_OUT"; }
+  trap cleanup_systemsetup EXIT
+  if /usr/sbin/systemsetup -setremotelogin on >"$SYSTEMSETUP_OUT" 2>&1; then
+    REMOTE_LOGIN_STATE="on"
+  else
+    echo "WARNING: macOS did not allow Remote Login (SSH) to be enabled automatically." >&2
+    /bin/cat "$SYSTEMSETUP_OUT" >&2 || true
+    echo "P0 helper installation will continue." >&2
+    echo "One local action remains: System Settings > General > Sharing > Remote Login -> On." >&2
+  fi
 fi
-echo "REMOTE_LOGIN=on"
 
 # authorized_keys is user-owned state. Create/validate it entirely as the
 # target user so a user-controlled path can never gain root file semantics.
@@ -217,6 +227,7 @@ fi
 printf 'TARGET_USER=%s\n' "$TARGET_USER"
 printf 'TARGET_UID=%s\n' "$TARGET_UID"
 printf 'P0_OK=1\n'
+printf 'REMOTE_LOGIN=%s\n' "$REMOTE_LOGIN_STATE"
 /usr/local/sbin/zmb-admin status || true
 
 echo 'SSH_FINGERPRINTS_BEGIN'

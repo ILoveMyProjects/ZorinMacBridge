@@ -1,3 +1,9 @@
+## v0.8.2
+
+- Fixed P0 setup on current macOS when `systemsetup -setremotelogin on` is denied because the installer process lacks Full Disk Access. P0 now installs successfully and reports Remote Login as a one-time manual action instead of failing the whole setup.
+- Privileged AppleScript commands now execute from `/` so an installer launched from a privacy-protected project directory cannot fail with `getcwd: Operation not permitted`.
+- Terminal and GUI setup open Sharing settings when Remote Login still needs to be enabled and explicitly state that P0 does not need to be reinstalled afterwards.
+
 ## v0.8.1
 
 - Fixed P0 installation on macOS when `launchctl bootstrap` races a preceding `bootout` and returns `Bootstrap failed: 5: Input/output error`.

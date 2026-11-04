@@ -1,6 +1,6 @@
 # P0 source integration notes
 
-This tree is a direct source-level integration of unattended administration into ZorinMacBridge 0.8.1.
+This tree is a direct source-level integration of unattended administration into ZorinMacBridge 0.8.2.
 
 There is no runtime patcher, `dpkg-divert`, APT post-hook, second launcher, or separate admin GUI.
 

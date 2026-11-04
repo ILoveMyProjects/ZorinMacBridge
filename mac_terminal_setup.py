@@ -69,12 +69,12 @@ def run_terminal_setup() -> int:
         print(output)
 
     state = admin_component_state()
-    if state.get('remote_login') != 'on':
-        print('', file=sys.stderr)
-        print('ERROR: macOS Remote Login (SSH) is not confirmed as enabled.', file=sys.stderr)
-        print('Open System Settings > General > Sharing > Remote Login, enable it for this user,', file=sys.stderr)
-        print('then run the installer again.', file=sys.stderr)
-        return 2
+    remote_login_ready = state.get('remote_login') == 'on'
+    if not remote_login_ready:
+        print()
+        print('ACTION REQUIRED ONCE: macOS Remote Login (SSH) is still off.')
+        print('Open System Settings > General > Sharing > Remote Login and turn it on.')
+        print('You do NOT need to reinstall P0 after enabling it; the helpers and pairing state are already prepared.')
 
     # The user-session app must launch and start its desktop server after login.
     update_server_settings(launch_at_login=True, auto_start_server=True)
@@ -102,8 +102,14 @@ def run_terminal_setup() -> int:
     print()
     print('SETUP_OK=1')
     print(f'MACOS_SHORT_USER={user}')
-    print('REMOTE_LOGIN=on')
+    print('REMOTE_LOGIN=' + ('on' if remote_login_ready else 'manual_required'))
     print(f'AUTO_UPDATE_MODE={auto_update_mode}')
+    if not remote_login_ready:
+        try:
+            subprocess.Popen(['/usr/bin/open', 'x-apple.systempreferences:com.apple.Sharing-Settings.extension'], cwd='/')
+        except Exception:
+            pass
+        print('After turning Remote Login on, continue on Zorin; rerunning the installer is optional.')
     print('Next on Zorin: select this Mac -> System -> Pair / Configure.')
     print('For "macOS account password", enter the same password you use to log in/unlock this Mac.')
     print('For the normal Desktop connection, use the separate ZorinMacBridge session password you created above.')

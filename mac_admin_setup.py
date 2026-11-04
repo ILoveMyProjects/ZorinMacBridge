@@ -23,7 +23,7 @@ def current_short_user() -> str:
     return pwd.getpwuid(os.getuid()).pw_name
 
 
-def _run(argv: list[str], timeout: int = 30) -> subprocess.CompletedProcess[str]:
+def _run(argv: list[str], timeout: int = 30, *, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         argv,
         stdout=subprocess.PIPE,
@@ -31,12 +31,16 @@ def _run(argv: list[str], timeout: int = 30) -> subprocess.CompletedProcess[str]
         text=True,
         timeout=timeout,
         check=False,
+        cwd=cwd,
     )
 
 
 def _privileged_shell(command: str, *, timeout: int = 120) -> str:
     applescript = 'on run argv\n do shell script (item 1 of argv) with administrator privileges\nend run'
-    proc = _run(['/usr/bin/osascript', '-e', applescript, '--', command], timeout=timeout)
+    # Run privileged AppleScript from a stable directory. The app/installer may
+    # have been launched from a project directory that macOS privacy controls
+    # later deny to the elevated shell, which otherwise produces getcwd errors.
+    proc = _run(['/usr/bin/osascript', '-e', applescript, '--', f'cd / && {command}'], timeout=timeout, cwd='/')
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout or 'Administrator command failed').strip())
     return (proc.stdout or '').strip()

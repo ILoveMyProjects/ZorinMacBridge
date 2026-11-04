@@ -151,6 +151,10 @@ After pairing, the **System** page provides health/status, ZMB start/stop/restar
 
 The system layer does not bypass macOS login, FileVault, Screen Recording, or Accessibility. If there is no logged-in GUI session, system administration can remain available but there is no normal desktop to stream. Reboot is blocked by the helper when FileVault state indicates that local unlock may be required.
 
+### Remote Login and Full Disk Access on current macOS
+
+macOS may refuse `systemsetup -setremotelogin on` unless the invoking process has Full Disk Access. ZorinMacBridge therefore treats this as a one-time local action rather than a failed P0 installation. If setup reports `REMOTE_LOGIN=manual_required`, open **System Settings → General → Sharing → Remote Login** and turn it on. The P0 helpers, pairing files, recovery service, and update service are already installed; rerunning P0 is optional.
+
 ## Stable macOS permissions
 
 macOS controls Screen Recording and mouse/keyboard control through its privacy/TCC system. ZorinMacBridge cannot silently grant itself those permissions. In v0.5.2+, the server window has explicit **Request Screen Recording Access** and **Request Mouse/Keyboard Access** buttons. Those APIs are invoked only by a local click on the Mac; a remote connection never triggers a privacy prompt.

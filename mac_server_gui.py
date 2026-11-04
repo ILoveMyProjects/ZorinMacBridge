@@ -402,6 +402,22 @@ class ServerGUI:
             if output:
                 self._log(output)
             self.refresh_admin_status()
+            try:
+                state = admin_component_state()
+            except Exception:
+                state = {}
+            if state.get('remote_login') != 'on':
+                try:
+                    subprocess.Popen(['/usr/bin/open', 'x-apple.systempreferences:com.apple.Sharing-Settings.extension'], cwd='/')
+                except Exception:
+                    pass
+                messagebox.showwarning(
+                    'One local step remains',
+                    'P0 is installed. macOS did not allow Remote Login (SSH) to be enabled automatically.\n\n'
+                    'Turn on System Settings → General → Sharing → Remote Login once.\n'
+                    'You do not need to reinstall P0 afterwards.',
+                )
+                return
             self.copy_ssh_fingerprint(show_dialog=True)
 
         threading.Thread(target=worker, daemon=True).start()

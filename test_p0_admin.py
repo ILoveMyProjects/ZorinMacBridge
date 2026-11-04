@@ -105,6 +105,9 @@ def main() -> None:
     assert 'zmb_admin_backend.py zmb_system_page.py' in release
     assert 'openssh-client' in release
     assert 'systemsetup -setremotelogin on' in installer
+    assert 'REMOTE_LOGIN_STATE="manual_required"' in installer
+    assert 'P0 helper installation will continue.' in installer
+    assert 'exit 78' not in installer.split('# SSH is the only network-facing admin transport.', 1)[1].split('# authorized_keys is user-owned state.', 1)[0]
     assert 'com.ilovemyprojects.zorinmacbridge.update.plist' in installer
     assert 'AUTO_UPDATE=$OLD_AUTO_UPDATE' in installer
     assert '/usr/local/sbin/zmb-admin update-now' in installer
@@ -207,7 +210,9 @@ admin_installer = (ROOT / "native/macos/admin/install-admin.sh").read_text(encod
 assert "--terminal-setup" in mac_gui
 assert "--terminal-setup" in install_macos
 assert "systemsetup -setremotelogin on" in admin_installer
-assert "exit 78" in admin_installer
+assert 'REMOTE_LOGIN_STATE="manual_required"' in admin_installer
+assert 'You do NOT need to reinstall P0' in terminal_setup
+assert "cwd='/'" in (ROOT / 'mac_admin_setup.py').read_text(encoding='utf-8')
 assert "ZorinMacBridge session password" in terminal_setup
 assert "macOS account password" in terminal_setup
 assert "Install automatically" in terminal_setup
