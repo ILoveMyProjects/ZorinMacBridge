@@ -19,6 +19,8 @@ from zmb_admin_backend import (
 
 
 STATUS_FIELDS = [
+    ("Hostname", "hostname"),
+    ("Machine ID", "server_id"),
     ("macOS", "macos_version"),
     ("Architecture", "arch"),
     ("Target user", "target_user"),
@@ -42,6 +44,11 @@ STATUS_FIELDS = [
     ("Paired admin devices", "paired_devices"),
     ("Auto-recovery", "autoheal_enabled"),
     ("Recovery paused", "autoheal_paused"),
+    ("Auto update", "auto_update_mode"),
+    ("Installed ZMB", "update_current"),
+    ("Latest ZMB", "update_latest"),
+    ("Update available", "update_available"),
+    ("Last update result", "update_last_result"),
 ]
 
 
@@ -63,6 +70,8 @@ class SystemController:
     def __init__(self, window):
         self.window = window
         self.busy = False
+        self._operation_serial = 0
+        self._operation_watchdog = 0
         self.last_status: dict[str, str] | None = None
         self.scanned_pairing: dict | None = None
         self.action_buttons: list[Gtk.Button] = []
@@ -108,6 +117,9 @@ class SystemController:
         self.summary.add_css_class("zmb-muted")
         text.append(self.summary)
 
+        self.spinner = Gtk.Spinner()
+        self.spinner.set_tooltip_text("System operation in progress")
+        top.append(self.spinner)
         self.refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Refresh system status")
         self.refresh_btn.connect("clicked", lambda *_: self.refresh())
         top.append(self.refresh_btn)
@@ -150,6 +162,43 @@ class SystemController:
             flow.insert(btn, -1)
             self.action_buttons.append(btn)
 
+        update_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        update_card.add_css_class("zmb-card")
+        outer.append(update_card)
+        update_title = Gtk.Label(label="ZorinMacBridge updates", xalign=0)
+        update_title.add_css_class("title-4")
+        update_card.append(update_title)
+        self.update_summary = Gtk.Label(
+            label="Update status will appear after the Mac is paired.", xalign=0, wrap=True
+        )
+        self.update_summary.add_css_class("zmb-muted")
+        update_card.append(self.update_summary)
+
+        update_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        update_card.append(update_row)
+        update_row.append(Gtk.Label(label="Automatic updates", xalign=0))
+        self.update_mode_model = Gtk.StringList.new(["Off", "Notify only", "Install automatically"])
+        self.update_mode_dropdown = Gtk.DropDown(model=self.update_mode_model)
+        self.update_mode_dropdown.set_selected(1)
+        self.update_mode_dropdown.set_tooltip_text(
+            "Off: no background checks. Notify: check every 6 hours. Install automatically: verify and install new official releases every 6 hours."
+        )
+        update_row.append(self.update_mode_dropdown)
+        self.update_mode_btn = Gtk.Button(label="Save mode")
+        self.update_mode_btn.connect("clicked", lambda *_: self._save_update_mode())
+        update_row.append(self.update_mode_btn)
+        self.check_update_btn = Gtk.Button(label="Check update")
+        self.check_update_btn.connect("clicked", lambda *_: self._run_action(
+            "check-update", backend_timeout=30, watchdog_ms=42000,
+            operation_message="Checking the Mac for a ZorinMacBridge update…",
+        ))
+        update_row.append(self.check_update_btn)
+        self.update_now_btn = Gtk.Button(label="Update now")
+        self.update_now_btn.add_css_class("suggested-action")
+        self.update_now_btn.connect("clicked", lambda *_: self._confirm_update_now())
+        update_row.append(self.update_now_btn)
+        self.update_controls = [self.update_mode_dropdown, self.update_mode_btn, self.check_update_btn, self.update_now_btn]
+
         security_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         security_card.add_css_class("zmb-card")
         outer.append(security_card)
@@ -173,6 +222,14 @@ class SystemController:
         return scroller
 
     def _machine_changed(self, *_args) -> None:
+        # A System worker may still be finishing for the previously selected Mac.
+        # Invalidate its token immediately so a late callback can never render
+        # status/action results into the newly selected machine.
+        self._cancel_operation_watchdog()
+        self._operation_serial += 1
+        if self.busy:
+            self._set_busy(False)
+        self.last_status = None
         GLib.idle_add(self.selection_changed)
 
     def selection_changed(self):
@@ -204,14 +261,63 @@ class SystemController:
         for btn in self.action_buttons:
             btn.set_sensitive(enabled and not self.busy)
         self.unpair_btn.set_sensitive(enabled and not self.busy)
+        for widget in getattr(self, "update_controls", []):
+            widget.set_sensitive(enabled and not self.busy)
         self.refresh_btn.set_sensitive(not self.busy)
         self.pair_btn.set_sensitive(not self.busy)
 
     def _set_busy(self, busy: bool, message: str | None = None) -> None:
         self.busy = busy
+        if busy:
+            self.spinner.start()
+        else:
+            self.spinner.stop()
         if message:
             self.summary.set_text(message)
         self._set_actions(self._profile() is not None)
+
+    def _cancel_operation_watchdog(self) -> None:
+        if self._operation_watchdog:
+            try:
+                GLib.source_remove(self._operation_watchdog)
+            except Exception:
+                pass
+            self._operation_watchdog = 0
+
+    def _begin_operation(self, message: str, *, timeout_ms: int, timeout_message: str, show_dialog: bool = True) -> int:
+        """Start a UI operation with an independent GTK watchdog.
+
+        Backend calls also have hard subprocess timeouts. This second watchdog is
+        deliberately independent: even if a worker thread or child process ever
+        misbehaves, the GTK controls are released and a late result is ignored.
+        """
+        self._cancel_operation_watchdog()
+        self._operation_serial += 1
+        token = self._operation_serial
+        self._set_busy(True, message)
+
+        def expired():
+            if token != self._operation_serial:
+                return GLib.SOURCE_REMOVE
+            self._operation_watchdog = 0
+            self._operation_serial += 1  # invalidate any late worker callback
+            self._set_busy(False)
+            self.state_icon.set_from_icon_name("dialog-warning-symbolic")
+            self.summary.set_text(timeout_message)
+            self.window._log("ERROR", "System admin timeout: " + timeout_message)
+            if show_dialog:
+                self.window._dialog("System operation timed out", timeout_message, destructive=True)
+            return GLib.SOURCE_REMOVE
+
+        self._operation_watchdog = GLib.timeout_add(timeout_ms, expired)
+        return token
+
+    def _finish_operation(self, token: int) -> bool:
+        if token != self._operation_serial:
+            return False
+        self._cancel_operation_watchdog()
+        self._set_busy(False)
+        return True
 
     def _clear_grid(self) -> None:
         child = self.grid.get_first_child()
@@ -221,7 +327,6 @@ class SystemController:
             child = nxt
 
     def _render_status(self, data: dict[str, str] | None, error: str | None):
-        self._set_busy(False)
         if error:
             self.last_status = None
             self.state_icon.set_from_icon_name("dialog-warning-symbolic")
@@ -242,6 +347,23 @@ class SystemController:
             right = Gtk.Label(label=_display_value(key, data.get(key, "?")), xalign=0, selectable=True, wrap=True)
             self.grid.attach(left, 0, row, 1, 1)
             self.grid.attach(right, 1, row, 1, 1)
+
+        mode = data.get("auto_update_mode", "notify")
+        self.update_mode_dropdown.set_selected({"off": 0, "notify": 1, "install": 2}.get(mode, 1))
+        current = data.get("update_current", "unknown")
+        latest = data.get("update_latest", "unknown")
+        available = data.get("update_available", "unknown")
+        result = data.get("update_last_result", "never")
+        error_text = data.get("update_last_error", "").strip()
+        if available == "1":
+            update_text = f"Update available: {current} → {latest}. Last check: {result}."
+        elif available == "0":
+            update_text = f"Mac ZMB is up to date ({current or latest}). Last check: {result}."
+        else:
+            update_text = f"Update status: {result}. Use Check update to query GitHub now."
+        if error_text:
+            update_text += " Error: " + error_text
+        self.update_summary.set_text(update_text)
         return False
 
     def refresh(self) -> None:
@@ -251,14 +373,24 @@ class SystemController:
         if not host or not get_profile(sid, host):
             self.selection_changed()
             return
-        self._set_busy(True, "Reading Mac system status…")
+        token = self._begin_operation(
+            "Reading Mac system status…",
+            timeout_ms=18000,
+            timeout_message="The Mac did not answer the System status request within 18 seconds. The GUI has been released; check that the Mac is awake and SSH/Remote Login is reachable.",
+            show_dialog=False,
+        )
 
         def worker():
             try:
                 data = get_status(server_id=sid, host=host)
-                GLib.idle_add(self._render_status, data, None)
+                GLib.idle_add(done, token, data, None)
             except Exception as exc:
-                GLib.idle_add(self._render_status, None, str(exc))
+                GLib.idle_add(done, token, None, str(exc))
+
+        def done(op_token: int, data, error):
+            if not self._finish_operation(op_token):
+                return False
+            return self._render_status(data, error)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -284,22 +416,31 @@ class SystemController:
             return
         self._run_action(action)
 
-    def _run_action(self, action: str) -> None:
+    def _run_action(
+        self, action: str, *, arg: str | None = None, backend_timeout: int = 18,
+        watchdog_ms: int = 26000, operation_message: str | None = None,
+    ) -> None:
         sid, host, _ = self.current()
-        self._set_busy(True, f"Running {action}…")
+        seconds = max(1, watchdog_ms // 1000)
+        token = self._begin_operation(
+            operation_message or f"Running {action}…",
+            timeout_ms=watchdog_ms,
+            timeout_message=f"The Mac did not finish '{action}' within {seconds} seconds. The GUI has been released. You can retry after checking that the Mac is awake and reachable.",
+        )
 
         def worker():
             try:
-                proc = run_action(server_id=sid, host=host, action=action, timeout=30)
+                proc = run_action(server_id=sid, host=host, action=action, arg=arg, timeout=backend_timeout)
                 if proc.returncode != 0:
                     raise AdminError((proc.stderr or proc.stdout or f"{action} exited {proc.returncode}").strip())
                 output = (proc.stdout or "").strip()
-                GLib.idle_add(done, None, output)
+                GLib.idle_add(done, token, None, output)
             except Exception as exc:
-                GLib.idle_add(done, str(exc), "")
+                GLib.idle_add(done, token, str(exc), "")
 
-        def done(error: str | None, output: str):
-            self._set_busy(False)
+        def done(op_token: int, error: str | None, output: str):
+            if not self._finish_operation(op_token):
+                return False
             if error:
                 self.window._dialog("System action failed", error, destructive=True)
                 self.window._log("ERROR", f"System action {action}: {error}")
@@ -309,11 +450,38 @@ class SystemController:
                 self._show_text("ZorinMacBridge system logs", output or "No log output")
             elif action in {"reboot", "shutdown", "sleep"}:
                 self.summary.set_text(f"{action}: command accepted by Mac")
+            elif action == "update-now":
+                self.window._dialog("Mac update", output or "Update command completed.")
+                GLib.timeout_add(1800, lambda: (self.refresh(), False)[1])
+            elif action in {"check-update", "set-auto-update"}:
+                GLib.timeout_add(500, lambda: (self.refresh(), False)[1])
             else:
                 GLib.timeout_add(1000, lambda: (self.refresh(), False)[1])
             return False
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _selected_update_mode(self) -> str:
+        return {0: "off", 1: "notify", 2: "install"}.get(int(self.update_mode_dropdown.get_selected()), "notify")
+
+    def _save_update_mode(self) -> None:
+        mode = self._selected_update_mode()
+        labels = {"off": "Off", "notify": "Notify only", "install": "Install automatically"}
+        self._run_action(
+            "set-auto-update", arg=mode, backend_timeout=18, watchdog_ms=28000,
+            operation_message=f"Setting automatic updates to {labels[mode]}…",
+        )
+
+    def _confirm_update_now(self) -> None:
+        self.window._confirm(
+            "Update Mac ZorinMacBridge",
+            "Download the latest official Apple Silicon release on the Mac, verify SHA-256 and code signature, preserve this Mac's stable privacy identity, install it without a local password prompt, refresh P0 helpers, and restart the desktop service when a GUI session exists?",
+            "Update now",
+            lambda: self._run_action(
+                "update-now", backend_timeout=720, watchdog_ms=780000,
+                operation_message="Mac is downloading, verifying and installing the ZorinMacBridge update…",
+            ),
+        )
 
     def _show_text(self, title: str, text: str) -> None:
         win = Gtk.Window(title=title, transient_for=self.window, default_width=820, default_height=520)
@@ -340,7 +508,7 @@ class SystemController:
         title.add_css_class("title-2")
         box.append(title)
         note = Gtk.Label(
-            label="This is a one-time setup. The macOS account password is used only to install a restricted SSH key and is not saved.",
+            label="This is a one-time setup. Use the SAME password you use to log in/unlock this Mac. This is NOT the ZorinMacBridge session password. It is used only to install a restricted SSH key and is not saved.",
             xalign=0, wrap=True,
         )
         note.add_css_class("zmb-muted")
@@ -357,7 +525,7 @@ class SystemController:
         password_entry.set_visibility(False)
         password_entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
         for row, (label, widget) in enumerate([
-            ("Selected Mac", host_entry), ("SSH port", port_entry), ("macOS user", user_entry), ("macOS password", password_entry)
+            ("Selected Mac", host_entry), ("SSH port", port_entry), ("macOS short username", user_entry), ("macOS account password (login/unlock)", password_entry)
         ]):
             grid.attach(Gtk.Label(label=label, xalign=0), 0, row, 1, 1)
             grid.attach(widget, 1, row, 1, 1)
@@ -381,7 +549,63 @@ class SystemController:
         pair_btn.set_sensitive(False)
         buttons.append(pair_btn)
 
-        state: dict[str, object] = {"scan": None, "busy": False}
+        state: dict[str, object] = {
+            "scan": None, "busy": False, "job_serial": 0, "watchdog": 0, "closed": False,
+        }
+
+        def cancel_job_watchdog() -> None:
+            source = int(state.get("watchdog") or 0)
+            if source:
+                try:
+                    GLib.source_remove(source)
+                except Exception:
+                    pass
+                state["watchdog"] = 0
+
+        def start_job(kind: str, *, timeout_ms: int, timeout_text: str) -> int:
+            cancel_job_watchdog()
+            state["job_serial"] = int(state.get("job_serial") or 0) + 1
+            token = int(state["job_serial"])
+            state["busy"] = True
+            scan_btn.set_sensitive(False)
+            pair_btn.set_sensitive(False)
+
+            def expired():
+                if state.get("closed") or token != int(state.get("job_serial") or 0):
+                    return GLib.SOURCE_REMOVE
+                state["watchdog"] = 0
+                state["job_serial"] = token + 1  # ignore a late worker result
+                state["busy"] = False
+                password_entry.set_text("")
+                scan_btn.set_sensitive(True)
+                if kind == "scan":
+                    state["scan"] = None
+                    verified.set_active(False)
+                    verified.set_sensitive(False)
+                fingerprint.set_text(timeout_text)
+                self.window._log("ERROR", "Pairing timeout: " + timeout_text.replace("\n", " "))
+                set_pair_sensitive()
+                return GLib.SOURCE_REMOVE
+
+            state["watchdog"] = GLib.timeout_add(timeout_ms, expired)
+            return token
+
+        def finish_job(token: int) -> bool:
+            if state.get("closed") or token != int(state.get("job_serial") or 0):
+                return False
+            cancel_job_watchdog()
+            state["busy"] = False
+            scan_btn.set_sensitive(True)
+            return True
+
+        def close_requested(*_args):
+            state["closed"] = True
+            state["job_serial"] = int(state.get("job_serial") or 0) + 1
+            cancel_job_watchdog()
+            password_entry.set_text("")
+            return False
+
+        dialog.connect("close-request", close_requested)
 
         def invalidate_scan(*_args):
             if state.get("scan") is not None:
@@ -405,23 +629,31 @@ class SystemController:
             except ValueError:
                 self.window._dialog("Pair Mac", "SSH port must be a number.")
                 return
-            state["busy"] = True
-            scan_btn.set_sensitive(False)
-            pair_btn.set_sensitive(False)
+            token = start_job(
+                "scan",
+                timeout_ms=12000,
+                timeout_text=(
+                    "No SSH fingerprint response within 12 seconds.\n"
+                    "The pairing window is still usable; check that the Mac is awake and Remote Login is enabled, then retry."
+                ),
+            )
             fingerprint.set_text("Reading SSH host key from the Mac…")
+            # GTK widgets are not thread-safe. Capture every widget value on the
+            # GTK thread before starting the worker.
+            scan_host = host_entry.get_text().strip()
 
             def worker():
                 try:
-                    result = scan_host_keys(host_entry.get_text().strip(), ssh_port)
-                    GLib.idle_add(scan_done, result, None)
+                    result = scan_host_keys(scan_host, ssh_port)
+                    GLib.idle_add(scan_done, token, result, None)
                 except Exception as exc:
-                    GLib.idle_add(scan_done, None, str(exc))
+                    GLib.idle_add(scan_done, token, None, str(exc))
 
             threading.Thread(target=worker, daemon=True).start()
 
-        def scan_done(result, error):
-            state["busy"] = False
-            scan_btn.set_sensitive(True)
+        def scan_done(job_token: int, result, error):
+            if not finish_job(job_token):
+                return False
             if error:
                 state["scan"] = None
                 verified.set_sensitive(False)
@@ -453,11 +685,16 @@ class SystemController:
                 self.window._dialog("Pair Mac", "SSH and desktop ports must be numbers.")
                 return
             if not user or not password:
-                self.window._dialog("Pair Mac", "Enter the macOS short username and account password.")
+                self.window._dialog("Pair Mac", "Enter the macOS short username and the account password you use to log in/unlock this Mac. Do not enter the ZorinMacBridge session password here.")
                 return
-            state["busy"] = True
-            pair_btn.set_sensitive(False)
-            scan_btn.set_sensitive(False)
+            token = start_job(
+                "pair",
+                timeout_ms=34000,
+                timeout_text=(
+                    "Pairing did not finish within 34 seconds.\n"
+                    "The UI has been released and the password field cleared. Check Remote Login/P0 on the Mac and retry."
+                ),
+            )
             fingerprint.set_text("Installing restricted device key and testing P0 service…")
             pair_host = host_entry.get_text().strip()
 
@@ -473,17 +710,17 @@ class SystemController:
                         desktop_port=desktop_port,
                         scanned_host_keys=[result["preferred"]["line"]],
                     )
-                    GLib.idle_add(pair_done, profile, None)
+                    GLib.idle_add(pair_done, token, profile, None)
                 except Exception as exc:
-                    GLib.idle_add(pair_done, None, str(exc))
+                    GLib.idle_add(pair_done, token, None, str(exc))
 
             threading.Thread(target=worker, daemon=True).start()
 
-        def pair_done(profile, error):
-            state["busy"] = False
+        def pair_done(job_token: int, profile, error):
+            if not finish_job(job_token):
+                return False
             password_entry.set_text("")
             if error:
-                scan_btn.set_sensitive(True)
                 fingerprint.set_text("Pairing failed:\n" + error)
                 set_pair_sensitive()
                 return False
@@ -508,17 +745,22 @@ class SystemController:
 
     def _unpair(self) -> None:
         sid, host, _ = self.current()
-        self._set_busy(True, "Revoking administration key…")
+        token = self._begin_operation(
+            "Revoking administration key…",
+            timeout_ms=23000,
+            timeout_message="The Mac did not answer the revoke request within 23 seconds. The GUI has been released; the local pairing profile was not silently removed.",
+        )
 
         def worker():
             try:
                 revoke_current_device(server_id=sid, host=host)
-                GLib.idle_add(done, None)
+                GLib.idle_add(done, token, None)
             except Exception as exc:
-                GLib.idle_add(done, str(exc))
+                GLib.idle_add(done, token, str(exc))
 
-        def done(error):
-            self._set_busy(False)
+        def done(op_token: int, error):
+            if not self._finish_operation(op_token):
+                return False
             if error:
                 self.window._dialog("Revoke failed", error, destructive=True)
             else:

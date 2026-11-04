@@ -5,6 +5,10 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "This library must be built on macOS." >&2
   exit 1
 fi
+if [[ "$(uname -m)" != "arm64" ]]; then
+  echo "ZorinMacBridge macOS builds support Apple Silicon (arm64) only." >&2
+  exit 1
+fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$ROOT/build"

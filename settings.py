@@ -82,11 +82,14 @@ class PasswordVerifier:
     def from_settings(cls, data: dict) -> 'PasswordVerifier | None':
         try:
             auth = data['password_verifier']
-            return cls(
-                salt=base64.b64decode(auth['salt'], validate=True),
-                digest=base64.b64decode(auth['digest'], validate=True),
-                iterations=int(auth['iterations']),
-            )
+            salt = base64.b64decode(auth['salt'], validate=True)
+            digest = base64.b64decode(auth['digest'], validate=True)
+            iterations = int(auth['iterations'])
+            # A corrupted/local-edited settings file must not turn authentication
+            # into an unbounded CPU stall. Keep a generous compatibility range.
+            if len(salt) != 16 or len(digest) != 32 or not (50_000 <= iterations <= 2_000_000):
+                return None
+            return cls(salt=salt, digest=digest, iterations=iterations)
         except Exception:
             return None
 

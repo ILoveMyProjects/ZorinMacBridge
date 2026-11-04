@@ -30,7 +30,7 @@ from settings import (PasswordVerifier, load_server_password_verifier, load_serv
 
 def private_ipv4_addresses() -> list[str]:
     try:
-        text = subprocess.check_output(['/sbin/ifconfig'], text=True, stderr=subprocess.DEVNULL)
+        text = subprocess.check_output(['/sbin/ifconfig'], text=True, stderr=subprocess.DEVNULL, timeout=3)
     except Exception:
         return []
     found = []
@@ -68,6 +68,8 @@ class ServerGUI:
         self.input_permission_var = tk.StringVar(value='Mouse/keyboard control: checking…')
         self.signing_var = tk.StringVar(value='Code signing: checking…')
         self.admin_status_var = tk.StringVar(value='Unattended access: checking…')
+        self._admin_status_serial = 0
+        self._signing_status_serial = 0
         self.stop_event: threading.Event | None = None
         self.thread: threading.Thread | None = None
         self.advertiser: LanAdvertiser | None = None
@@ -256,11 +258,11 @@ class ServerGUI:
         ttk.Button(share_actions, text='Open', command=self.open_shared_folder).pack(side='left')
         ttk.Button(share_actions, text='Choose…', command=self.choose_share).pack(side='left', padx=(6, 0))
 
-        ttk.Label(outer, text='Session password').grid(row=5, column=0, sticky='w', pady=4)
+        ttk.Label(outer, text='ZorinMacBridge session password').grid(row=5, column=0, sticky='w', pady=4)
         self.password_entry = ttk.Entry(outer, textvariable=self.password_var, show='•')
         self.password_entry.grid(row=5, column=1, sticky='ew', pady=4)
         ttk.Checkbutton(outer, text='Show', variable=self.show_password_var, command=self.toggle_password).grid(row=5, column=2, padx=(8, 0), pady=4)
-        note = 'Saved verifier available — leave password blank to reuse it.' if self.saved_password else 'Enter once; only a salted verifier is stored on this Mac.'
+        note = ('Saved verifier available — leave blank to reuse it. This is separate from your macOS login password.' if self.saved_password else 'Create a separate ZMB password; only a salted verifier is stored. Do not use your macOS login password.')
         ttk.Label(outer, text=note).grid(row=6, column=1, columnspan=2, sticky='w', pady=(0, 2))
         ttk.Checkbutton(outer, text='Remember password verifier on this Mac', variable=self.remember_password_var).grid(row=7, column=1, columnspan=2, sticky='w', pady=(0, 6))
 
@@ -333,20 +335,43 @@ class ServerGUI:
 
 
     def refresh_admin_status(self) -> None:
-        try:
-            state = admin_component_state()
+        # launchctl/systemsetup/nc are external commands with timeouts. Never run
+        # them on Tk's main thread or the Mac window can look frozen.
+        self._admin_status_serial += 1
+        token = self._admin_status_serial
+        self.admin_status_var.set('Unattended access: checking…')
+
+        def worker() -> None:
+            try:
+                state = admin_component_state()
+                error = None
+            except Exception as exc:
+                state = None
+                error = str(exc)
+            try:
+                self.root.after(0, lambda: done(token, state, error))
+            except Exception:
+                pass
+
+        def done(job_token: int, state, error: str | None) -> None:
+            if job_token != self._admin_status_serial:
+                return
+            if error or state is None:
+                self.admin_status_var.set(f'Unattended access status unavailable: {error or "unknown error"}')
+                return
             installed = bool(state.get('installed'))
             loaded = bool(state.get('daemon_loaded'))
+            updater_loaded = bool(state.get('updater_loaded'))
             remote = str(state.get('remote_login') or 'unknown')
-            if installed and loaded:
-                text = f'P0 system service: ready · Remote Login: {remote}'
+            if installed and loaded and updater_loaded:
+                text = f'P0 system service: ready · Update service: ready · Remote Login: {remote}'
             elif installed:
-                text = f'P0 files installed but system service is not loaded · Remote Login: {remote}'
+                text = f'P0 files installed but a system service is not loaded · Remote Login: {remote}'
             else:
                 text = f'P0 unattended access is not installed · Remote Login: {remote}'
             self.admin_status_var.set(text)
-        except Exception as exc:
-            self.admin_status_var.set(f'Unattended access status unavailable: {exc}')
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def enable_unattended_access(self) -> None:
         if not messagebox.askyesno(
@@ -410,11 +435,26 @@ class ServerGUI:
         threading.Thread(target=worker, daemon=True).start()
 
     def copy_ssh_fingerprint(self, show_dialog: bool = False) -> None:
-        try:
-            fingerprints = ssh_host_fingerprints()
-            if not fingerprints:
-                raise RuntimeError('No macOS SSH host public keys were found. Enable Remote Login first.')
-            text = '\n'.join(fingerprints)
+        def worker() -> None:
+            try:
+                fingerprints = ssh_host_fingerprints()
+                if not fingerprints:
+                    raise RuntimeError('No macOS SSH host public keys were found. Enable Remote Login first.')
+                text = '\n'.join(fingerprints)
+                error = None
+            except Exception as exc:
+                text = ''
+                error = str(exc)
+            try:
+                self.root.after(0, lambda: done(text, error))
+            except Exception:
+                pass
+
+        def done(text: str, error: str | None) -> None:
+            if error:
+                self._log('Could not read SSH host fingerprint: ' + error)
+                messagebox.showerror('SSH fingerprint', error)
+                return
             self.root.clipboard_clear()
             self.root.clipboard_append(text)
             self._log('Copied macOS SSH host fingerprint(s) for P0 pairing.')
@@ -423,9 +463,8 @@ class ServerGUI:
                     'Unattended access ready',
                     'P0 is installed. Compare this SSH fingerprint when pairing from the Zorin System tab.\n\n' + text,
                 )
-        except Exception as exc:
-            self._log('Could not read SSH host fingerprint: ' + str(exc))
-            messagebox.showerror('SSH fingerprint', str(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def open_shared_folder(self) -> None:
         """Open the configured transfer folder in Finder."""
@@ -528,8 +567,24 @@ class ServerGUI:
         input_text = 'Granted' if input_access is True else ('Not granted' if input_access is False else 'Unknown')
         self.screen_permission_var.set(f'Screen Recording: {screen_text}')
         self.input_permission_var.set(f'Mouse/keyboard control: {input_text}')
-        signing = self._code_signing_mode()
-        self.signing_var.set(f'Code signing: {signing}')
+
+        # codesign can take seconds on a PyInstaller bundle. Keep it off Tk.
+        self._signing_status_serial += 1
+        token = self._signing_status_serial
+        self.signing_var.set('Code signing: checking…')
+
+        def worker() -> None:
+            signing = self._code_signing_mode()
+            try:
+                self.root.after(0, lambda: done(token, signing))
+            except Exception:
+                pass
+
+        def done(job_token: int, signing: str) -> None:
+            if job_token == self._signing_status_serial:
+                self.signing_var.set(f'Code signing: {signing}')
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def request_screen_recording_access(self) -> None:
         if screen_capture_permission_status() is True:
@@ -580,9 +635,18 @@ class ServerGUI:
         def write():
             self.log.configure(state='normal')
             self.log.insert('end', msg.rstrip() + '\n')
+            try:
+                lines = int(self.log.index('end-1c').split('.')[0])
+                if lines > 5000:
+                    self.log.delete('1.0', '1001.0')
+            except Exception:
+                pass
             self.log.see('end')
             self.log.configure(state='disabled')
-        self.root.after(0, write)
+        try:
+            self.root.after(0, write)
+        except Exception:
+            pass
 
     def start(self) -> None:
         if self.thread is not None and self.thread.is_alive():
@@ -694,7 +758,57 @@ class ServerGUI:
         self.root.destroy()
 
 
+def _p0_update_check_cli() -> int:
+    from updates import check_for_updates
+    info = check_for_updates(timeout=12.0)
+    print(f'current={info.current}')
+    print(f'latest={info.latest}')
+    print(f'available={1 if info.available else 0}')
+    print(f'page_url={info.page_url}')
+    return 0
+
+
+def _p0_update_stage_cli(stage_root: Path) -> int:
+    from updates import prepare_macos_update_for_root
+    def progress(message: str) -> None:
+        print('progress=' + str(message).replace('\n', ' '), flush=True)
+    result = prepare_macos_update_for_root(stage_root, progress=progress, timeout=45.0)
+    print(f'current={result.current}')
+    print(f'latest={result.latest}')
+    print(f'available={1 if result.available else 0}')
+    if result.staged_app:
+        print(f'staged_app={result.staged_app}')
+    return 0
+
+
 def main() -> None:
+    if '--p0-update-check' in sys.argv:
+        try:
+            raise SystemExit(_p0_update_check_cli())
+        except SystemExit:
+            raise
+        except Exception as exc:
+            print(f'P0 UPDATE CHECK FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)
+            raise SystemExit(1)
+    if '--p0-update-stage' in sys.argv:
+        try:
+            idx = sys.argv.index('--p0-update-stage')
+            target = Path(sys.argv[idx + 1])
+            raise SystemExit(_p0_update_stage_cli(target))
+        except SystemExit:
+            raise
+        except Exception as exc:
+            print(f'P0 UPDATE STAGE FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)
+            raise SystemExit(1)
+    if '--terminal-setup' in sys.argv:
+        try:
+            from mac_terminal_setup import run_terminal_setup
+            raise SystemExit(run_terminal_setup())
+        except SystemExit:
+            raise
+        except Exception as exc:
+            print(f'TERMINAL SETUP FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)
+            raise SystemExit(1)
     if '--prepare-local-signing' in sys.argv:
         try:
             from mac_local_signing import ensure_local_identity

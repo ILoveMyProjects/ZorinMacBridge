@@ -18,7 +18,7 @@ The same marker is reused for future updates on that Mac, so the explicit DR rem
 
 ## Release transport
 
-GitHub Actions uses ad-hoc signing only for transport integrity after the bundle is modified during packaging. The release workflow runs a fast macOS preflight which signs a small Mach-O and a minimal app with explicit DRs, verifies them with `codesign`, and rejects any fallback to a `cdhash`-based DR before the long arm64/x86_64 builds start.
+GitHub Actions uses ad-hoc signing only for transport integrity after the bundle is modified during packaging. The release workflow runs a fast macOS preflight which signs a small Mach-O and a minimal app with explicit DRs, verifies them with `codesign`, and rejects any fallback to a `cdhash`-based DR before the Apple Silicon macOS build starts.
 
 The installer/updater verifies the downloaded app and checksum first. It then applies the Mac-local DR to a staged copy before replacing `/Applications/ZorinMacBridge Server.app`.
 

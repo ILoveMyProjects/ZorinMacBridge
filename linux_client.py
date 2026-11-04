@@ -12,6 +12,7 @@ import socket
 import ssl
 import struct
 import threading
+import time
 import traceback
 import subprocess
 import sys
@@ -126,8 +127,14 @@ class ClientApp:
         self.remember_credentials_var = tk.BooleanVar(value=True)
         self.quality_var = tk.StringVar(value='Balanced')
         self.remember_credentials_active = True
+        self._connect_snapshot = None
+        self._credential_serial = 0
+        self._discovery_serial = 0
+        self._discovery_busy = False
 
         self.outgoing: queue.Queue[bytes] = queue.Queue(maxsize=1000)
+        self._mouse_move_lock = threading.Lock()
+        self._pending_mouse_move: bytes | None = None
         self.ui_queue: queue.Queue[tuple] = queue.Queue()
         self.stop_event = threading.Event()
         self.net_thread: threading.Thread | None = None
@@ -142,6 +149,7 @@ class ClientApp:
         self.remote_path = ''
         self.file_entries: dict[str, dict] = {}
         self.tray = None
+        self._clear_session_queues()
         self.disconnect_requested = False
         self.fullscreen_active = False
         self.mouse_buttons_down: set[int] = set()
@@ -325,6 +333,14 @@ class ClientApp:
     def _append_log(self, line: str) -> None:
         self.log_text.configure(state='normal')
         self.log_text.insert('end', line.rstrip() + '\n')
+        # Bound the legacy Tk log as well; otherwise a long reconnect/error
+        # session can make Text progressively slower and look frozen.
+        try:
+            lines = int(self.log_text.index('end-1c').split('.')[0])
+            if lines > 5000:
+                self.log_text.delete('1.0', '1001.0')
+        except Exception:
+            pass
         self.log_text.see('end')
         self.log_text.configure(state='disabled')
 
@@ -371,24 +387,51 @@ class ClientApp:
         saved_fp = str(record.get('fingerprint', '')).strip()
         if saved_fp:
             self.fp_var.set(saved_fp)
-        saved_password = get_saved_password(self.selected_server_id)
-        if saved_password:
-            self.password_var.set(saved_password)
+        # Secret Service/keyring can block on D-Bus. Never query it from Tk.
+        self._credential_serial += 1
+        credential_token = self._credential_serial
+        selected_id = self.selected_server_id
+        self.password_var.set('')
+
+        def credential_worker() -> None:
+            try:
+                saved_password = get_saved_password(selected_id)
+            except Exception:
+                saved_password = None
+            self.ui_queue.put(('credential', credential_token, selected_id, saved_password))
+
+        threading.Thread(target=credential_worker, daemon=True).start()
         trust = 'Saved identity loaded.' if saved_fp else 'Verify the TLS fingerprint once.'
         self.status_var.set(f'Selected {server.name} at {server.ip}:{server.port}. {trust}')
         self._log('INFO', f'Discovery selection: {server.name} at {server.ip}:{server.port}; server_id={self.selected_server_id}')
 
     def discover_macs(self) -> None:
+        if self._discovery_busy:
+            self.status_var.set('LAN discovery is already running…')
+            return
+        self._discovery_busy = True
+        self._discovery_serial += 1
+        token = self._discovery_serial
         self.status_var.set('Searching the local network for running Macs…')
         self._log('INFO', 'Starting LAN discovery scan.')
 
+        def watchdog() -> None:
+            if token != self._discovery_serial or not self._discovery_busy:
+                return
+            self._discovery_serial += 1
+            self._discovery_busy = False
+            self.status_var.set('LAN discovery timed out; retry when the Mac is awake.')
+            self._log('WARNING', 'LAN discovery watchdog expired after 7 seconds.')
+
+        self.root.after(7000, watchdog)
+
         def worker() -> None:
             try:
-                servers = discover_servers(2.5)
-                self.ui_queue.put(('discovery', servers))
+                servers = discover_servers(3.8)
+                self.ui_queue.put(('discovery', token, servers))
             except Exception as exc:
                 self._log('ERROR', f'LAN discovery failed: {type(exc).__name__}: {exc}')
-                self.ui_queue.put(('discovery_error', str(exc)))
+                self.ui_queue.put(('discovery_error', token, str(exc)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -464,7 +507,12 @@ class ClientApp:
         return ip, port, password, expected_fp
 
     def _secure_connect(self, role: str, auth_extra: dict | None = None) -> ssl.SSLSocket:
-        ip, port, password, expected_fp = self._connection_params()
+        # Connection workers must never read Tk/GTK widget state. Capture one
+        # immutable snapshot on the UI thread before starting a session.
+        params = self._connect_snapshot
+        if params is None:
+            raise RuntimeError('Connection parameters were not captured on the UI thread')
+        ip, port, password, expected_fp = params
         self._log('INFO', f'Opening {role} connection to {ip}:{port}')
         parsed_ip = ipaddress.ip_address(ip.split('%', 1)[0])
         family = socket.AF_INET6 if parsed_ip.version == 6 else socket.AF_INET
@@ -516,6 +564,21 @@ class ClientApp:
         self._log('INFO', f'Authentication successful for role={role!r}.')
         return sock
 
+    @staticmethod
+    def _drain_queue(q: queue.Queue) -> None:
+        while True:
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                break
+
+    def _clear_session_queues(self) -> None:
+        # Input/video queued for an old session must never leak into a reconnect.
+        self._drain_queue(self.outgoing)
+        self._drain_queue(self.video_frames)
+        with self._mouse_move_lock:
+            self._pending_mouse_move = None
+
     def connect(self) -> None:
         if self.connected or (self.net_thread is not None and self.net_thread.is_alive()):
             return
@@ -525,6 +588,7 @@ class ClientApp:
             self._log('ERROR', f'Connection parameters rejected: {exc}')
             messagebox.showerror('Connection', str(exc))
             return
+        self._connect_snapshot = (ip, port, _password, expected_fp)
         self.disconnect_requested = False
         self.fullscreen_active = False
         self.mouse_buttons_down: set[int] = set()
@@ -544,6 +608,7 @@ class ClientApp:
         self._release_remote_input_state()
         self.disconnect_requested = True
         self.stop_event.set()
+        self._clear_session_queues()
         self.connected = False
         self.status_var.set('Disconnected')
         self._log('INFO', 'Disconnect requested by user.')
@@ -555,7 +620,9 @@ class ClientApp:
             sock = self._secure_connect('desktop')
             if self.remember_credentials_active:
                 try:
-                    ip, port, password, expected_fp = self._connection_params()
+                    if self._connect_snapshot is None:
+                        raise RuntimeError('Missing connection snapshot')
+                    ip, port, password, expected_fp = self._connect_snapshot
                     save_client_record(self.selected_server_id, name=self.selected_server_name or ip,
                                        ip=ip, port=port, fingerprint=format_fp(expected_fp))
                     if password and not save_password_secret(self.selected_server_id, password):
@@ -579,6 +646,11 @@ class ClientApp:
                         break
                     sock.sendall(packet)
                     sent += 1
+                with self._mouse_move_lock:
+                    mouse_move = self._pending_mouse_move
+                    self._pending_mouse_move = None
+                if mouse_move is not None:
+                    sock.sendall(mouse_move)
                 try:
                     data = sock.recv(65536)
                     if not data:
@@ -702,9 +774,12 @@ class ClientApp:
             self._log('INFO', 'H.264 video connection closed.')
 
     def _process_ui_queue(self) -> None:
+        started = time.monotonic()
+        processed = 0
         try:
-            while True:
+            while processed < 120 and (time.monotonic() - started) < 0.008:
                 item = self.ui_queue.get_nowait()
+                processed += 1
                 if item[0] == 'log':
                     self._append_log(item[1])
                 elif item[0] == 'connected':
@@ -729,8 +804,15 @@ class ClientApp:
                     self.status_var.set(item[1])
                 elif item[0] == 'clipboard':
                     self._set_local_clipboard(item[1])
+                elif item[0] == 'credential':
+                    _, token, server_id, password = item
+                    if token == self._credential_serial and server_id == self.selected_server_id and password:
+                        self.password_var.set(password)
                 elif item[0] == 'discovery':
-                    servers = item[1]
+                    _, token, servers = item
+                    if token != self._discovery_serial:
+                        continue
+                    self._discovery_busy = False
                     self.discovered_by_label = {server.label: server for server in servers}
                     values = list(self.discovered_by_label)
                     self.machine_box.configure(values=values)
@@ -744,8 +826,12 @@ class ClientApp:
                         self.status_var.set('No running ZorinMacBridge server found on the LAN.')
                         self._log('INFO', 'LAN discovery found no running servers.')
                 elif item[0] == 'discovery_error':
-                    self.status_var.set(f'LAN discovery error: {item[1]}')
-                    self._log('ERROR', f'LAN discovery error: {item[1]}')
+                    _, token, error = item
+                    if token != self._discovery_serial:
+                        continue
+                    self._discovery_busy = False
+                    self.status_var.set(f'LAN discovery error: {error}')
+                    self._log('ERROR', f'LAN discovery error: {error}')
                 elif item[0] == 'update':
                     info = item[1]
                     self._log('INFO', f'Update check completed: installed={info.current}, latest={info.latest}, available={info.available}')
@@ -894,10 +980,23 @@ class ClientApp:
     def _enqueue(self, packet: bytes) -> None:
         if not self.connected:
             return
+        # Mouse motion is high-rate and supersedes older motion. Coalesce it to
+        # one latest packet so it can never crowd KEY-UP / button-up packets out
+        # of the bounded critical-input queue.
+        if packet and packet[0] == MOUSE_MOVE:
+            with self._mouse_move_lock:
+                self._pending_mouse_move = packet
+            return
         try:
             self.outgoing.put_nowait(packet)
         except queue.Full:
-            pass
+            # Extremely unlikely after mouse-move coalescing. Prefer the newest
+            # critical state transition over one stale queued event.
+            try:
+                self.outgoing.get_nowait()
+                self.outgoing.put_nowait(packet)
+            except (queue.Empty, queue.Full):
+                pass
 
     def _mouse_move(self, event) -> None:
         if not self.capture_input_var.get():
@@ -1111,6 +1210,7 @@ class ClientApp:
         self.ui_queue.put(('info', f'Uploading {local.name} ({human_size(size)})…'))
         sock.sendall(pack_json(UPLOAD_BEGIN, {'path': remote, 'size': size}))
         sent = 0
+        last_pct = -1
         with local.open('rb') as f:
             while True:
                 block = f.read(CHUNK)
@@ -1119,7 +1219,10 @@ class ClientApp:
                 sock.sendall(pack_packet(UPLOAD_CHUNK, block))
                 sent += len(block)
                 if size:
-                    self.ui_queue.put(('info', f'Uploading {local.name}: {sent * 100 // size}%'))
+                    pct = min(100, sent * 100 // size)
+                    if pct != last_pct:
+                        last_pct = pct
+                        self.ui_queue.put(('info', f'Uploading {local.name}: {pct}%'))
         sock.sendall(pack_packet(UPLOAD_END))
         self._expect(sock, reader, UPLOAD_END)
 
@@ -1252,6 +1355,7 @@ class ClientApp:
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_name(dest.name + '.part')
         received = 0
+        last_pct = -1
         try:
             with tmp.open('wb') as f:
                 while True:
@@ -1260,7 +1364,10 @@ class ClientApp:
                         f.write(payload)
                         received += len(payload)
                         if size:
-                            self.ui_queue.put(('info', f'Download {dest.name}: {received * 100 // size}%'))
+                            pct = min(100, received * 100 // size)
+                            if pct != last_pct:
+                                last_pct = pct
+                                self.ui_queue.put(('info', f'Download {dest.name}: {pct}%'))
                     elif kind == DOWNLOAD_END:
                         break
                     elif kind == ERROR:

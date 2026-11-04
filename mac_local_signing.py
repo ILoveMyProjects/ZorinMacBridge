@@ -86,6 +86,14 @@ def ensure_local_identity() -> LocalIdentity:
     updates on this Mac.
     """
     _require_macos_tools()
+
+    # The root P0 updater supplies the identity token from its root-owned config
+    # so unattended staging never needs a user-writable signing directory.
+    override = os.environ.get('ZMB_LOCAL_IDENTITY_TOKEN', '').strip().lower()
+    if override:
+        if len(override) != 64 or any(ch not in '0123456789abcdef' for ch in override):
+            raise LocalSigningError('ZMB_LOCAL_IDENTITY_TOKEN is malformed.')
+        return LocalIdentity(token=override)
     SIGNING_DIR.mkdir(parents=True, exist_ok=True)
     try:
         SIGNING_DIR.chmod(0o700)

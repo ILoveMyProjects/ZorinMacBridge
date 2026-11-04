@@ -45,8 +45,9 @@ def main() -> None:
     ):
         assert forbidden not in transport
     assert 'scripts/sign-macos-transport.sh --self-test' in workflow
-    assert 'macos-signing-preflight:' in workflow
-    assert 'needs: [macos-signing-preflight]' in workflow
+    assert 'Verify macOS transport signing' in workflow
+    assert 'macos-signing-preflight:' not in workflow
+    assert 'needs: [release-source-check]' in workflow
 
     # CI transport and the installed copy use explicit DRs rather than the
     # build-bound default ad-hoc cdhash requirement.

@@ -13,6 +13,9 @@ HEARTBEAT_FILE="$HEARTBEAT_DIR/heartbeat"
 PAUSE_FILE="$HEARTBEAT_DIR/autoheal.paused"
 DAEMON_LOG="/var/log/zorinmacbridge-admin.log"
 DAEMON_ERR="/var/log/zorinmacbridge-admin.err"
+UPDATE_STATUS_FILE="$ADMIN_DIR/update-status"
+UPDATE_LOCK_DIR="$HEARTBEAT_DIR/update.lock"
+APP_BIN="$APP_PATH/Contents/MacOS/ZorinMacBridge Server"
 
 fail() { printf 'error=%s\n' "$1" >&2; exit "${2:-1}"; }
 require_root() { [ "$(/usr/bin/id -u)" -eq 0 ] || fail "zmb-admin must run as root" 77; }
@@ -30,6 +33,72 @@ config_value() {
   line="$(/usr/bin/awk -F= -v k="$key" '$1==k {sub(/^[^=]*=/, ""); print; exit}' "$ADMIN_CONFIG" 2>/dev/null || true)"
   [ -n "$line" ] && printf '%s\n' "$line" || printf '%s\n' "$default"
 }
+
+set_config_value() {
+  require_root
+  local key="$1" value="$2" tmp
+  /bin/mkdir -p "$ADMIN_DIR"
+  tmp="${ADMIN_CONFIG}.tmp.$$"
+  if [ -f "$ADMIN_CONFIG" ]; then
+    /usr/bin/awk -F= -v k="$key" '$1!=k {print}' "$ADMIN_CONFIG" > "$tmp"
+  else
+    : > "$tmp"
+  fi
+  printf '%s=%s\n' "$key" "$value" >> "$tmp"
+  /usr/sbin/chown root:wheel "$tmp"
+  /bin/chmod 600 "$tmp"
+  /bin/mv "$tmp" "$ADMIN_CONFIG"
+}
+
+status_file_value() {
+  local key="$1" default="${2:-}" line
+  [ -f "$UPDATE_STATUS_FILE" ] || { printf '%s\n' "$default"; return; }
+  line="$(/usr/bin/awk -F= -v k="$key" '$1==k {sub(/^[^=]*=/, ""); print; exit}' "$UPDATE_STATUS_FILE" 2>/dev/null || true)"
+  [ -n "$line" ] && printf '%s\n' "$line" || printf '%s\n' "$default"
+}
+
+sanitize_value() {
+  printf '%s' "$1" | /usr/bin/tr '\r\n' '  ' | /usr/bin/cut -c1-1000
+}
+
+write_update_status() {
+  require_root
+  local current="$1" latest="$2" available="$3" result="$4" error="${5:-}" tmp now
+  /bin/mkdir -p "$ADMIN_DIR"
+  now="$(/bin/date +%s)"
+  tmp="${UPDATE_STATUS_FILE}.tmp.$$"
+  {
+    printf 'checked_at=%s\n' "$now"
+    printf 'current=%s\n' "$(sanitize_value "$current")"
+    printf 'latest=%s\n' "$(sanitize_value "$latest")"
+    printf 'available=%s\n' "$(sanitize_value "$available")"
+    printf 'result=%s\n' "$(sanitize_value "$result")"
+    printf 'error=%s\n' "$(sanitize_value "$error")"
+  } > "$tmp"
+  /usr/sbin/chown root:wheel "$tmp"
+  /bin/chmod 644 "$tmp"
+  /bin/mv "$tmp" "$UPDATE_STATUS_FILE"
+}
+
+acquire_update_lock() {
+  local pid
+  /bin/mkdir -p "$HEARTBEAT_DIR"
+  if /bin/mkdir "$UPDATE_LOCK_DIR" 2>/dev/null; then
+    printf '%s\n' "$$" > "$UPDATE_LOCK_DIR/pid"
+    return 0
+  fi
+  pid="$(/bin/cat "$UPDATE_LOCK_DIR/pid" 2>/dev/null || true)"
+  if ! printf '%s' "$pid" | /usr/bin/grep -Eq '^[0-9]+$' || ! /bin/kill -0 "$pid" 2>/dev/null; then
+    /bin/rm -rf "$UPDATE_LOCK_DIR"
+    if /bin/mkdir "$UPDATE_LOCK_DIR" 2>/dev/null; then
+      printf '%s\n' "$$" > "$UPDATE_LOCK_DIR/pid"
+      return 0
+    fi
+  fi
+  fail "another ZorinMacBridge update operation is already running" 75
+}
+
+release_update_lock() { /bin/rm -rf "$UPDATE_LOCK_DIR" 2>/dev/null || true; }
 
 target_user() {
   local u
@@ -58,9 +127,13 @@ user_session_available() {
 }
 
 settings_value() {
-  local file="$1" key="$2" default="$3" value
-  [ -f "$file" ] || { printf '%s\n' "$default"; return; }
-  value="$(/usr/bin/sed -nE "s/.*\"${key}\"[[:space:]]*:[[:space:]]*(\"[^\"]*\"|[0-9]+|true|false).*/\1/p" "$file" | /usr/bin/head -n 1)"
+  local file="$1" key="$2" default="$3" value u
+  u="$(target_user || true)"
+  [ -n "$u" ] || { printf '%s\n' "$default"; return; }
+  # Never read a user-controlled path as root. A symlink in the user's config
+  # directory must not become a root file-read primitive through `status`.
+  /usr/bin/sudo -u "$u" /usr/bin/test -f "$file" 2>/dev/null || { printf '%s\n' "$default"; return; }
+  value="$(/usr/bin/sudo -u "$u" /usr/bin/sed -nE "s/.*\"${key}\"[[:space:]]*:[[:space:]]*(\"[^\"]*\"|[0-9]+|true|false).*/\1/p" "$file" 2>/dev/null | /usr/bin/head -n 1)"
   value="${value#\"}"; value="${value%\"}"
   [ -n "$value" ] && printf '%s\n' "$value" || printf '%s\n' "$default"
 }
@@ -125,14 +198,15 @@ paired_devices_count() {
   [ -n "$u" ] || { printf '%s\n' 0; return; }
   home="$(user_home "$u" || true)"
   f="$home/.ssh/authorized_keys"
-  [ -f "$f" ] || { printf '%s\n' 0; return; }
-  /usr/bin/grep -c 'ZorinMacBridge-Admin:' "$f" 2>/dev/null || true
+  /usr/bin/sudo -u "$u" /usr/bin/test -f "$f" 2>/dev/null || { printf '%s\n' 0; return; }
+  /usr/bin/sudo -u "$u" /usr/bin/grep -c 'ZorinMacBridge-Admin:' "$f" 2>/dev/null || true
 }
 
 status_cmd() {
   require_root
-  local host osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg
+  local host server_id osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg auto_update_mode update_current update_latest update_available update_checked update_result update_error
   host="$(/bin/hostname 2>/dev/null || echo unknown)"
+  server_id="$(config_value SERVER_ID unknown)"
   osver="$(/usr/bin/sw_vers -productVersion 2>/dev/null || echo unknown)"
   build="$(/usr/bin/sw_vers -buildVersion 2>/dev/null || echo unknown)"
   major="${osver%%.*}"
@@ -181,8 +255,15 @@ status_cmd() {
   paired="$(paired_devices_count)"
   autoheal_enabled="$(config_value AUTOHEAL 1)"
   autoheal_paused=0; [ -f "$PAUSE_FILE" ] && autoheal_paused=1
+  auto_update_mode="$(config_value AUTO_UPDATE notify)"
+  update_current="$(status_file_value current unknown)"
+  update_latest="$(status_file_value latest unknown)"
+  update_available="$(status_file_value available unknown)"
+  update_checked="$(status_file_value checked_at 0)"
+  update_result="$(status_file_value result never)"
+  update_error="$(status_file_value error '')"
   ssh_unlock=0
-  if [ "$arch" = "arm64" ] && printf '%s' "$major" | /usr/bin/grep -Eq '^[0-9]+$' && [ "$major" -ge 26 ] && [ "$remote_login" = "on" ]; then
+  if printf '%s' "$major" | /usr/bin/grep -Eq '^[0-9]+$' && [ "$major" -ge 26 ] && [ "$remote_login" = "on" ]; then
     ssh_unlock=1
   fi
   if [ "$fv" = "off" ]; then
@@ -197,6 +278,7 @@ status_cmd() {
 
   printf 'protocol=2\n'
   printf 'hostname=%s\n' "$host"
+  printf 'server_id=%s\n' "$server_id"
   printf 'macos_version=%s\n' "$osver"
   printf 'macos_build=%s\n' "$build"
   printf 'arch=%s\n' "$arch"
@@ -222,6 +304,13 @@ status_cmd() {
   printf 'paired_devices=%s\n' "$paired"
   printf 'autoheal_enabled=%s\n' "$autoheal_enabled"
   printf 'autoheal_paused=%s\n' "$autoheal_paused"
+  printf 'auto_update_mode=%s\n' "$auto_update_mode"
+  printf 'update_current=%s\n' "$update_current"
+  printf 'update_latest=%s\n' "$update_latest"
+  printf 'update_available=%s\n' "$update_available"
+  printf 'update_last_check_epoch=%s\n' "$update_checked"
+  printf 'update_last_result=%s\n' "$update_result"
+  printf 'update_last_error=%s\n' "$update_error"
   printf 'cpu_usage_percent=%s\n' "$cpu_usage"
   printf 'load_average=%s\n' "$loadavg"
   printf 'memory_total_bytes=%s\n' "$mem"
@@ -241,13 +330,17 @@ session_pair() {
 }
 
 write_launch_agent() {
-  local user="$1" uid="$2" home dir plist
+  local user="$1" uid="$2" home dir plist source_tmp
   home="$(user_home "$user" || true)"
   [ -n "$home" ] || fail "cannot resolve user home" 69
   dir="$home/Library/LaunchAgents"
   plist="$dir/${LABEL}.plist"
-  /bin/mkdir -p "$dir"
-  /bin/cat > "$plist" <<PLIST
+
+  # Build the template in root-owned /var/tmp, then let the target user create
+  # and atomically rename the destination. Root must never redirect into a path
+  # inside a user-writable directory (symlink overwrite / TOCTOU).
+  source_tmp="$(/usr/bin/mktemp /var/tmp/zmb-launchagent.XXXXXX)" || fail "could not create launch-agent template" 73
+  /bin/cat > "$source_tmp" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -256,8 +349,22 @@ write_launch_agent() {
 <key>RunAtLoad</key><true/>
 </dict></plist>
 PLIST
-  /usr/sbin/chown "$user":staff "$plist"
-  /bin/chmod 600 "$plist"
+  /bin/chmod 644 "$source_tmp"
+  if ! /usr/bin/sudo -u "$user" /bin/sh -c '
+    set -e
+    dir="$1"; plist="$2"; src="$3"
+    /bin/mkdir -p "$dir"
+    tmp=$(/usr/bin/mktemp "$dir/.zmb-launchagent.XXXXXX")
+    trap '"'"'/bin/rm -f "$tmp"'"'"' EXIT HUP INT TERM
+    /bin/cp "$src" "$tmp"
+    /bin/chmod 600 "$tmp"
+    /bin/mv -f "$tmp" "$plist"
+    trap - EXIT HUP INT TERM
+  ' zmb-launchagent "$dir" "$plist" "$source_tmp"; then
+    /bin/rm -f "$source_tmp"
+    fail "could not write the user LaunchAgent safely" 74
+  fi
+  /bin/rm -f "$source_tmp"
   if user_session_available "$uid"; then
     /bin/launchctl bootout "gui/${uid}/${LABEL}" >/dev/null 2>&1 || true
     /bin/launchctl bootstrap "gui/${uid}" "$plist" >/dev/null 2>&1 || true
@@ -339,6 +446,178 @@ autoheal() {
   fi
 }
 
+run_app_as_target_user() {
+  require_root
+  local user uid home
+  user="$(target_user || true)"; [ -n "$user" ] || fail "target user is not configured" 69
+  uid="$(user_uid "$user" || true)"; [ -n "$uid" ] || fail "cannot resolve target user uid" 69
+  home="$(user_home "$user" || true)"; [ -n "$home" ] || fail "cannot resolve target user home" 69
+  [ -x "$APP_BIN" ] || fail "ZorinMacBridge Server executable is missing from /Applications" 66
+  /usr/bin/sudo -u "$user" /usr/bin/env HOME="$home" USER="$user" LOGNAME="$user" "$APP_BIN" "$@"
+}
+
+run_app_for_root_update() {
+  require_root
+  local user home token
+  user="$(target_user || true)"; [ -n "$user" ] || fail "target user is not configured" 69
+  home="$(user_home "$user" || true)"; [ -n "$home" ] || fail "cannot resolve target user home" 69
+  token="$(config_value LOCAL_IDENTITY_TOKEN '')"
+  printf '%s' "$token" | /usr/bin/grep -Eq '^[0-9a-f]{64}$' || fail "root P0 config is missing a valid local identity token; run Enable / Repair locally once" 69
+  [ -x "$APP_BIN" ] || fail "ZorinMacBridge Server executable is missing from /Applications" 66
+  # Run the frozen updater as root so every downloaded/staged file remains in a
+  # root-owned directory. HOME points at the desktop user only for normal app
+  # paths; signing uses the root-owned token override above.
+  /usr/bin/env HOME="$home" USER="$user" LOGNAME="$user" ZMB_LOCAL_IDENTITY_TOKEN="$token" "$APP_BIN" "$@"
+}
+
+parse_kv() {
+  local text="$1" key="$2"
+  printf '%s\n' "$text" | /usr/bin/awk -F= -v k="$key" '$1==k {sub(/^[^=]*=/, ""); print; exit}'
+}
+
+check_update_cmd() {
+  require_root
+  local output rc current latest available
+  acquire_update_lock
+  output="$(run_app_as_target_user --p0-update-check 2>&1)"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    write_update_status unknown unknown unknown check-failed "$output"
+    release_update_lock
+    printf '%s\n' "$output" >&2
+    return "$rc"
+  fi
+  current="$(parse_kv "$output" current)"
+  latest="$(parse_kv "$output" latest)"
+  available="$(parse_kv "$output" available)"
+  [ -n "$current" ] || current=unknown
+  [ -n "$latest" ] || latest=unknown
+  [ -n "$available" ] || available=unknown
+  write_update_status "$current" "$latest" "$available" checked ""
+  release_update_lock
+  printf '%s\n' "$output"
+  printf 'auto_update_mode=%s\n' "$(config_value AUTO_UPDATE notify)"
+}
+
+find_admin_payload() {
+  local found
+  found="$(/usr/bin/find "$APP_PATH/Contents" -type f -path '*/native/macos/admin/install-admin.sh' -print -quit 2>/dev/null || true)"
+  [ -n "$found" ] && printf '%s\n' "$found"
+}
+
+update_now_cmd() {
+  require_root
+  local user home work output rc current latest available staged backup payload uid server_id server_name old_payload repair_out
+  acquire_update_lock
+  user="$(target_user || true)"; [ -n "$user" ] || { release_update_lock; fail "target user is not configured" 69; }
+  uid="$(user_uid "$user" || true)"; [ -n "$uid" ] || { release_update_lock; fail "cannot resolve target user uid" 69; }
+  home="$(user_home "$user" || true)"; [ -n "$home" ] || { release_update_lock; fail "cannot resolve target user home" 69; }
+  server_id="$(config_value SERVER_ID '')"
+  if [ -z "$server_id" ]; then
+    server_id="$(settings_value "$home/.zorin-mac-bridge/server-settings.json" server_id '')"
+  fi
+  [ -n "$server_id" ] || { release_update_lock; fail "persistent server id is missing; run Enable / Repair once" 69; }
+  server_name="$(config_value SERVER_NAME '')"
+  [ -n "$server_name" ] || server_name="$(/bin/hostname -s 2>/dev/null || echo Mac)"
+  work="$(/usr/bin/mktemp -d /var/tmp/zmb-update.XXXXXX)" || { release_update_lock; fail "could not create update staging directory" 73; }
+  /bin/chmod 700 "$work"
+  /usr/sbin/chown root:wheel "$work"
+
+  output="$(run_app_for_root_update --p0-update-stage "$work" 2>&1)"; rc=$?
+  current="$(parse_kv "$output" current)"; [ -n "$current" ] || current=unknown
+  latest="$(parse_kv "$output" latest)"; [ -n "$latest" ] || latest=unknown
+  available="$(parse_kv "$output" available)"; [ -n "$available" ] || available=unknown
+  if [ "$rc" -ne 0 ]; then
+    write_update_status "$current" "$latest" "$available" stage-failed "$output"
+    /bin/rm -rf "$work"
+    release_update_lock
+    printf '%s\n' "$output" >&2
+    return "$rc"
+  fi
+  if [ "$available" != "1" ]; then
+    write_update_status "$current" "$latest" 0 up-to-date ""
+    /bin/rm -rf "$work"
+    release_update_lock
+    printf 'ok=up-to-date\ncurrent=%s\nlatest=%s\n' "$current" "$latest"
+    return 0
+  fi
+
+  staged="$(parse_kv "$output" staged_app)"
+  case "$staged" in
+    "$work"/*) ;;
+    *)
+      write_update_status "$current" "$latest" 1 invalid-stage "staged app path escaped the trusted work directory"
+      /bin/rm -rf "$work"; release_update_lock
+      fail "staged app path escaped the trusted update directory" 65
+      ;;
+  esac
+  [ -d "$staged" ] || { /bin/rm -rf "$work"; release_update_lock; fail "verified staged application is missing" 66; }
+  /usr/bin/codesign --verify --deep --strict --verbose=2 "$staged" >/dev/null 2>&1 || {
+    write_update_status "$current" "$latest" 1 invalid-signature "staged app failed final codesign verification"
+    /bin/rm -rf "$work"; release_update_lock; fail "staged app failed final code signature verification" 65;
+  }
+
+  backup="${APP_PATH}.zmb-update-backup"
+  /bin/rm -rf "$backup"
+  if [ -d "$APP_PATH" ]; then /bin/mv "$APP_PATH" "$backup" || { /bin/rm -rf "$work"; release_update_lock; fail "could not create application backup" 74; }; fi
+  if ! /usr/bin/ditto "$staged" "$APP_PATH"; then
+    /bin/rm -rf "$APP_PATH"
+    [ -d "$backup" ] && /bin/mv "$backup" "$APP_PATH" || true
+    write_update_status "$current" "$latest" 1 install-failed "could not copy staged application to /Applications"
+    /bin/rm -rf "$work"; release_update_lock
+    fail "could not install the staged application; previous app restored" 74
+  fi
+  /usr/sbin/chown -R root:wheel "$APP_PATH" >/dev/null 2>&1 || true
+  /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_PATH" >/dev/null 2>&1 || {
+    /bin/rm -rf "$APP_PATH"
+    [ -d "$backup" ] && /bin/mv "$backup" "$APP_PATH" || true
+    write_update_status "$current" "$latest" 1 install-failed "installed app failed code signature verification"
+    /bin/rm -rf "$work"; release_update_lock
+    fail "installed app failed verification; previous app restored" 65
+  }
+
+  payload="$(find_admin_payload)"
+  repair_out="$(/usr/bin/mktemp /var/tmp/zmb-admin-repair.XXXXXX)" || repair_out="/dev/null"
+  if [ -z "$payload" ] || ! ZMB_UPDATE_IN_PROGRESS=1 /bin/bash "$payload" "$user" "$server_id" "$server_name" "$(config_value LOCAL_IDENTITY_TOKEN '')" >"$repair_out" 2>&1; then
+    /bin/rm -rf "$APP_PATH"
+    [ -d "$backup" ] && /bin/mv "$backup" "$APP_PATH" || true
+    old_payload="$(find_admin_payload)"
+    if [ -n "$old_payload" ]; then ZMB_UPDATE_IN_PROGRESS=1 /bin/bash "$old_payload" "$user" "$server_id" "$server_name" "$(config_value LOCAL_IDENTITY_TOKEN '')" >/dev/null 2>&1 || true; fi
+    write_update_status "$current" "$latest" 1 helper-update-failed "new P0 helper installation failed; application rolled back"
+    [ "$repair_out" = "/dev/null" ] || /bin/rm -f "$repair_out"
+    /bin/rm -rf "$work"; release_update_lock
+    fail "new P0 helper installation failed; previous app restored" 70
+  fi
+  [ "$repair_out" = "/dev/null" ] || /bin/rm -f "$repair_out"
+  /bin/rm -rf "$backup" "$work"
+  write_update_status "$latest" "$latest" 0 installed ""
+  release_update_lock
+
+  if user_session_available "$uid"; then
+    restart_zmb >/dev/null 2>&1 || true
+  fi
+  printf 'ok=updated\nprevious=%s\ninstalled=%s\n' "$current" "$latest"
+}
+
+set_auto_update_cmd() {
+  require_root
+  local mode="${1:-}"
+  case "$mode" in off|notify|install) ;; *) fail "usage: zmb-admin set-auto-update off|notify|install" 64 ;; esac
+  set_config_value AUTO_UPDATE "$mode"
+  printf 'ok=auto-update-mode-set\nauto_update_mode=%s\n' "$mode"
+}
+
+auto_update_run() {
+  require_root
+  local mode
+  mode="$(config_value AUTO_UPDATE notify)"
+  case "$mode" in
+    off) return 0 ;;
+    notify) check_update_cmd ;;
+    install) update_now_cmd ;;
+    *) fail "invalid AUTO_UPDATE mode in admin config: $mode" 65 ;;
+  esac
+}
+
 daemon_tick() {
   require_root
   /bin/mkdir -p "$HEARTBEAT_DIR"
@@ -353,22 +632,36 @@ pairing_list() {
   local u home f
   u="$(target_user || true)"; [ -n "$u" ] || return 0
   home="$(user_home "$u" || true)"; [ -n "$home" ] || return 0
-  f="$home/.ssh/authorized_keys"; [ -f "$f" ] || return 0
-  /usr/bin/grep 'ZorinMacBridge-Admin:' "$f" 2>/dev/null | /usr/bin/sed -nE 's/.*ZorinMacBridge-Admin:([A-Za-z0-9._-]+).*/device_id=\1/p'
+  f="$home/.ssh/authorized_keys"
+  /usr/bin/sudo -u "$u" /usr/bin/test -f "$f" 2>/dev/null || return 0
+  /usr/bin/sudo -u "$u" /usr/bin/grep 'ZorinMacBridge-Admin:' "$f" 2>/dev/null | /usr/bin/sed -nE 's/.*ZorinMacBridge-Admin:([A-Za-z0-9._-]+).*/device_id=\1/p'
 }
 
 unpair_device() {
   require_root
-  local id="$1" u home f tmp
+  local id="$1" u home f rc
   printf '%s' "$id" | /usr/bin/grep -Eq '^[A-Za-z0-9._-]{8,80}$' || fail "invalid device id" 64
   u="$(target_user || true)"; [ -n "$u" ] || fail "target user is not configured" 69
   home="$(user_home "$u" || true)"; [ -n "$home" ] || fail "cannot resolve user home" 69
-  f="$home/.ssh/authorized_keys"; [ -f "$f" ] || fail "authorized_keys does not exist" 66
-  tmp="${f}.zmbtmp.$$"
-  /usr/bin/awk -v marker="ZorinMacBridge-Admin:${id}" 'index($0, marker)==0 {print}' "$f" > "$tmp"
-  /usr/sbin/chown "$u":staff "$tmp"
-  /bin/chmod 600 "$tmp"
-  /bin/mv "$tmp" "$f"
+  f="$home/.ssh/authorized_keys"
+  # authorized_keys is owned by the desktop user. Perform the complete read,
+  # filter, temp-file creation and atomic replace as that user; never grant root
+  # file-read/write semantics to a user-controlled path.
+  /usr/bin/sudo -u "$u" /bin/sh -c '
+    set -e
+    f="$1"; id="$2"
+    [ -f "$f" ] || exit 66
+    [ ! -L "$f" ] || exit 65
+    dir=${f%/*}
+    tmp=$(/usr/bin/mktemp "$dir/.zmb-authorized_keys.XXXXXX")
+    trap '"'"'/bin/rm -f "$tmp"'"'"' EXIT HUP INT TERM
+    /usr/bin/awk -v marker="ZorinMacBridge-Admin:${id}" '"'"'index($0, marker)==0 {print}'"'"' "$f" > "$tmp"
+    /bin/chmod 600 "$tmp"
+    /bin/mv -f "$tmp" "$f"
+    trap - EXIT HUP INT TERM
+  ' zmb-unpair "$f" "$id"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "could not safely update authorized_keys while unpairing (code $rc)" "$rc"
   printf 'ok=unpaired\ndevice_id=%s\n' "$id"
 }
 
@@ -388,9 +681,13 @@ case "${1:-}" in
   repair-launch-agent) repair_launch_agent ;;
   daemon-tick) daemon_tick ;;
   autoheal) autoheal ;;
+  auto-update-run) auto_update_run ;;
   pairing-list) pairing_list ;;
   unpair) [ "$#" -eq 2 ] || fail "usage: zmb-admin unpair DEVICE_ID" 64; unpair_device "$2" ;;
   logs) logs_cmd ;;
+  check-update) check_update_cmd ;;
+  update-now) update_now_cmd ;;
+  set-auto-update) [ "$#" -eq 2 ] || fail "usage: zmb-admin set-auto-update off|notify|install" 64; set_auto_update_cmd "$2" ;;
   sleep) require_root; /usr/bin/pmset sleepnow ;;
   reboot)
     require_root
@@ -401,9 +698,8 @@ case "${1:-}" in
     fi
     osver="$(/usr/bin/sw_vers -productVersion 2>/dev/null || true)"
     major="${osver%%.*}"
-    arch="$(/usr/bin/uname -m 2>/dev/null || true)"
     remote_login="$(remote_login_state)"
-    if [ "$fv" = "on" ] && [ "$arch" = "arm64" ] && printf '%s' "$major" | /usr/bin/grep -Eq '^[0-9]+$' && [ "$major" -ge 26 ] && [ "$remote_login" = "on" ]; then
+    if [ "$fv" = "on" ] && printf '%s' "$major" | /usr/bin/grep -Eq '^[0-9]+$' && [ "$major" -ge 26 ] && [ "$remote_login" = "on" ]; then
       /sbin/shutdown -r now
       exit $?
     fi
@@ -418,9 +714,13 @@ Usage: zmb-admin COMMAND
   stop-zmb
   restart-zmb
   repair-launch-agent
+  auto-update-run
   pairing-list
   unpair DEVICE_ID
   logs
+  check-update
+  update-now
+  set-auto-update off|notify|install
   sleep
   reboot
   shutdown

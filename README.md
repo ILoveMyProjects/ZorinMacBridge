@@ -10,7 +10,7 @@ A LAN-first remote desktop bridge for a **Zorin OS / Linux workstation → macOS
 
 The intended setup is simple: keep Linux as the main machine for web/app development, and use the Mac only for Xcode, iOS Simulator, signing, builds, or other Apple-only tooling.
 
-The remote session does **not** require a vendor cloud, relay, account, telemetry service, or Internet connection. Optional LAN discovery uses local mDNS/Bonjour only. GitHub is contacted only when you explicitly install/update the app or manually select **Check for updates**.
+The remote session does **not** require a vendor cloud, relay, account, telemetry service, or Internet connection. Optional LAN discovery uses local mDNS/Bonjour only. GitHub is contacted for installation/update checks; P0 can optionally check every 6 hours and, if you choose **Install automatically**, install verified Mac releases without requiring a local monitor.
 
 > **Status:** experimental. This project is still under active development and has not received an independent security audit.
 
@@ -35,6 +35,8 @@ The installer downloads the latest `.deb`, verifies its published SHA-256 checks
 
 ### macOS — Server
 
+> **Apple Silicon only (arm64). Intel Macs are intentionally unsupported.**
+>
 > The Apple computer runs **macOS**. iOS is the target platform you build for in Xcode.
 
 Copy and paste one command on the Mac:
@@ -43,7 +45,7 @@ Copy and paste one command on the Mac:
 curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/master/install-macos.sh | bash
 ```
 
-The installer detects Apple Silicon vs Intel, downloads the correct `.dmg`, verifies SHA-256, and installs **ZorinMacBridge Server** into `/Applications`.
+The macOS server supports **Apple Silicon (arm64) only**. The installer verifies the Mac architecture, downloads the arm64 `.dmg`, verifies SHA-256, and installs **ZorinMacBridge Server** into `/Applications`. Intel Macs are not supported.
 
 Starting with v0.6.7, installation uses a **stable explicit macOS designated requirement (DR)** instead of a certificate/keychain identity. No Developer ID, local certificate, GitHub signing secret, or Linux signing setup is required for this private/internal workflow. Each Mac creates one local random identity marker, injects it into the staged app, and re-signs the app ad-hoc with the same explicit DR on every update. GitHub Actions runs a real `codesign` preflight that proves this DR shape before the long macOS builds start.
 
@@ -113,6 +115,23 @@ After a successful connection, the client stores:
 - the Mac's persistent random server ID, so credentials are associated with the machine rather than only its current IP address.
 
 On later connections, discovery can restore the saved fingerprint/password automatically.
+
+## Passwords: do not mix these up
+
+ZorinMacBridge uses two different credentials:
+
+- **ZorinMacBridge session password** — an app-specific password for the normal Desktop connection. Create it on the Mac during command-line installation or in the Server window. It should be different from your macOS login password. The Mac stores only a salted PBKDF2 verifier.
+- **macOS account password** — the normal password you use to log in/unlock the Mac. It is used only once by **System → Pair / Configure** to authenticate the first SSH connection and install the restricted Ed25519 device key. The Zorin client does not save this password.
+
+`install-macos.sh` now performs unattended setup by default: it enables Remote Login (SSH), installs/repairs P0, verifies that SSH was enabled, and prompts for the ZorinMacBridge session password. Use `./install-macos.sh --app-only` only when you intentionally want to install the app without P0/SSH setup.
+
+## LAN discovery and changing DHCP addresses
+
+The Zorin client discovers both the normal desktop service and the P0 system service with Bonjour/mDNS. Each Mac has a persistent `server_id` UUID. The current IP address is treated only as a transport address and may change after DHCP renewals or reboots.
+
+When P0 is enabled, the system LaunchDaemon advertises `_zorinmacbridge-admin._tcp` independently of the user-session desktop app. This lets **Find Macs** rediscover the same Mac by `server_id`, hostname, and its current IP even if the desktop streamer has crashed. Saved TLS and SSH host-key pinning still verify the machine before trusted connections are accepted.
+
+The project deliberately does not use a network-interface MAC address as the persistent identity. A Mac can have multiple interfaces and modern macOS can use private Wi-Fi addresses; the application-level UUID plus pinned cryptographic identities are more appropriate.
 
 ## Unattended access / recovery (P0)
 
@@ -245,20 +264,21 @@ Discovery does not automatically create trust. On first pairing, verify the TLS 
 
 ## Updates
 
-There is **no background update check**.
+The normal desktop updater is still available through **Help → Check for updates**.
 
-Choose **Help → Check for updates** manually. The app then:
+With P0 enabled and the Mac paired, the Zorin **System** tab also provides:
 
-1. checks GitHub Releases;
-2. downloads the correct package and checksum after your approval;
-3. verifies SHA-256;
-4. asks the operating system for administrator authorization;
-5. installs the update;
-6. offers to restart the application.
+- **Check update** — query the official GitHub release from Zorin;
+- **Update now** — download, verify and install the Mac update remotely with no local password prompt;
+- **Automatic updates: Off / Notify only / Install automatically**.
 
-On Linux, **Restart now** immediately replaces the current process with `/usr/bin/zorinmacbridge` after the verified package is installed. It deliberately does not wait for GTK, the tray backend, or network-worker cleanup first, preventing blocking teardown from leaving the old window in a “not responding” state.
+The scheduled Mac updater runs every 6 hours. `Notify only` records whether a newer release exists and exposes it in the System tab. `Install automatically` downloads the Apple Silicon `.dmg`, verifies the release SHA-256, verifies the macOS transport signature and bundle identifier, reapplies the Mac's persistent local designated requirement, makes a backup, installs the app, refreshes the bundled P0 helpers, and restarts the desktop service when a user GUI session exists. A failed install rolls the application bundle back.
 
-You can also re-run the one-command installer.
+The P0 updater is a separate system LaunchDaemon from the recovery daemon so replacing/reloading recovery components cannot terminate the update transaction that is performing the replacement. No additional privileged network listener is opened; remote control still travels through the restricted SSH key.
+
+On Linux, the regular in-app update path continues to use the verified `.deb` and system package manager.
+
+You can also re-run the one-command installers.
 
 
 ## Stable macOS permissions across updates
@@ -297,7 +317,6 @@ Manual downloads:
 
 - [Linux amd64 `.deb`](https://github.com/ILoveMyProjects/ZorinMacBridge/releases/latest/download/ZorinMacBridge-Client_linux-amd64.deb)
 - [macOS Apple Silicon `.dmg`](https://github.com/ILoveMyProjects/ZorinMacBridge/releases/latest/download/ZorinMacBridge-Server_macOS-arm64.dmg)
-- [macOS Intel `.dmg`](https://github.com/ILoveMyProjects/ZorinMacBridge/releases/latest/download/ZorinMacBridge-Server_macOS-x86_64.dmg)
 
 ---
 

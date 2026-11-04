@@ -1,5 +1,27 @@
 ## v0.7.0
 
+- Audit hardening pass: removed additional GUI-thread blocking operations, bounded discovery/UI/log workloads, added stale-operation invalidation, and added hard native-streamer pipe deadlines.
+- Fixed races around Zeroconf discovery, reconnect queues, System-page worker callbacks, and regenerated pairing keys.
+- Hardened P0 privileged file handling: user-owned LaunchAgent/SSH files are now written as the target user, temporary files are unpredictable, config secrets are root-only, and unattended update staging remains root-owned end-to-end.
+- macOS update verification now checks the app bundle version against the selected release in addition to SHA-256, bundle id and code-signature verification.
+- Completed a source-level reliability/security audit before the first v0.7.0 release: eliminated remaining GTK/Tk worker-state races, bounded client/server queues and pre-auth concurrency, and added hard deadlines to native video and update helper operations.
+- Connection workers now use immutable UI-thread snapshots; high-rate mouse movement is coalesced so KEY-UP/button-up transitions cannot be crowded out by motion events.
+- Hardened P0 root/user boundaries: LaunchAgent and `authorized_keys` changes are performed atomically as the desktop user, unattended update staging remains root-owned, and predictable/root-followed user-writable paths were removed.
+- macOS update staging now verifies the release version embedded in the application bundle in addition to SHA-256, bundle identity and code-signature validity, with rollback retained on install/helper failures.
+- Added bounded server pre-auth concurrency and validation caps for locally loaded password-verifier parameters to avoid resource/CPU stalls from malformed state.
+- Hardened the Zorin GTK client against UI stalls: bounded GTK queue work per tick, asynchronous keyring reads, bounded Bonjour scans with a GUI watchdog, bounded log memory/marks, batched large-directory rendering, and video RGB preparation moved off the GTK thread.
+- Added a P0 system Bonjour advertisement (`_zorinmacbridge-admin._tcp`) so a paired Mac can be rediscovered by its persistent `server_id` and current DHCP address even when the user-session desktop service is down.
+- LAN discovery now shows the Bonjour hostname plus current IP and distinguishes desktop/system availability. The persistent `server_id` remains the machine identity; IP is transport only.
+- Added fully remote Mac updates to the Zorin **System** tab: **Check update**, **Update now**, and **Automatic updates: Off / Notify only / Install automatically**.
+- Added a separate six-hour macOS update LaunchDaemon so an unattended update can safely refresh the recovery daemon/helper without terminating its own transaction.
+- Unattended updates reuse the normal GitHub release metadata, SHA-256 files, transport code-signature/bundle-id verification and persistent per-Mac designated requirement; the root helper makes a backup and rolls the app bundle back on installation/helper-refresh failure.
+- After the one-time local P0 setup, remote/automatic Mac updates require no local monitor or repeated administrator-password prompt.
+- macOS command-line installation now configures P0 and Remote Login (SSH) by default, verifies SSH enablement, and prompts for the separate ZorinMacBridge session password.
+- Clarified throughout the UI that the first System pairing uses the macOS account/login password, while normal Desktop authentication uses the separate ZorinMacBridge session password.
+- System/SSH actions are now fully fail-fast from the Zorin GUI: helper processes run in killable process groups, SSH has bounded connection/keepalive settings, and the GTK System page has its own watchdog so a missing reply cannot leave the application stuck in a permanent busy state.
+- Linux clipboard helper processes now run off the GTK main thread, preventing a stalled `wl-copy`, `wl-paste`, or `xclip` process from freezing the UI.
+
+- macOS support is now Apple Silicon (arm64) only; the Intel/x86_64 build and update path were removed to keep the project focused and release workflow simpler.
 - Added P0 unattended administration directly to the main source tree; no runtime patcher, dpkg-divert, second launcher, or separate admin application is used.
 - Added a native **System** page to the GTK4/libadwaita client for pairing, health/status, recovery, logs, sleep, restart, and shutdown.
 - Added restricted Ed25519 device pairing over macOS Remote Login. The dedicated admin key is forced through `/usr/local/libexec/zmb-admin-ssh` and cannot open a general shell or SSH tunnel.
@@ -51,7 +73,7 @@
 - Transport and persistent per-Mac signing certificates are now end-entity code-signing certificates: `CA:FALSE`, critical `digitalSignature` key usage, and critical `codeSigning` EKU; `keyCertSign`/`crlSign` were removed.
 - `codesign` now selects the imported identity by SHA-1 and explicitly scopes lookup to the intended file keychain.
 - Added a real Mach-O signing probe using a copy of `/usr/bin/true` before any release bundle is signed.
-- Added a dedicated `macos-signing-preflight` GitHub Actions job so certificate/keychain failures happen before the long arm64/x86_64 package builds start.
+- Added a dedicated `macos-signing-preflight` GitHub Actions job so certificate/keychain failures happen before the macOS package build starts.
 - Persistent local identities created with the obsolete v0.6.0-v0.6.3 CA-style certificate profile are automatically regenerated once before local signing.
 
 ## 0.6.3

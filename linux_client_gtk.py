@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,7 +39,7 @@ from linux_client import (
     remote_join,
 )
 from protocol import CLIPBOARD_GET, CLIPBOARD_SET, KEY, MOUSE_BUTTON, MOUSE_MOVE, SCROLL, TEXT, pack_json, pack_packet
-from discovery import DiscoveredServer
+from discovery import DiscoveredServer, discover_servers
 from resources import resource_path
 from settings import client_record
 from secret_store import get_password as get_saved_password
@@ -108,9 +109,13 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.discovered_by_label = {}
         self.selected_server_id = ''
         self.selected_server_name = ''
+        self.selected_desktop_available = True
         self.remember_credentials_active = True
+        self._connect_snapshot = None
 
         self.outgoing = queue.Queue(maxsize=1000)
+        self._mouse_move_lock = threading.Lock()
+        self._pending_mouse_move = None
         self.ui_queue = queue.Queue()
         self.stop_event = threading.Event()
         self.net_thread = None
@@ -123,6 +128,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.keys_down = set()
         self.remote_path = ''
         self.file_entries = {}
+        self._clear_session_queues()
         self.disconnect_requested = False
         self.fullscreen_active = False
         self.mouse_buttons_down = set()
@@ -132,6 +138,11 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self._reconnect_source = 0
         self._reconnect_attempt = 0
         self._last_disconnect_reason = ''
+        self._discovery_serial = 0
+        self._discovery_watchdog = 0
+        self._discovery_busy = False
+        self._credential_serial = 0
+        self._file_render_serial = 0
 
         self._build_native_ui()
         self._install_css()
@@ -232,15 +243,15 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.machine_dropdown.set_hexpand(True)
         self.machine_dropdown.connect('notify::selected', self._machine_dropdown_changed)
         first.append(self.machine_dropdown)
-        refresh = Gtk.Button(icon_name='view-refresh-symbolic', tooltip_text='Refresh LAN discovery')
-        refresh.connect('clicked', lambda *_: self.discover_macs())
-        first.append(refresh)
+        self.discovery_refresh_button = Gtk.Button(icon_name='view-refresh-symbolic', tooltip_text='Refresh LAN discovery')
+        self.discovery_refresh_button.connect('clicked', lambda *_: self.discover_macs())
+        first.append(self.discovery_refresh_button)
 
         second = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.connection_card.append(second)
-        self.ip_entry = self._entry(second, 'IP', self.ip_var, width=16)
+        self.ip_entry = self._entry(second, 'Current IP', self.ip_var, width=16)
         self.port_entry = self._entry(second, 'Port', self.port_var, width=7)
-        self.password_entry = self._entry(second, 'Password', self.password_var, password=True, expand=True)
+        self.password_entry = self._entry(second, 'ZMB session password', self.password_var, password=True, expand=True)
         self.connect_btn = Gtk.Button(label='Connect')
         self.connect_btn.add_css_class('suggested-action')
         self.connect_btn.connect('clicked', lambda *_: self.connect_remote())
@@ -433,6 +444,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_hexpand(True)
         scrolled.set_vexpand(True)
+        self.file_scroller = scrolled
         self.file_list = Gtk.ListBox()
         self.file_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.file_list.add_css_class('boxed-list')
@@ -615,11 +627,102 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             if (sid and sid in seen_ids) or (host, port) in seen_hosts:
                 continue
             name = str(profile.get('server_name') or host).strip() or host
-            merged.append(DiscoveredServer(name=name, ip=host, port=port, server_id=sid, paired_only=True))
+            merged.append(DiscoveredServer(name=name, ip=host, port=port, server_id=sid, paired_only=True, desktop_available=False, admin_available=False))
             if sid:
                 seen_ids.add(sid)
             seen_hosts.add((host, port))
         return sorted(merged, key=lambda item: (item.name.lower(), item.paired_only, item.ip, item.port))
+
+    def _set_discovery_busy(self, busy: bool) -> None:
+        self._discovery_busy = bool(busy)
+        self.find_button.set_sensitive(not busy)
+        if hasattr(self, 'discovery_refresh_button'):
+            self.discovery_refresh_button.set_sensitive(not busy)
+
+    def discover_macs(self) -> None:
+        """Scan Bonjour without ever blocking GTK or stacking concurrent scans."""
+        if self._discovery_busy:
+            self.status_var.set('LAN scan is already running…')
+            return
+        self._discovery_serial += 1
+        token = self._discovery_serial
+        self._set_discovery_busy(True)
+        self.status_var.set('Scanning LAN for ZorinMacBridge Macs…')
+        self._log('INFO', 'Starting bounded Bonjour scan for desktop + system services.')
+
+        if self._discovery_watchdog:
+            try:
+                GLib.source_remove(self._discovery_watchdog)
+            except Exception:
+                pass
+
+        def expired():
+            if token != self._discovery_serial:
+                return GLib.SOURCE_REMOVE
+            self._discovery_serial += 1  # late worker result is ignored
+            self._discovery_watchdog = 0
+            self._set_discovery_busy(False)
+            self.status_var.set('LAN scan timed out. The client is still responsive; retry when the Mac is awake.')
+            self._log('WARNING', 'Bonjour scan watchdog expired after 7 seconds.')
+            return GLib.SOURCE_REMOVE
+
+        self._discovery_watchdog = GLib.timeout_add(7000, expired)
+
+        def worker() -> None:
+            try:
+                servers = discover_servers(3.8)
+                GLib.idle_add(done, token, servers, None)
+            except Exception as exc:
+                GLib.idle_add(done, token, None, str(exc))
+
+        def done(job_token: int, servers, error):
+            if job_token != self._discovery_serial:
+                return False
+            if self._discovery_watchdog:
+                try:
+                    GLib.source_remove(self._discovery_watchdog)
+                except Exception:
+                    pass
+                self._discovery_watchdog = 0
+            self._set_discovery_busy(False)
+            if error:
+                self.status_var.set('LAN discovery error: ' + error)
+                self._log('ERROR', 'LAN discovery error: ' + error)
+                return False
+            self._apply_discovery_results(servers or [])
+            return False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_discovery_results(self, live_servers) -> None:
+        servers = self._merge_paired_admin_servers(live_servers)
+        previous_id = str(self.selected_server_id or '')
+        previous_label = str(self.machine_var.get() or '')
+        self.discovered_by_label = {server.label: server for server in servers}
+        values = list(self.discovered_by_label)
+        self.machine_model.splice(0, self.machine_model.get_n_items(), values)
+        if not servers:
+            self.status_var.set('No ZorinMacBridge Mac found on the LAN.')
+            self._log('INFO', 'LAN discovery found no desktop or system service.')
+            return
+
+        selected = 0
+        if previous_id:
+            for idx, server in enumerate(servers):
+                if server.server_id and server.server_id == previous_id:
+                    selected = idx
+                    break
+        elif previous_label in self.discovered_by_label:
+            selected = values.index(previous_label)
+        self.machine_dropdown.set_selected(selected)
+        self.machine_var.set(values[selected])
+        self._machine_selected()
+
+        desktop = sum(1 for s in servers if s.desktop_available and not s.paired_only)
+        system = sum(1 for s in servers if s.admin_available and not s.paired_only)
+        offline = sum(1 for s in servers if s.paired_only)
+        self.status_var.set(f'LAN scan: {desktop} desktop service(s), {system} system service(s), {offline} saved/offline.')
+        self._log('INFO', 'LAN discovery list: ' + ', '.join(s.label for s in servers))
 
     def _initial_discovery(self):
         self.discover_macs()
@@ -639,21 +742,63 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             return
         self.ip_var.set(server.ip)
         self.port_var.set(str(server.port))
+        previous_id = str(self.selected_server_id or '')
         self.selected_server_id = server.server_id or f'{server.ip}:{server.port}'
         self.selected_server_name = server.name
+        self.selected_desktop_available = bool(server.desktop_available and not server.paired_only)
         record = client_record(self.selected_server_id)
         saved_fp = str(record.get('fingerprint', '')).strip()
         if saved_fp:
             self.fp_var.set(saved_fp)
-        saved_password = get_saved_password(self.selected_server_id)
-        if saved_password:
-            self.password_var.set(saved_password)
+        elif previous_id != self.selected_server_id:
+            self.fp_var.set('')
+
+        # Desktop keyrings can block on D-Bus/Secret Service. Never query one on
+        # the GTK thread. A late result is ignored if the user changed machine.
+        if previous_id != self.selected_server_id:
+            self.password_var.set('')
+        self._credential_serial += 1
+        credential_token = self._credential_serial
+        selected_id = self.selected_server_id
+
+        def credential_worker() -> None:
+            saved_password = get_saved_password(selected_id)
+            GLib.idle_add(credential_done, credential_token, selected_id, saved_password)
+
+        def credential_done(token: int, server_id: str, password):
+            if token != self._credential_serial or server_id != self.selected_server_id:
+                return False
+            if password:
+                self.password_var.set(password)
+            return False
+
+        threading.Thread(target=credential_worker, daemon=True).start()
+
         trust = 'Saved identity loaded.' if saved_fp else 'Verify the TLS fingerprint once.'
-        self.status_var.set(f'Selected {server.name} at {server.ip}:{server.port}. {trust}')
-        self._log('INFO', f'Discovery selection: {server.name} at {server.ip}:{server.port}; server_id={self.selected_server_id}')
+        host_text = f'{server.hostname} / {server.ip}' if server.hostname else server.ip
+        roles = []
+        if server.desktop_available:
+            roles.append('desktop')
+        if server.admin_available:
+            roles.append('system')
+        if server.paired_only:
+            roles.append('saved/offline')
+        role_text = ', '.join(roles) or 'legacy'
+        self.status_var.set(f'Selected {server.name} at {host_text}:{server.port} ({role_text}). {trust}')
+        self._log('INFO', f'Discovery selection: {server.name} hostname={server.hostname or "?"} ip={server.ip}:{server.port}; server_id={self.selected_server_id}; roles={role_text}')
 
     def connect_remote(self) -> None:
         if self.connected or (self.net_thread is not None and self.net_thread.is_alive()):
+            return
+        if not self.selected_desktop_available:
+            self.status_var.set('Desktop service is offline; use System to recover/start ZorinMacBridge on this Mac.')
+            self._log('WARNING', 'Connect skipped because the selected Mac currently advertises System/recovery only.')
+            try:
+                self.stack.set_visible_child_name('system')
+                if self.system_controller._profile():
+                    self.system_controller.refresh()
+            except Exception:
+                pass
             return
         if self._reconnect_source:
             try:
@@ -667,6 +812,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             self._log('ERROR', f'Connection parameters rejected: {exc}')
             self._dialog('Connection', str(exc))
             return
+        self._connect_snapshot = (ip, port, _password, expected_fp)
         self.disconnect_requested = False
         self.fullscreen_active = False
         self.mouse_buttons_down = set()
@@ -693,6 +839,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self._release_remote_input_state()
         self.disconnect_requested = True
         self.stop_event.set()
+        self._clear_session_queues()
         self.connected = False
         self.status_var.set('Disconnected')
         self._log('INFO', 'Disconnect requested by user.')
@@ -733,9 +880,14 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         return GLib.SOURCE_CONTINUE
 
     def _process_gtk_queue(self) -> None:
+        # Never monopolize the GTK main loop. A burst of logs/network events must
+        # leave time for window redraw/input so GNOME does not mark us hung.
+        deadline = time.monotonic() + 0.008
+        processed = 0
         try:
-            while True:
+            while processed < 160 and time.monotonic() < deadline:
                 item = self.ui_queue.get_nowait()
+                processed += 1
                 kind = item[0]
                 if kind == 'log':
                     self._append_log(item[1])
@@ -763,24 +915,9 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                 elif kind == 'clipboard':
                     self._set_local_clipboard(item[1])
                 elif kind == 'discovery':
-                    servers = self._merge_paired_admin_servers(item[1])
-                    self.discovered_by_label = {server.label: server for server in servers}
-                    values = list(self.discovered_by_label)
-                    self.machine_model.splice(0, self.machine_model.get_n_items(), values)
-                    if servers:
-                        self.machine_dropdown.set_selected(0)
-                        self.machine_var.set(values[0])
-                        self._machine_selected()
-                        running = sum(1 for s in servers if not getattr(s, 'paired_only', False))
-                        paired_offline = len(servers) - running
-                        if paired_offline:
-                            self.status_var.set(f'Found {running} running Mac server(s); {paired_offline} paired Mac(s) available for recovery.')
-                        else:
-                            self.status_var.set(f'Found {running} running Mac server(s) on the LAN.')
-                        self._log('INFO', f'LAN discovery/recovery list has {len(servers)} Mac(s): ' + ', '.join(s.label for s in servers))
-                    else:
-                        self.status_var.set('No running ZorinMacBridge server found on the LAN.')
-                        self._log('INFO', 'LAN discovery found no running servers.')
+                    # Compatibility path for inherited/legacy workers. Normal GTK
+                    # scans use the bounded discover_macs() implementation above.
+                    self._apply_discovery_results(item[1])
                 elif kind == 'discovery_error':
                     self.status_var.set(f'LAN discovery error: {item[1]}')
                     self._log('ERROR', f'LAN discovery error: {item[1]}')
@@ -813,13 +950,35 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         except queue.Empty:
             pass
 
+    def _queue_video_image(self, image) -> None:
+        """Prepare expensive RGB bytes on the decoder thread, not GTK."""
+        try:
+            rgb = image if getattr(image, 'mode', None) == 'RGB' else image.convert('RGB')
+            prepared = (rgb.width, rgb.height, rgb.tobytes())
+            try:
+                self.video_frames.put_nowait(prepared)
+            except queue.Full:
+                try:
+                    self.video_frames.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self.video_frames.put_nowait(prepared)
+                except queue.Full:
+                    pass
+        except Exception as exc:
+            self._log('WARNING', f'Could not prepare decoded video frame: {exc}')
+
     def _redraw(self) -> None:
-        img = getattr(self, '_last_image', None)
-        if img is None:
+        prepared = getattr(self, '_last_image', None)
+        if prepared is None:
             return
-        rgb = img.convert('RGB')
-        data = GLib.Bytes.new(rgb.tobytes())
-        pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(data, GdkPixbuf.Colorspace.RGB, False, 8, rgb.width, rgb.height, rgb.width * 3)
+        try:
+            width, height, raw = prepared
+        except Exception:
+            return
+        data = GLib.Bytes.new(raw)
+        pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(data, GdkPixbuf.Colorspace.RGB, False, 8, width, height, width * 3)
         texture = Gdk.Texture.new_for_pixbuf(pixbuf)
         self._last_pixbuf = pixbuf
         self._last_texture = texture
@@ -1010,7 +1169,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                 if p.returncode == 0:
                     raw = p.stdout
                     if len(raw) > MAX_CLIPBOARD:
-                        self.status_var.set('Text clipboard is too large (>2 MiB).')
+                        self._log('WARNING', 'Linux text clipboard is too large (>2 MiB); not sending it.')
                         return None
                     return raw.decode('utf-8', 'replace')
             except Exception:
@@ -1018,21 +1177,61 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         return None
 
     def _set_local_clipboard(self, text: str) -> None:
+        # Clipboard helpers are external processes. Never wait for them on the
+        # GTK main thread; a broken wl-copy/xclip must not freeze the client.
         raw = text.encode('utf-8')
-        commands = []
-        if os.environ.get('WAYLAND_DISPLAY') and shutil.which('wl-copy'):
-            commands.append(['wl-copy'])
-        if shutil.which('xclip'):
-            commands.append(['xclip', '-selection', 'clipboard'])
-        for command in commands:
-            try:
-                p = subprocess.run(command, input=raw, stderr=subprocess.DEVNULL, timeout=2, check=False)
-                if p.returncode == 0:
-                    self.status_var.set('Text clipboard copied Mac → Linux')
-                    return
-            except Exception:
-                pass
-        self.status_var.set('Could not access the Linux text clipboard.')
+
+        def worker() -> None:
+            commands = []
+            if os.environ.get('WAYLAND_DISPLAY') and shutil.which('wl-copy'):
+                commands.append(['wl-copy'])
+            if shutil.which('xclip'):
+                commands.append(['xclip', '-selection', 'clipboard'])
+            ok = False
+            for command in commands:
+                try:
+                    proc = subprocess.run(command, input=raw, stderr=subprocess.DEVNULL, timeout=2, check=False)
+                    if proc.returncode == 0:
+                        ok = True
+                        break
+                except Exception:
+                    pass
+            GLib.idle_add(
+                self.status_var.set,
+                'Text clipboard copied Mac → Linux' if ok else 'Could not access the Linux text clipboard.',
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _read_local_clipboard_async(self, callback) -> None:
+        """Read text clipboard off the GTK thread and invoke callback on GTK."""
+        def worker() -> None:
+            text = self._get_local_clipboard()
+            GLib.idle_add(callback, text)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _push_clipboard_silent(self) -> None:
+        def done(text):
+            if text is not None:
+                self._enqueue(pack_packet(CLIPBOARD_SET, text.encode('utf-8')))
+            return False
+
+        self._read_local_clipboard_async(done)
+
+    def push_clipboard(self) -> None:
+        if not self.connected:
+            return
+
+        def done(text):
+            if text is None:
+                self.status_var.set('No text found in the Linux clipboard.')
+                return False
+            self._enqueue(pack_packet(CLIPBOARD_SET, text.encode('utf-8')))
+            self.status_var.set('Text clipboard sent Linux → Mac')
+            return False
+
+        self._read_local_clipboard_async(done)
 
     # ---------- Logs ----------
 
@@ -1044,8 +1243,15 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
     def _append_log(self, line: str) -> None:
         end = self.log_buffer.get_end_iter()
         self.log_buffer.insert(end, line.rstrip() + '\n')
+        # Bound the TextBuffer. Long-running/reconnecting sessions used to grow
+        # without limit and also left an anonymous mark behind for every line.
+        if self.log_buffer.get_char_count() > 1_000_000:
+            start = self.log_buffer.get_start_iter()
+            cut = self.log_buffer.get_iter_at_offset(250_000)
+            self.log_buffer.delete(start, cut)
         mark = self.log_buffer.create_mark(None, self.log_buffer.get_end_iter(), False)
         self.log_view.scroll_to_mark(mark, 0.0, False, 0.0, 1.0)
+        self.log_buffer.delete_mark(mark)
 
     def clear_logs(self) -> None:
         self.log_buffer.set_text('')
@@ -1068,9 +1274,29 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
     def _save_logs_done(self, dialog, result):
         try:
             file = dialog.save_finish(result)
-            if file and file.get_path():
-                Path(file.get_path()).write_text(self._log_text(), encoding='utf-8')
-                self.status_var.set(f'Logs saved to {file.get_path()}')
+            if not file or not file.get_path():
+                return
+            target = file.get_path()
+            # Snapshot GTK-owned text on the GTK thread, then do disk I/O in a
+            # worker. Slow/removable filesystems must not freeze the UI.
+            text = self._log_text()
+
+            def worker() -> None:
+                try:
+                    Path(target).write_text(text, encoding='utf-8')
+                    GLib.idle_add(done, None)
+                except Exception as exc:
+                    GLib.idle_add(done, str(exc))
+
+            def done(error):
+                if error:
+                    self.status_var.set('Could not save logs: ' + error)
+                    self._log('ERROR', 'Could not save logs: ' + error)
+                else:
+                    self.status_var.set(f'Logs saved to {target}')
+                return False
+
+            threading.Thread(target=worker, daemon=True).start()
         except GLib.Error:
             pass
 
@@ -1083,41 +1309,66 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.path_label.set_text(shown)
         self.file_entries.clear()
         self._file_rows.clear()
-        child = self.file_list.get_first_child()
-        while child is not None:
-            nxt = child.get_next_sibling()
-            self.file_list.remove(child)
-            child = nxt
-        for i, entry in enumerate(response.get('items', [])):
-            iid = f'e{i}'
-            self.file_entries[iid] = entry
-            row = Gtk.ListBoxRow()
-            row.zmb_iid = iid
-            line = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-            line.add_css_class('zmb-file-row')
-            is_dir = entry.get('kind') == 'dir'
-            icon = Gtk.Image.new_from_icon_name('folder-symbolic' if is_dir else 'text-x-generic-symbolic')
-            icon.set_pixel_size(24)
-            line.append(icon)
-            name = Gtk.Label(label=entry['name'], xalign=0)
-            name.set_hexpand(True)
-            name.set_ellipsize(Pango.EllipsizeMode.END)
-            line.append(name)
-            typ = Gtk.Label(label='Folder' if is_dir else 'File', xalign=0)
-            typ.add_css_class('zmb-muted')
-            typ.set_width_chars(8)
-            line.append(typ)
-            size = Gtk.Label(label='' if is_dir else human_size(int(entry.get('size', 0))), xalign=1)
-            size.set_width_chars(11)
-            line.append(size)
-            ts = datetime.datetime.fromtimestamp(int(entry.get('mtime', 0))).strftime('%Y-%m-%d %H:%M')
-            modified = Gtk.Label(label=ts, xalign=0)
-            modified.add_css_class('zmb-muted')
-            modified.set_width_chars(16)
-            line.append(modified)
-            row.set_child(line)
-            self._file_rows[iid] = row
-            self.file_list.append(row)
+
+        # Replace the list widget in O(1) from the caller's perspective instead of
+        # synchronously removing thousands of old rows on the GTK thread.
+        new_list = Gtk.ListBox()
+        new_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        new_list.add_css_class('boxed-list')
+        new_list.connect('row-activated', self._file_row_activated)
+        self.file_list = new_list
+        self.file_scroller.set_child(new_list)
+
+        entries = list(response.get('items', []))
+        self._file_render_serial += 1
+        render_token = self._file_render_serial
+        index = 0
+
+        def render_batch():
+            nonlocal index
+            if render_token != self._file_render_serial:
+                return GLib.SOURCE_REMOVE
+            # Large directories used to create every GTK row in one callback,
+            # which can make GNOME report the app as not responding.
+            stop = min(len(entries), index + 80)
+            while index < stop:
+                entry = entries[index]
+                iid = f'e{index}'
+                self.file_entries[iid] = entry
+                row = Gtk.ListBoxRow()
+                row.zmb_iid = iid
+                line = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+                line.add_css_class('zmb-file-row')
+                is_dir = entry.get('kind') == 'dir'
+                icon = Gtk.Image.new_from_icon_name('folder-symbolic' if is_dir else 'text-x-generic-symbolic')
+                icon.set_pixel_size(24)
+                line.append(icon)
+                name = Gtk.Label(label=entry['name'], xalign=0)
+                name.set_hexpand(True)
+                name.set_ellipsize(Pango.EllipsizeMode.END)
+                line.append(name)
+                typ = Gtk.Label(label='Folder' if is_dir else 'File', xalign=0)
+                typ.add_css_class('zmb-muted')
+                typ.set_width_chars(8)
+                line.append(typ)
+                size = Gtk.Label(label='' if is_dir else human_size(int(entry.get('size', 0))), xalign=1)
+                size.set_width_chars(11)
+                line.append(size)
+                try:
+                    ts = datetime.datetime.fromtimestamp(int(entry.get('mtime', 0))).strftime('%Y-%m-%d %H:%M')
+                except (ValueError, OSError, OverflowError):
+                    ts = '?'
+                modified = Gtk.Label(label=ts, xalign=0)
+                modified.add_css_class('zmb-muted')
+                modified.set_width_chars(16)
+                line.append(modified)
+                row.set_child(line)
+                self._file_rows[iid] = row
+                self.file_list.append(row)
+                index += 1
+            return GLib.SOURCE_CONTINUE if index < len(entries) else GLib.SOURCE_REMOVE
+
+        GLib.idle_add(render_batch, priority=GLib.PRIORITY_DEFAULT_IDLE)
 
     def _file_row_activated(self, _listbox, row):
         iid = getattr(row, 'zmb_iid', None)

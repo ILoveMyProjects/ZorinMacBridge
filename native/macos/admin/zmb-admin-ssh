@@ -12,6 +12,11 @@ case "$orig" in
   "zmb-admin repair-launch-agent") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin repair-launch-agent ;;
   "zmb-admin pairing-list") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin pairing-list ;;
   "zmb-admin logs") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin logs ;;
+  "zmb-admin check-update") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin check-update ;;
+  "zmb-admin update-now") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin update-now ;;
+  "zmb-admin set-auto-update off") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin set-auto-update off ;;
+  "zmb-admin set-auto-update notify") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin set-auto-update notify ;;
+  "zmb-admin set-auto-update install") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin set-auto-update install ;;
   "zmb-admin sleep") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin sleep ;;
   "zmb-admin reboot") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin reboot ;;
   "zmb-admin shutdown") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin shutdown ;;

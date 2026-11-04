@@ -4,7 +4,7 @@
 
 ZorinMacBridge is intended for remote access to your own Mac from your own Zorin/Linux workstation on a trusted local network. Do not expose the service port directly to the public Internet.
 
-The core remote session uses no cloud relay, vendor account, telemetry, DNS lookup, UPnP, or router configuration. LAN discovery uses mDNS/Bonjour only while the server is running. GitHub is contacted only when the user explicitly installs or checks for an update.
+The core remote session uses no cloud relay, vendor account, telemetry, DNS lookup, UPnP, or router configuration. LAN discovery uses mDNS/Bonjour only while the server is running. GitHub is contacted for installs/update checks; if P0 automatic updates are enabled, the dedicated update LaunchDaemon checks the official release every 6 hours.
 
 ## Network trust
 
@@ -34,6 +34,8 @@ Deleting the local signing state causes a new identity to be generated and can t
 
 ## Optional P0 unattended administration
 
+Machine matching uses a persistent `server_id` UUID as a discovery handle, while trust is enforced by the pinned desktop TLS certificate fingerprint and the pinned SSH host key. The current DHCP IP address is not treated as identity. Network-interface MAC addresses are deliberately not used as trust anchors.
+
 P0 is disabled until the Mac user explicitly chooses **Enable / Repair** and authorizes the install locally with an administrator password. The root LaunchDaemon does not listen on a TCP/UDP socket. Network administration uses the operating system's Remote Login (SSH) service.
 
 The Zorin client generates a dedicated Ed25519 key per paired Mac. The Mac stores it in `authorized_keys` with `restrict` and a forced command pointing to `/usr/local/libexec/zmb-admin-ssh`. That gateway accepts only the documented ZorinMacBridge administration commands and rejects arbitrary shell commands. The root helper is exposed through a narrow sudoers allow-list.
@@ -44,9 +46,11 @@ P0 does not modify the TCC database, grant Screen Recording/Accessibility, bypas
 
 ## Updates
 
-There is no background update checker. An update request occurs only after an explicit user action.
+The interactive updater remains available, but P0 also supports `Off`, `Notify only`, and `Install automatically`. The automatic checker is a separate root LaunchDaemon with a six-hour interval and no network listener of its own. For unattended installation, the root helper launches the installed ZorinMacBridge application in a tightly scoped update mode with a root-owned staging directory and the root-owned stable local-identity token. The updater selects the official GitHub release, downloads assets over verified TLS, verifies SHA-256, verifies the transport code signature, bundle identifier and release version, and applies that Mac's persistent local designated requirement before replacement. No verified/staged app is handed through a user-writable directory.
 
-The updater downloads the matching release package and checksum from GitHub, verifies SHA-256, verifies the macOS transport signature and bundle identifier, applies the Mac's persistent local signature to a staged copy, verifies the resulting signature/designated requirement, and only then asks for administrator authorization to replace the installed application.
+The root helper accepts only fixed update commands through the forced-command SSH gateway. Before replacement it verifies the staged app again, moves the existing app to a backup, installs the staged app, refreshes the P0 helper payload embedded in the new application, and rolls the app bundle back if installation/helper refresh fails. Automatic updates do not grant arbitrary root shell access and do not bypass TCC or FileVault. The transport signature is intentionally ad-hoc; therefore release authenticity ultimately depends on control of the GitHub repository/release channel in addition to HTTPS and the published checksum. A future independent release-signing key would provide a stronger supply-chain trust boundary.
+
+The first local P0 setup still requires administrator authorization. After that, a paired Zorin client can run **Check update**, **Update now**, or change the automatic-update mode without a local monitor or another administrator-password prompt.
 
 Linux package installation continues to use the system package manager and its normal administrator authorization flow.
 

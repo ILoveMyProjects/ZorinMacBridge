@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
@@ -19,8 +20,9 @@ PROTOCOL_VERSION = "2"
 
 ADMIN_ACTIONS = {
     "status", "start-zmb", "stop-zmb", "restart-zmb", "repair-launch-agent",
-    "pairing-list", "logs", "sleep", "reboot", "shutdown",
+    "pairing-list", "logs", "check-update", "update-now", "sleep", "reboot", "shutdown",
 }
+AUTO_UPDATE_MODES = {"off", "notify", "install"}
 
 
 class AdminError(RuntimeError):
@@ -28,22 +30,46 @@ class AdminError(RuntimeError):
 
 
 def _run(argv: list[str], *, timeout: int = 25, env: dict | None = None, input_data: str | None = None) -> subprocess.CompletedProcess[str]:
+    """Run a helper with a hard wall-clock timeout.
+
+    The process is placed in its own session so a timeout can terminate the whole
+    process group (for example ssh plus any helper it spawned), not only the
+    immediate wrapper process. This keeps a failed remote action from leaving the
+    GTK client stuck in a permanent busy state.
+    """
     try:
-        return subprocess.run(
+        proc = subprocess.Popen(
             argv,
             text=True,
-            input=input_data,
+            stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL if input_data is None else None,
-            timeout=timeout,
             env=env,
-            check=False,
+            start_new_session=True,
         )
     except FileNotFoundError as exc:
         raise AdminError(f"Required command not found: {argv[0]}") from exc
+
+    try:
+        stdout, stderr = proc.communicate(input=input_data, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        raise AdminError(f"Timed out while running {argv[0]}") from exc
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        stdout, stderr = proc.communicate()
+        detail = (stderr or stdout or '').strip()
+        message = f"Timed out after {timeout}s while running {Path(argv[0]).name}"
+        if detail:
+            message += f": {detail}"
+        raise AdminError(message) from exc
+
+    return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
 
 
 def ensure_tools() -> None:
@@ -182,7 +208,7 @@ def scan_host_keys(host: str, port: int = 22) -> dict:
     ensure_tools()
     host = _validate_host(host)
     port = _validate_port(port)
-    p = _run(["ssh-keyscan", "-T", "5", "-p", str(port), host], timeout=10)
+    p = _run(["ssh-keyscan", "-T", "4", "-p", str(port), host], timeout=7)
     lines = [line.strip() for line in p.stdout.splitlines() if line.strip() and not line.startswith("#")]
     if not lines:
         detail = (p.stderr or "No SSH host key returned").strip()
@@ -194,7 +220,7 @@ def scan_host_keys(host: str, port: int = 22) -> dict:
             fp.write(line + "\n")
         temp_name = fp.name
     try:
-        q = _run(["ssh-keygen", "-lf", temp_name, "-E", "sha256"], timeout=10)
+        q = _run(["ssh-keygen", "-lf", temp_name, "-E", "sha256"], timeout=7)
         if q.returncode != 0:
             raise AdminError((q.stderr or q.stdout or "Could not fingerprint SSH host key").strip())
         rows = q.stdout.splitlines()
@@ -274,18 +300,23 @@ def pair_device(*, server_id: str, server_name: str, host: str, user: str, passw
 
     restricted = _restricted_authorized_key(pub.read_text(encoding="utf-8"), device_id)
     marker = f"ZorinMacBridge-Admin:{device_id}"
+    # Replace any previous key for this deterministic device id instead of only
+    # checking the comment marker. This makes re-pairing recover correctly after
+    # the local Ed25519 key was regenerated. The command runs as the target user,
+    # not root, and uses mktemp+mv for an atomic authorized_keys update.
     remote = (
-        "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; "
-        f"grep -qF {shlex.quote(marker)} ~/.ssh/authorized_keys || "
-        f"printf '%s\\n' {shlex.quote(restricted)} >> ~/.ssh/authorized_keys; "
-        "chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys"
+        "umask 077; mkdir -p ~/.ssh; chmod 700 ~/.ssh; touch ~/.ssh/authorized_keys; "
+        "tmp=$(/usr/bin/mktemp ~/.ssh/.zmb-authorized_keys.XXXXXX) || exit 73; "
+        f"/usr/bin/awk -v marker={shlex.quote(marker)} 'index($0, marker)==0 {{print}}' ~/.ssh/authorized_keys > \"$tmp\" || {{ rm -f \"$tmp\"; exit 74; }}; "
+        f"printf '%s\n' {shlex.quote(restricted)} >> \"$tmp\" || {{ rm -f \"$tmp\"; exit 74; }}; "
+        "chmod 600 \"$tmp\"; mv -f \"$tmp\" ~/.ssh/authorized_keys"
     )
 
     root = profile_dir(pid)
     env, secret, askpass = _askpass_env(password, root)
     try:
         argv = [
-            "setsid", "-w", "ssh",
+            "ssh",
             "-p", str(ssh_port),
             "-o", f"UserKnownHostsFile={known}",
             "-o", f"HostKeyAlias={host_key_alias}",
@@ -293,12 +324,15 @@ def pair_device(*, server_id: str, server_name: str, host: str, user: str, passw
             "-o", "PubkeyAuthentication=no",
             "-o", "PreferredAuthentications=keyboard-interactive,password",
             "-o", "NumberOfPasswordPrompts=1",
-            "-o", "ConnectTimeout=8",
+            "-o", "ConnectionAttempts=1",
+            "-o", "ConnectTimeout=6",
+            "-o", "ServerAliveInterval=5",
+            "-o", "ServerAliveCountMax=1",
+            "-o", "RequestTTY=no",
+            "-o", "LogLevel=ERROR",
             f"{user}@{host}", remote,
         ]
-        if shutil.which("setsid") is None:
-            argv = argv[2:]
-        p = _run(argv, timeout=35, env=env)
+        p = _run(argv, timeout=25, env=env)
     finally:
         for path in (secret, askpass):
             try:
@@ -335,6 +369,8 @@ def pair_device(*, server_id: str, server_name: str, host: str, user: str, passw
 def _remote_command(action: str, arg: str | None = None) -> str:
     if action in ADMIN_ACTIONS and arg is None:
         return f"{REMOTE_PREFIX} {action}"
+    if action == "set-auto-update" and arg in AUTO_UPDATE_MODES:
+        return f"{REMOTE_PREFIX} set-auto-update {arg}"
     if action == "unpair" and arg and re.fullmatch(r"[A-Za-z0-9._-]+", arg):
         return f"{REMOTE_PREFIX} unpair {arg}"
     raise AdminError(f"Unsupported admin action: {action}")
@@ -348,31 +384,35 @@ def _ssh_base(profile: dict) -> list[str]:
         "ssh", "-p", str(profile.get("ssh_port", 22)),
         "-i", os.path.expanduser(str(profile["key"])),
         "-o", "IdentitiesOnly=yes",
+        "-o", "BatchMode=yes",
         "-o", "PasswordAuthentication=no",
         "-o", "KbdInteractiveAuthentication=no",
+        "-o", "ConnectionAttempts=1",
         "-o", f"UserKnownHostsFile={os.path.expanduser(str(profile['known_hosts']))}",
         "-o", f"HostKeyAlias={profile.get('host_key_alias', 'zmb-' + str(profile.get('profile_id', 'device')))}",
         "-o", "StrictHostKeyChecking=yes",
-        "-o", "ConnectTimeout=8",
-        "-o", "ServerAliveInterval=15",
-        "-o", "ServerAliveCountMax=2",
+        "-o", "ConnectTimeout=5",
+        "-o", "ServerAliveInterval=5",
+        "-o", "ServerAliveCountMax=1",
+        "-o", "RequestTTY=no",
+        "-o", "LogLevel=ERROR",
         f"{profile['user']}@{profile['host']}",
     ]
 
 
-def run_action_for_profile(profile: dict, action: str, *, arg: str | None = None, timeout: int = 25) -> subprocess.CompletedProcess[str]:
+def run_action_for_profile(profile: dict, action: str, *, arg: str | None = None, timeout: int = 18) -> subprocess.CompletedProcess[str]:
     ensure_tools()
     return _run(_ssh_base(profile) + [_remote_command(action, arg)], timeout=timeout)
 
 
-def run_action(*, server_id: str, host: str, action: str, timeout: int = 25) -> subprocess.CompletedProcess[str]:
+def run_action(*, server_id: str, host: str, action: str, arg: str | None = None, timeout: int = 18) -> subprocess.CompletedProcess[str]:
     profile = get_profile(server_id, host)
     if not profile:
         raise AdminError("This Mac is not paired for System administration")
     # Discovery can reveal a new DHCP address for the same persistent server id.
     if host and profile.get("host") != host:
         profile = save_profile(server_id, host, {**profile, "host": host})
-    return run_action_for_profile(profile, action, timeout=timeout)
+    return run_action_for_profile(profile, action, arg=arg, timeout=timeout)
 
 
 def parse_status(text: str) -> dict[str, str]:
@@ -388,7 +428,7 @@ def parse_status(text: str) -> dict[str, str]:
 
 
 def get_status_for_profile(profile: dict) -> dict[str, str]:
-    p = run_action_for_profile(profile, "status", timeout=20)
+    p = run_action_for_profile(profile, "status", timeout=12)
     if p.returncode != 0:
         raise AdminError((p.stderr or p.stdout or f"status exited {p.returncode}").strip())
     data = parse_status(p.stdout)
@@ -447,7 +487,7 @@ def revoke_current_device(*, server_id: str, host: str) -> None:
         return
     device_id = str(profile.get("device_id") or "")
     if device_id:
-        p = run_action_for_profile(profile, "unpair", arg=device_id, timeout=20)
+        p = run_action_for_profile(profile, "unpair", arg=device_id, timeout=15)
         if p.returncode != 0:
             raise AdminError((p.stderr or p.stdout or "Could not revoke paired key").strip())
     forget_profile(server_id, host)

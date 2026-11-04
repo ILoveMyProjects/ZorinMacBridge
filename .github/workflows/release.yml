@@ -31,7 +31,7 @@ jobs:
             python3 python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
             python3-pil python3-pil.imagetk python3-av python3-certifi \
             python3-keyring python3-secretstorage python3-zeroconf python3-pystray \
-            python3-tk wl-clipboard xclip xvfb pkexec
+            python3-tk wl-clipboard xclip xvfb pkexec openssh-client
       - name: Run Linux tests
         run: |
           /usr/bin/python3 -m compileall -q .
@@ -62,6 +62,7 @@ jobs:
                    "$PKG/usr/share/icons/hicolor/256x256/apps"
 
           chmod 0755 "$PKG/DEBIAN"
+          chmod g-s "$PKG/DEBIAN"  # clear inherited setgid on unusual build filesystems
           install -m 0644 linux_client_gtk.py linux_client.py protocol.py discovery.py resources.py \
             tray_icon.py updates.py settings.py secret_store.py zmb_admin_backend.py zmb_system_page.py "$APP/"
           install -m 0644 VERSION "$APP/VERSION"
@@ -109,22 +110,16 @@ jobs:
           name: linux-amd64
           path: release/*
 
-  macos-signing-preflight:
+  macos-arm64:
     needs: [release-source-check]
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Prove stable explicit designated-requirement signing works
+      - name: Verify macOS transport signing
         run: |
           set -euo pipefail
           bash -n scripts/sign-macos-transport.sh
           scripts/sign-macos-transport.sh --self-test
-
-  macos-arm64:
-    needs: [macos-signing-preflight]
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -171,9 +166,13 @@ jobs:
             --collect-all zeroconf \
             --collect-all pystray \
             --hidden-import pystray._darwin \
+            --hidden-import mac_terminal_setup \
             mac_server_gui.py
 
           /usr/libexec/PlistBuddy -c "Add :NSScreenCaptureUsageDescription string ZorinMacBridge streams this Mac display only to an authenticated LAN client." 'dist/ZorinMacBridge Server.app/Contents/Info.plist' || true
+          APP_VERSION="$(cat VERSION)"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" 'dist/ZorinMacBridge Server.app/Contents/Info.plist' 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $APP_VERSION" 'dist/ZorinMacBridge Server.app/Contents/Info.plist'
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_VERSION" 'dist/ZorinMacBridge Server.app/Contents/Info.plist' 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $APP_VERSION" 'dist/ZorinMacBridge Server.app/Contents/Info.plist'
           echo '=== macOS phase: transport signing ==='
           scripts/sign-macos-transport.sh 'dist/ZorinMacBridge Server.app'
           echo '=== macOS phase: frozen-app self tests ==='
@@ -201,90 +200,9 @@ jobs:
           name: macos-arm64
           path: release/*
 
-  macos-intel:
-    needs: [macos-signing-preflight]
-    runs-on: macos-15-intel
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install build dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install pyinstaller Pillow==12.3.0 cryptography==50.0.1 certifi 'zeroconf>=0.147,<1' 'pystray>=0.19.5,<1'
-      - name: Build macOS Intel server
-        run: |
-          mkdir -p build
-          MACOSX_DEPLOYMENT_TARGET=13.0 swiftc -O -emit-library \
-            -framework ScreenCaptureKit \
-            -framework VideoToolbox \
-            -framework CoreMedia \
-            -framework CoreVideo \
-            -framework AppKit \
-            native/macos/ZMBStreamerLib.swift \
-            -o build/libzmb_streamer.dylib
-          test -f build/libzmb_streamer.dylib
-
-          mkdir -p build/AppIcon.iconset
-          sips -z 16 16 assets/server.png --out build/AppIcon.iconset/icon_16x16.png >/dev/null
-          sips -z 32 32 assets/server.png --out build/AppIcon.iconset/icon_16x16@2x.png >/dev/null
-          sips -z 32 32 assets/server.png --out build/AppIcon.iconset/icon_32x32.png >/dev/null
-          sips -z 64 64 assets/server.png --out build/AppIcon.iconset/icon_32x32@2x.png >/dev/null
-          sips -z 128 128 assets/server.png --out build/AppIcon.iconset/icon_128x128.png >/dev/null
-          sips -z 256 256 assets/server.png --out build/AppIcon.iconset/icon_128x128@2x.png >/dev/null
-          sips -z 256 256 assets/server.png --out build/AppIcon.iconset/icon_256x256.png >/dev/null
-          sips -z 512 512 assets/server.png --out build/AppIcon.iconset/icon_256x256@2x.png >/dev/null
-          sips -z 512 512 assets/server.png --out build/AppIcon.iconset/icon_512x512.png >/dev/null
-          cp assets/server.png build/AppIcon.iconset/icon_512x512@2x.png
-          iconutil -c icns build/AppIcon.iconset -o build/server.icns
-
-          pyinstaller --noconfirm --clean --windowed \
-            --name 'ZorinMacBridge Server' \
-            --osx-bundle-identifier com.ilovemyprojects.zorinmacbridge.server \
-            --icon build/server.icns \
-            --add-data 'assets/server.png:assets' \
-            --add-data 'VERSION:.' \
-            --add-data 'native/macos/admin:native/macos/admin' \
-            --add-binary 'build/libzmb_streamer.dylib:.' \
-            --collect-all cryptography \
-            --collect-all certifi \
-            --collect-all zeroconf \
-            --collect-all pystray \
-            --hidden-import pystray._darwin \
-            mac_server_gui.py
-
-          /usr/libexec/PlistBuddy -c "Add :NSScreenCaptureUsageDescription string ZorinMacBridge streams this Mac display only to an authenticated LAN client." 'dist/ZorinMacBridge Server.app/Contents/Info.plist' || true
-          echo '=== macOS phase: transport signing ==='
-          scripts/sign-macos-transport.sh 'dist/ZorinMacBridge Server.app'
-          echo '=== macOS phase: frozen-app self tests ==='
-          'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-streamer-load
-          'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-update-tls
-          'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-permission-apis
-          echo '=== macOS phase: create stable per-Mac designated requirement ==='
-          'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-local-signing-identity
-          echo '=== macOS phase: stable local-DR round trip ==='
-          rm -rf 'build/local-sign-test'
-          mkdir -p 'build/local-sign-test'
-          ditto 'dist/ZorinMacBridge Server.app' 'build/local-sign-test/ZorinMacBridge Server.app'
-          'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --local-sign-app 'build/local-sign-test/ZorinMacBridge Server.app'
-          codesign --verify --deep --strict --verbose=2 'build/local-sign-test/ZorinMacBridge Server.app'
-          codesign -d -r- 'build/local-sign-test/ZorinMacBridge Server.app' 2>&1 | grep -F 'info[ZMBLocalIdentity]'
-          mkdir -p release build/dmgroot
-          cp -R 'dist/ZorinMacBridge Server.app' build/dmgroot/
-          ln -s /Applications build/dmgroot/Applications
-          hdiutil create -volname 'ZorinMacBridge Server' \
-            -srcfolder build/dmgroot \
-            -ov -format UDZO 'release/ZorinMacBridge-Server_macOS-x86_64.dmg'
-          (cd release && shasum -a 256 * > SHA256SUMS-macOS-x86_64.txt)
-      - uses: actions/upload-artifact@v4
-        with:
-          name: macos-intel
-          path: release/*
-
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [linux-amd64, macos-arm64, macos-intel]
+    needs: [linux-amd64, macos-arm64]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4

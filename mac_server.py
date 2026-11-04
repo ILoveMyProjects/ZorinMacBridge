@@ -11,6 +11,7 @@ import os
 import platform
 import shutil
 import socket
+import select
 import ssl
 import struct
 import subprocess
@@ -436,10 +437,24 @@ class NativeStreamerLibrary:
         self.lib.zmb_streamer_destroy.restype = None
 
 
-def _read_exact_file(stream, size: int) -> bytes:
+def _read_exact_file(stream, size: int, *, timeout: float = 15.0) -> bytes:
+    """Read exactly *size* bytes from the native pipe with a hard deadline.
+
+    A native ScreenCaptureKit encoder can theoretically remain alive while no
+    longer producing pipe output. A plain ``stream.read`` would then block the
+    video-session thread forever and delay disconnect/recovery.
+    """
     out = bytearray()
+    deadline = time.monotonic() + max(0.5, float(timeout))
+    fd = stream.fileno()
     while len(out) < size:
-        chunk = stream.read(size - len(out))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f'native streamer pipe stalled for {timeout:g}s')
+        readable, _, _ = select.select([fd], [], [], min(1.0, remaining))
+        if not readable:
+            continue
+        chunk = os.read(fd, size - len(out))
         if not chunk:
             raise EOFError('native streamer closed its output')
         out.extend(chunk)
@@ -864,15 +879,33 @@ def serve(bind: str, port: int, share: Path, fps: float, max_width: int, bitrate
     if ready_callback is not None:
         ready_callback(fingerprint)
 
+    # Bound concurrent pre-auth/TLS client threads. A LAN peer should not be able
+    # to exhaust the server merely by opening many sockets and waiting for the
+    # handshake/auth timeout. One normal ZMB client uses only a few connections.
+    client_slots = threading.BoundedSemaphore(16)
+
+    def client_worker(raw_sock, peer_addr) -> None:
+        try:
+            handle_client(raw_sock, peer_addr, context, password, share, args, log)
+        finally:
+            client_slots.release()
+
     try:
         while stop_event is None or not stop_event.is_set():
             try:
                 raw, addr = listener.accept()
             except socket.timeout:
                 continue
+            if not client_slots.acquire(blocking=False):
+                log(f'[reject] connection limit reached for {addr[0]}')
+                try:
+                    raw.close()
+                except OSError:
+                    pass
+                continue
             threading.Thread(
-                target=handle_client,
-                args=(raw, addr, context, password, share, args, log),
+                target=client_worker,
+                args=(raw, addr),
                 daemon=True,
             ).start()
     finally:

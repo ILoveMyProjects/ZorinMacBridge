@@ -1,5 +1,5 @@
 from pathlib import Path
-from discovery import _private_ipv4, DiscoveredServer
+from discovery import _private_ipv4, DiscoveredServer, _merge_server
 from settings import PasswordVerifier
 from types import SimpleNamespace
 from mac_server import video_options_from_auth
@@ -13,9 +13,14 @@ def main() -> None:
     assert not _private_ipv4('8.8.8.8')
     assert not _private_ipv4('github.com')
     assert _version_tuple('v0.4.0') > _version_tuple('0.3.9')
-    item = DiscoveredServer('Dev-Mac', '192.168.1.50', 45950, '0.4.0', 'server-123')
-    assert '192.168.1.50:45950' in item.label
+    item = DiscoveredServer('Dev-Mac', '192.168.1.50', 45950, '0.4.0', 'server-123', hostname='dev-mac.local', desktop_available=True)
+    assert 'dev-mac.local [192.168.1.50]:45950' in item.label
     assert item.server_id == 'server-123'
+    admin = DiscoveredServer('Dev-Mac', '192.168.1.51', 45950, server_id='server-123', hostname='dev-mac.local', desktop_available=False, admin_available=True, admin_port=22)
+    merged = _merge_server(item, admin)
+    assert merged.server_id == 'server-123'
+    assert merged.desktop_available and merged.admin_available
+    assert merged.hostname == 'dev-mac.local'
     verifier = PasswordVerifier.from_password('correct horse battery staple', iterations=10_000)
     assert verifier.verify('correct horse battery staple')
     assert not verifier.verify('wrong')

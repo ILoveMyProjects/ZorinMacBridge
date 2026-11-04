@@ -25,7 +25,11 @@ The actual ScreenCaptureKit desktop server remains in the logged-in user's GUI s
 GitHub Actions keeps producing the same artifact names:
 
 - `ZorinMacBridge-Client_linux-amd64.deb`
-- `ZorinMacBridge-Server_macOS-arm64.dmg`
-- `ZorinMacBridge-Server_macOS-x86_64.dmg`
+- `ZorinMacBridge-Server_macOS-arm64.dmg` (Apple Silicon only)
 
-The existing in-app updater therefore does not need a second update mechanism.
+The regular in-app updater remains available, while P0 adds a headless macOS update path through the same release/checksum/signature rules. A dedicated `com.ilovemyprojects.zorinmacbridge.update` LaunchDaemon runs every six hours and obeys the stored `AUTO_UPDATE=off|notify|install` mode. Remote `Check update` / `Update now` commands use the same restricted SSH gateway as other P0 administration.
+
+
+## Discovery identity
+
+P0 advertises `_zorinmacbridge-admin._tcp` from the system LaunchDaemon. The normal user-session desktop advertises `_zorinmacbridge._tcp`. Both carry the same persistent `server_id`; the client merges them and refreshes the current DHCP IP. The UUID is a correlation handle, not a trust secret: TLS certificate pinning and SSH host-key pinning remain authoritative. MAC addresses are not used as persistent machine identity.

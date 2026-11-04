@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+if [ "$(uname -s)" != "Darwin" ]; then
+  echo "This setup script is for macOS only." >&2
+  exit 1
+fi
+if [ "$(uname -m)" != "arm64" ]; then
+  echo "ZorinMacBridge macOS development supports Apple Silicon (arm64) only." >&2
+  exit 1
+fi
 command -v python3 >/dev/null 2>&1 || { echo 'python3 is required on macOS.' >&2; exit 1; }
 python3 -m venv .venv
 . .venv/bin/activate

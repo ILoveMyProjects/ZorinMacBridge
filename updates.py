@@ -9,6 +9,7 @@ import ssl
 import sys
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -48,6 +49,14 @@ class InstallResult:
     installed: str
     package_name: str
     restart_recommended: bool = True
+
+
+@dataclass(frozen=True)
+class PreparedMacUpdate:
+    current: str
+    latest: str
+    available: bool
+    staged_app: str = ''
 
 
 def current_version() -> str:
@@ -132,9 +141,11 @@ def updater_tls_self_test() -> str:
 
 
 def check_for_updates(timeout: float = 8.0) -> UpdateInfo:
-    """Perform an explicit, user-initiated GitHub release check.
+    """Read the latest official GitHub release metadata.
 
-    This function is intentionally never called in the background or at app start.
+    The desktop UI calls this after an explicit user action. P0 may also call it
+    from its scheduled root update service when the configured mode is Notify or
+    Install automatically.
     """
     with _urlopen(_request(LATEST_API), timeout=timeout) as response:
         data = json.load(response)
@@ -180,9 +191,7 @@ def _asset_names() -> tuple[str, str, str]:
     if system == 'darwin':
         if machine in {'arm64', 'aarch64'}:
             return ('macos', 'ZorinMacBridge-Server_macOS-arm64.dmg', 'SHA256SUMS-macOS-arm64.txt')
-        if machine in {'x86_64', 'amd64'}:
-            return ('macos', 'ZorinMacBridge-Server_macOS-x86_64.dmg', 'SHA256SUMS-macOS-x86_64.txt')
-        raise RuntimeError(f'Unsupported macOS architecture for automatic updates: {machine}')
+        raise RuntimeError(f'ZorinMacBridge supports macOS on Apple Silicon (arm64) only; detected: {machine}')
 
     raise RuntimeError(f'Automatic updates are not supported on {platform.system()}.')
 
@@ -194,22 +203,34 @@ def _emit(progress: ProgressCallback | None, message: str) -> None:
 
 def _download(asset: ReleaseAsset, target: Path, progress: ProgressCallback | None, timeout: float) -> None:
     _emit(progress, f'Downloading {asset.name}…')
+    # urllib's timeout is per socket operation, not a total transfer deadline.
+    # Keep a generous hard deadline as well so a trickling/broken connection can
+    # never leave an update worker alive forever.
+    deadline = time.monotonic() + max(300.0, min(1800.0, float(timeout) * 30.0))
     with _urlopen(_request(asset.download_url), timeout=timeout) as response, target.open('wb') as out:
         total_header = response.headers.get('Content-Length')
         total = int(total_header) if total_header and total_header.isdigit() else asset.size
         received = 0
         last_reported = -1
         while True:
+            if time.monotonic() > deadline:
+                raise TimeoutError(f'Download of {asset.name} exceeded the hard transfer deadline.')
             chunk = response.read(1024 * 1024)
             if not chunk:
                 break
             out.write(chunk)
             received += len(chunk)
+            if asset.size is not None and received > asset.size:
+                raise RuntimeError(f'Downloaded {asset.name} is larger than the size declared by GitHub.')
             if total:
                 pct = min(100, int(received * 100 / total))
                 if pct // 10 != last_reported // 10:
                     last_reported = pct
                     _emit(progress, f'Downloading {asset.name}: {pct}%')
+        if asset.size is not None and received != asset.size:
+            raise RuntimeError(
+                f'Downloaded {asset.name} has unexpected size: got {received}, expected {asset.size} bytes.'
+            )
     _emit(progress, f'Downloaded {asset.name}.')
 
 
@@ -297,6 +318,7 @@ def _install_linux(package_path: Path, progress: ProgressCallback | None) -> Non
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         check=False,
+        timeout=600,
     )
     if completed.returncode != 0:
         output = (completed.stdout or '').strip()
@@ -325,7 +347,7 @@ def _current_macos_app() -> Path | None:
 def _codesign_output(app: Path) -> str:
     completed = subprocess.run(
         ['/usr/bin/codesign', '-dvvv', str(app)],
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=60,
     )
     if completed.returncode != 0:
         raise RuntimeError(f'Could not inspect code signature for {app}:\n{completed.stdout.strip()}')
@@ -335,7 +357,7 @@ def _codesign_output(app: Path) -> str:
 def _designated_requirement(app: Path) -> str:
     completed = subprocess.run(
         ['/usr/bin/codesign', '-d', '-r-', str(app)],
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=60,
     )
     text = completed.stdout or ''
     marker = 'designated =>'
@@ -355,7 +377,7 @@ def _verify_requirement(app: Path, requirement: str, label: str) -> None:
     try:
         completed = subprocess.run(
             ['/usr/bin/codesign', '--verify', '--strict', '--deep', '-R', str(req_path), str(app)],
-            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=60,
         )
         if completed.returncode != 0:
             raise RuntimeError(
@@ -369,7 +391,7 @@ def _verify_requirement(app: Path, requirement: str, label: str) -> None:
             pass
 
 
-def _verify_macos_transport_app(app: Path, progress: ProgressCallback | None) -> None:
+def _verify_macos_transport_app(app: Path, progress: ProgressCallback | None, expected_version: str | None = None) -> None:
     """Verify the release artifact before it is re-signed for this Mac."""
     import plistlib
 
@@ -379,18 +401,24 @@ def _verify_macos_transport_app(app: Path, progress: ProgressCallback | None) ->
     _emit(progress, 'Verifying downloaded macOS application…')
     completed = subprocess.run(
         [str(codesign), '--verify', '--strict', '--deep', '--verbose=2', str(app)],
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=120,
     )
     if completed.returncode != 0:
         raise RuntimeError('Downloaded macOS app has an invalid transport signature. Update aborted.\n' + (completed.stdout or '').strip())
     info = app / 'Contents' / 'Info.plist'
     try:
         with info.open('rb') as fh:
-            bundle_id = plistlib.load(fh).get('CFBundleIdentifier')
+            plist = plistlib.load(fh)
+        bundle_id = plist.get('CFBundleIdentifier')
+        bundle_version = str(plist.get('CFBundleShortVersionString') or plist.get('CFBundleVersion') or '').strip()
     except Exception as exc:
         raise RuntimeError(f'Could not read downloaded app Info.plist: {exc}') from exc
     if bundle_id != 'com.ilovemyprojects.zorinmacbridge.server':
         raise RuntimeError(f'Unexpected macOS bundle identifier: {bundle_id!r}. Update aborted.')
+    if expected_version and _version_tuple(bundle_version) != _version_tuple(expected_version):
+        raise RuntimeError(
+            f'Downloaded macOS app version {bundle_version or "<missing>"!r} does not match release {expected_version!r}. Update aborted.'
+        )
 
 
 def _verify_macos_update_identity(current_app: Path | None, new_app: Path, progress: ProgressCallback | None) -> None:
@@ -419,7 +447,76 @@ def _verify_macos_update_identity(current_app: Path | None, new_app: Path, progr
     _emit(progress, 'Stable designated requirement verified: privacy permissions remain attached to the same app identity.')
 
 
-def _install_macos(package_path: Path, progress: ProgressCallback | None) -> None:
+def prepare_macos_update_for_root(
+    stage_root: Path,
+    progress: ProgressCallback | None = None,
+    timeout: float = 30.0,
+) -> PreparedMacUpdate:
+    """Prepare a verified, locally-signed macOS update without installing it.
+
+    This is the P0/root-helper handoff used for unattended updates. Network
+    retrieval, GitHub release selection, checksum verification, transport code
+    signature verification and this Mac's stable local designated requirement are
+    handled by the normal frozen app executable. In P0 unattended mode that
+    executable is launched by the root helper with a root-owned staging directory
+    and a root-owned local-identity token, so no user-writable handoff exists
+    between verification/signing and replacement in /Applications.
+    """
+    if platform.system().lower() != 'darwin' or platform.machine().lower() not in {'arm64', 'aarch64'}:
+        raise RuntimeError('P0 macOS update staging is supported on Apple Silicon Macs only.')
+
+    stage_root = Path(stage_root).resolve()
+    stage_root.mkdir(parents=True, exist_ok=True)
+    info = check_for_updates(timeout=min(timeout, 15.0))
+    if not info.available:
+        return PreparedMacUpdate(current=info.current, latest=info.latest, available=False)
+
+    with tempfile.TemporaryDirectory(prefix='zorinmacbridge-p0-download-', dir=str(stage_root)) as tmp:
+        temp_dir = Path(tmp)
+        kind, package_path = _download_and_verify(info, temp_dir, progress, timeout)
+        if kind != 'macos':
+            raise RuntimeError(f'Unexpected updater platform while preparing macOS update: {kind}')
+
+        hdiutil = Path('/usr/bin/hdiutil')
+        if not hdiutil.exists():
+            raise RuntimeError('Required macOS tool hdiutil was not found.')
+        mount_dir = temp_dir / 'mounted-dmg'
+        mount_dir.mkdir(exist_ok=True)
+        mounted = False
+        try:
+            _emit(progress, 'Mounting verified macOS release…')
+            completed = subprocess.run(
+                [str(hdiutil), 'attach', str(package_path), '-nobrowse', '-readonly', '-mountpoint', str(mount_dir), '-quiet'],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=120,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError('Could not mount the update DMG:\n' + (completed.stdout or '').strip())
+            mounted = True
+
+            source_app = mount_dir / 'ZorinMacBridge Server.app'
+            if not source_app.is_dir():
+                raise RuntimeError('The downloaded DMG does not contain ZorinMacBridge Server.app.')
+            _verify_macos_transport_app(source_app, progress, expected_version=info.latest)
+
+            from mac_local_signing import stage_and_sign
+            final_stage = stage_root / 'prepared'
+            final_stage.mkdir(parents=True, exist_ok=True)
+            _emit(progress, "Applying this Mac's persistent local code identity…")
+            signed_app, identity = stage_and_sign(source_app, final_stage)
+            _emit(progress, f'Stable local DR ready: {identity.cert_sha256[:16]}…')
+            _verify_macos_update_identity(_current_macos_app(), signed_app, progress)
+            return PreparedMacUpdate(
+                current=info.current, latest=info.latest, available=True, staged_app=str(signed_app),
+            )
+        finally:
+            if mounted:
+                subprocess.run(
+                    [str(hdiutil), 'detach', str(mount_dir), '-quiet'],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=30,
+                )
+
+
+def _install_macos(package_path: Path, progress: ProgressCallback | None, expected_version: str | None = None) -> None:
     hdiutil = '/usr/bin/hdiutil'
     osascript = '/usr/bin/osascript'
     app_name = 'ZorinMacBridge Server.app'
@@ -443,6 +540,7 @@ def _install_macos(package_path: Path, progress: ProgressCallback | None) -> Non
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             check=False,
+            timeout=120,
         )
         if completed.returncode != 0:
             raise RuntimeError('Could not mount the update DMG:\n' + (completed.stdout or '').strip())
@@ -452,7 +550,7 @@ def _install_macos(package_path: Path, progress: ProgressCallback | None) -> Non
         if not source_app.is_dir():
             raise RuntimeError(f'The downloaded DMG does not contain {app_name}.')
 
-        _verify_macos_transport_app(source_app, progress)
+        _verify_macos_transport_app(source_app, progress, expected_version=expected_version)
         _emit(progress, 'Applying this Mac\'s persistent local code identity…')
         signed_app, identity = stage_and_sign(source_app, stage_root)
         _emit(progress, f'Stable local DR ready: {identity.cert_sha256[:16]}…')
@@ -472,6 +570,7 @@ def _install_macos(package_path: Path, progress: ProgressCallback | None) -> Non
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             check=False,
+            timeout=600,
         )
         if completed.returncode != 0:
             output = (completed.stdout or '').strip()
@@ -484,6 +583,7 @@ def _install_macos(package_path: Path, progress: ProgressCallback | None) -> Non
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
+                timeout=30,
             )
 
 def install_update(
@@ -491,10 +591,11 @@ def install_update(
     progress: ProgressCallback | None = None,
     timeout: float = 30.0,
 ) -> InstallResult:
-    """Download, verify, and install a newer release after explicit user approval.
+    """Download, verify, and install a newer release from the interactive app.
 
-    No update work is performed automatically. Callers must invoke this only after the
-    user manually requests an update and confirms installation.
+    This function is the manual desktop updater and may show the normal local
+    authorization flow. P0 unattended updates use prepare_macos_update_for_root()
+    plus the restricted root helper instead.
     """
     if not info.available:
         raise RuntimeError(f'No newer version is available (installed: {info.current}, latest: {info.latest}).')
@@ -506,7 +607,7 @@ def install_update(
         if kind == 'linux':
             _install_linux(package_path, progress)
         elif kind == 'macos':
-            _install_macos(package_path, progress)
+            _install_macos(package_path, progress, expected_version=info.latest)
         else:
             raise RuntimeError(f'Unsupported updater platform: {kind}')
 

@@ -41,6 +41,9 @@ assert (root / 'scripts/sign-macos-transport.sh').exists()
 assert 'Require stable macOS signing identity' not in release
 assert 'MACOS_CERTIFICATE_P12_BASE64' not in release
 assert '--self-test-local-signing-identity' in release
+assert 'macos-intel' not in release
+assert 'macos-15-intel' not in release
+assert 'ZorinMacBridge-Server_macOS-x86_64.dmg' not in release
 assert 'bootstrap_installed_app_identity' in server
 
 assert 'Auto reconnect' in client
@@ -50,3 +53,6 @@ assert 'def _schedule_auto_reconnect' in client
 assert 'def _fullscreen_bar_pressed' in client
 assert 'and not self.fullscreen_active' in client
 print('native UI static tests: OK')
+
+assert 'ZMB session password' in client
+assert 'ZorinMacBridge session password' in server
