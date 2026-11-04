@@ -135,7 +135,7 @@ The project deliberately does not use a network-interface MAC address as the per
 
 ## Unattended access / recovery (P0)
 
-The remote desktop still runs in the logged-in macOS user session because ScreenCaptureKit and GUI input belong to that session. v0.7.0 adds an **optional** system recovery layer so a failed desktop service does not force you to reconnect a monitor.
+The remote desktop still runs in the logged-in macOS user session because ScreenCaptureKit and GUI input belong to that session. v0.8.0 adds an **optional** system recovery layer so a failed desktop service does not force you to reconnect a monitor.
 
 On the Mac, open **ZorinMacBridge Server → Unattended access / recovery → Enable / Repair** once. macOS asks for administrator authorization. The app then:
 

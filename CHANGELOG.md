@@ -1,10 +1,10 @@
-## v0.7.0
+## v0.8.0
 
 - Audit hardening pass: removed additional GUI-thread blocking operations, bounded discovery/UI/log workloads, added stale-operation invalidation, and added hard native-streamer pipe deadlines.
 - Fixed races around Zeroconf discovery, reconnect queues, System-page worker callbacks, and regenerated pairing keys.
 - Hardened P0 privileged file handling: user-owned LaunchAgent/SSH files are now written as the target user, temporary files are unpredictable, config secrets are root-only, and unattended update staging remains root-owned end-to-end.
 - macOS update verification now checks the app bundle version against the selected release in addition to SHA-256, bundle id and code-signature verification.
-- Completed a source-level reliability/security audit before the first v0.7.0 release: eliminated remaining GTK/Tk worker-state races, bounded client/server queues and pre-auth concurrency, and added hard deadlines to native video and update helper operations.
+- Completed a source-level reliability/security audit before the first v0.8.0 release: eliminated remaining GTK/Tk worker-state races, bounded client/server queues and pre-auth concurrency, and added hard deadlines to native video and update helper operations.
 - Connection workers now use immutable UI-thread snapshots; high-rate mouse movement is coalesced so KEY-UP/button-up transitions cannot be crowded out by motion events.
 - Hardened P0 root/user boundaries: LaunchAgent and `authorized_keys` changes are performed atomically as the desktop user, unattended update staging remains root-owned, and predictable/root-followed user-writable paths were removed.
 - macOS update staging now verifies the release version embedded in the application bundle in addition to SHA-256, bundle identity and code-signature validity, with rollback retained on install/helper failures.
