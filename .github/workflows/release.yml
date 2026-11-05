@@ -49,6 +49,7 @@ jobs:
           /usr/bin/python3 test_p6.py
           /usr/bin/python3 test_p7.py
           /usr/bin/python3 test_update_ui.py
+          /usr/bin/python3 test_pairing_sync.py
           /usr/bin/python3 -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); gi.require_version('Vte','3.91'); from gi.repository import Gtk, Adw, Vte; import av; av.CodecContext.create('h264','r'); import keyring; print('GTK4/libadwaita/VTE + H.264 runtime OK')"
           bash -n install-linux.sh
           bash -n native/macos/admin/install-admin.sh
@@ -72,7 +73,7 @@ jobs:
           chmod 0755 "$PKG/DEBIAN"
           chmod g-s "$PKG/DEBIAN"  # clear inherited setgid on unusual build filesystems
           install -m 0644 linux_client_gtk.py linux_client.py protocol.py discovery.py resources.py \
-            tray_icon.py updates.py settings.py secret_store.py zmb_admin_backend.py zmb_system_page.py zmb_xcode_page.py zmb_xcode_data.py zmb_shell_backend.py zmb_terminal_page.py zmb_project_data.py zmb_projects_page.py zmb_sync_backend.py zmb_video_policy.py zmb_recovery.py "$APP/"
+            tray_icon.py updates.py settings.py secret_store.py zmb_admin_backend.py zmb_pairing_state.py zmb_system_page.py zmb_xcode_page.py zmb_xcode_data.py zmb_shell_backend.py zmb_terminal_page.py zmb_project_data.py zmb_projects_page.py zmb_sync_backend.py zmb_video_policy.py zmb_recovery.py "$APP/"
           install -m 0644 VERSION "$APP/VERSION"
           install -m 0644 assets/client.png "$APP/assets/client.png"
 
@@ -113,6 +114,7 @@ jobs:
           dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/linux_client_gtk.py'
           dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/share/applications/zorinmacbridge.desktop'
           dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_admin_backend.py'
+          dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_pairing_state.py'
           dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_system_page.py'
           dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_xcode_page.py'
           dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_xcode_data.py'

@@ -116,7 +116,7 @@ def main() -> None:
     assert 'Enable / Repair' in mac_gui and 'install_unattended_access()' in mac_gui
     assert "--add-data 'native/macos/admin:native/macos/admin'" in release
     assert '--hidden-import mac_terminal_setup' in release
-    assert 'zmb_admin_backend.py zmb_system_page.py zmb_xcode_page.py zmb_xcode_data.py' in release
+    assert all(name in release for name in ('zmb_admin_backend.py', 'zmb_pairing_state.py', 'zmb_system_page.py', 'zmb_xcode_page.py', 'zmb_xcode_data.py'))
     assert 'openssh-client' in release
     assert 'systemsetup -setremotelogin on' in installer
     assert 'REMOTE_LOGIN_STATE="manual_required"' in installer

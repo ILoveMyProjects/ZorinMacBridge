@@ -42,6 +42,7 @@ from protocol import CLIPBOARD_GET, CLIPBOARD_SET, KEY, MOUSE_BUTTON, MOUSE_MOVE
 from discovery import DiscoveredServer, discover_servers
 from resources import resource_path
 from settings import client_record
+from zmb_pairing_state import persist_desktop_trust
 from secret_store import get_password as get_saved_password
 from tray_icon import TrayController
 from updates import current_version
@@ -351,6 +352,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.stack.add_titled(self.projects_page, 'projects', 'Projects')
         self.stack.add_titled(self.logs_page, 'logs', 'Logs')
         self.stack.set_visible_child_name('desktop')
+        self._refresh_files_state()
 
     def _entry(self, box: Gtk.Box, label: str, var: ValueVar, *, width=10, password=False, expand=False):
         lab = Gtk.Label(label=label, xalign=0)
@@ -435,14 +437,20 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
 
     def _build_files_page(self) -> Gtk.Widget:
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.files_state_label = Gtk.Label(label='Pair this Mac in System, then connect Desktop to use Files.', xalign=0, wrap=True)
+        self.files_state_label.add_css_class('zmb-muted')
+        root.append(self.files_state_label)
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         root.append(toolbar)
+        self.file_action_buttons = []
         up = Gtk.Button(icon_name='go-up-symbolic', tooltip_text='Parent folder')
         up.connect('clicked', lambda *_: self.remote_up())
         toolbar.append(up)
+        self.file_action_buttons.append(up)
         refresh = Gtk.Button(icon_name='view-refresh-symbolic', tooltip_text='Refresh')
         refresh.connect('clicked', lambda *_: self.refresh_files())
         toolbar.append(refresh)
+        self.file_action_buttons.append(refresh)
         self.path_label = Gtk.Label(label='~/ZorinMac-Share/', xalign=0)
         self.path_label.add_css_class('zmb-path')
         self.path_label.set_hexpand(True)
@@ -451,16 +459,20 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         upload_file = Gtk.Button(label='Upload files')
         upload_file.connect('clicked', lambda *_: self.upload_files())
         toolbar.append(upload_file)
+        self.file_action_buttons.append(upload_file)
         upload_folder = Gtk.Button(label='Upload folder')
         upload_folder.connect('clicked', lambda *_: self.upload_folder())
         toolbar.append(upload_folder)
+        self.file_action_buttons.append(upload_folder)
         download = Gtk.Button(label='Download')
         download.add_css_class('suggested-action')
         download.connect('clicked', lambda *_: self.download_selected())
         toolbar.append(download)
+        self.file_action_buttons.append(download)
         mkdir = Gtk.Button(icon_name='folder-new-symbolic', tooltip_text='New folder on Mac')
         mkdir.connect('clicked', lambda *_: self.create_remote_folder())
         toolbar.append(mkdir)
+        self.file_action_buttons.append(mkdir)
 
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_hexpand(True)
@@ -479,6 +491,8 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         )
         note.add_css_class('zmb-muted')
         root.append(note)
+        for button in self.file_action_buttons:
+            button.set_sensitive(False)
         return root
 
     def _build_logs_page(self) -> Gtk.Widget:
@@ -787,6 +801,59 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.machine_var.set(value)
         self._machine_selected()
 
+    def _set_tls_fingerprint(self, value: str) -> None:
+        text = str(value or '').strip()
+        self.fp_var.set(text)
+        if hasattr(self, 'fp_entry') and self.fp_entry.get_text() != text:
+            self.fp_entry.set_text(text)
+
+    def _refresh_files_state(self) -> None:
+        paired = False
+        try:
+            paired = bool(self.system_controller._profile()) if hasattr(self, 'system_controller') else False
+        except Exception:
+            paired = False
+        if hasattr(self, 'files_state_label'):
+            if self.connected:
+                self.files_state_label.set_text('Desktop connected ✓ · Files are available through the authenticated desktop session.')
+            elif paired:
+                self.files_state_label.set_text('Mac paired ✓ · Desktop is not connected. Connect Desktop to use Files.')
+            else:
+                self.files_state_label.set_text('Pair this Mac in System, then connect Desktop to use Files.')
+        for button in getattr(self, 'file_action_buttons', []):
+            button.set_sensitive(bool(self.connected))
+
+    def pairing_state_changed(self, profile: dict | None = None, *, status: dict | None = None, include_system: bool = True) -> None:
+        """Propagate one successful pairing to every feature surface.
+
+        Desktop TLS trust is persisted only when its fingerprint came back through
+        the already-pinned P0 SSH channel (profile/status), never from discovery.
+        """
+        sid = str(getattr(self, 'selected_server_id', '') or '').strip()
+        host = str(self.ip_var.get() or '').strip()
+        if profile is None:
+            try:
+                profile = self.system_controller._profile() if hasattr(self, 'system_controller') else None
+            except Exception:
+                profile = None
+        if isinstance(profile, dict):
+            profile_sid = str(profile.get('server_id') or '').strip()
+            profile_host = str(profile.get('host') or '').strip()
+            if (not sid or not profile_sid or profile_sid == sid) and (not host or not profile_host or profile_host == host):
+                fingerprint = persist_desktop_trust(profile, status)
+                if fingerprint:
+                    self._set_tls_fingerprint(fingerprint)
+                    self._log('INFO', 'Desktop TLS trust learned from the verified P0 SSH pairing; no second fingerprint confirmation is required.')
+        if include_system and hasattr(self, 'system_controller'):
+            self.system_controller.selection_changed()
+        if hasattr(self, 'terminal_controller'):
+            self.terminal_controller.selection_changed()
+        if hasattr(self, 'projects_controller'):
+            self.projects_controller.refresh_projects()
+        if hasattr(self, 'xcode_controller'):
+            self.xcode_controller.selection_changed()
+        self._refresh_files_state()
+
     def _machine_selected(self, _event=None) -> None:
         server = self.discovered_by_label.get(self.machine_var.get())
         if server is None:
@@ -800,9 +867,9 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         record = client_record(self.selected_server_id)
         saved_fp = str(record.get('fingerprint', '')).strip()
         if saved_fp:
-            self.fp_var.set(saved_fp)
+            self._set_tls_fingerprint(saved_fp)
         elif previous_id != self.selected_server_id:
-            self.fp_var.set('')
+            self._set_tls_fingerprint('')
 
         # Desktop keyrings can block on D-Bus/Secret Service. Never query one on
         # the GTK thread. A late result is ignored if the user changed machine.
@@ -837,6 +904,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         role_text = ', '.join(roles) or 'legacy'
         self.status_var.set(f'Selected {server.name} at {host_text}:{server.port} ({role_text}). {trust}')
         self._log('INFO', f'Discovery selection: {server.name} hostname={server.hostname or "?"} ip={server.ip}:{server.port}; server_id={self.selected_server_id}; roles={role_text}')
+        self.pairing_state_changed(include_system=False)
 
     def connect_remote(self) -> None:
         if self.connected or (self.net_thread is not None and self.net_thread.is_alive()):
@@ -893,6 +961,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self._clear_session_queues()
         self.connected = False
         self.status_var.set('Disconnected')
+        self._refresh_files_state()
         self._log('INFO', 'Disconnect requested by user.')
 
     def _restart_after_update(self) -> None:
@@ -967,12 +1036,14 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                     self.status_var.set('Connected — view only; enable Capture keyboard & mouse to control the Mac')
                     self._log('INFO', 'Desktop session connected.')
                     self._refresh_fullscreen_bar()
+                    self._refresh_files_state()
                     self.refresh_files()
                 elif kind == 'disconnected':
                     self.connected = False
                     reason = item[1] if len(item) > 1 else 'Session ended'
                     self.status_var.set('Disconnected' if reason == 'Disconnected by user' else f'Disconnected — {reason}')
                     self._log('INFO', f'Desktop session disconnected: {reason}')
+                    self._refresh_files_state()
                     if reason != 'Disconnected by user' and not self.disconnect_requested:
                         self._schedule_auto_reconnect(reason)
                 elif kind == 'error':

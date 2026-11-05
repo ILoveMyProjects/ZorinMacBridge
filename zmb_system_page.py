@@ -35,6 +35,7 @@ STATUS_FIELDS = [
     ("Desktop app", "zmb_app_running"),
     ("LaunchAgent", "launch_agent_loaded"),
     ("Desktop port", "zmb_port_listening"),
+    ("Desktop TLS trust", "desktop_tls_fingerprint"),
     ("Remote Login", "remote_login"),
     ("FileVault", "filevault"),
     ("Remote reboot unlock", "filevault_ssh_unlock_eligible"),
@@ -422,6 +423,10 @@ class SystemController:
         if error_text:
             update_text += " Error: " + error_text
         self.update_summary.set_text(update_text)
+        try:
+            self.window.pairing_state_changed(self._profile(), status=data, include_system=False)
+        except Exception as exc:
+            self.window._log("WARNING", f"Could not propagate paired feature state: {exc}")
         return False
 
     def refresh(self) -> None:
@@ -817,7 +822,11 @@ class SystemController:
                 return False
             dialog.close()
             self.window._log("INFO", f"System administration paired with {profile.get('server_name') or profile.get('host')}; Terminal/Projects={'enabled' if profile.get('shell_enabled') else 'disabled'}.")
-            self.selection_changed()
+            try:
+                self.window.pairing_state_changed(profile, include_system=True)
+            except Exception as exc:
+                self.window._log("ERROR", f"Pairing succeeded but UI state propagation failed: {exc}")
+                self.selection_changed()
             return False
 
         scan_btn.connect("clicked", do_scan)

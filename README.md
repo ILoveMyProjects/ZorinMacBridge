@@ -125,6 +125,10 @@ ZorinMacBridge uses two different credentials:
 
 `install-macos.sh` now performs unattended setup by default: it enables Remote Login (SSH), installs/repairs P0, verifies that SSH was enabled, and prompts for the ZorinMacBridge session password. Use `./install-macos.sh --app-only` only when you intentionally want to install the app without P0/SSH setup.
 
+### One pairing, shared trust (v0.14.2)
+
+A successful **System → Pair this Mac** now becomes the single trust ceremony for the selected Mac. The user still verifies the macOS SSH host fingerprint once. After that verification, P0 returns the desktop TLS SHA-256 fingerprint through the already-pinned SSH channel, and the Zorin client stores it as the Desktop certificate pin automatically. Bonjour/mDNS is **not** used as a source of trust. Terminal / Project Actions, Xcode and Files refresh their state immediately after pairing, so they no longer remain stuck on stale "not paired" UI until the machine is reselected. Files still requires an active authenticated Desktop session because file transfer is carried on that channel.
+
 Starting with **v0.14.0**, the Mac app treats the prerequisites for the intended full Zorin workflow as an explicit setup contract rather than optional-looking status. The **Required setup for full Zorin operation** panel turns red and lists every missing item: Screen Recording, Accessibility, the saved ZMB session password, P0/recovery services, Remote Login/SSH readiness and host fingerprint, launch-at-login, and automatic desktop-server start. The app also shows a startup alert while any of these are missing and provides **Fix next REQUIRED item** plus a direct **Open Remote Login Settings** action.
 
 ## LAN discovery and changing DHCP addresses

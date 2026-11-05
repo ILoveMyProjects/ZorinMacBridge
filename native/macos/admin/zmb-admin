@@ -479,9 +479,31 @@ paired_devices_count() {
   /usr/bin/sudo -u "$u" /usr/bin/grep -c 'ZorinMacBridge-Admin:' "$f" 2>/dev/null || true
 }
 
+desktop_tls_fingerprint() {
+  # This value is returned only through the already-pinned P0 SSH channel.
+  # It bridges the verified SSH identity to the desktop TLS identity so the
+  # user performs one pairing ceremony instead of manually trusting a second
+  # fingerprint. Never advertise this as a trust source over unauthenticated
+  # discovery.
+  local u home cert fp
+  u="$(target_user || true)"
+  [ -n "$u" ] || { printf '%s\n' unavailable; return; }
+  home="$(user_home "$u" || true)"
+  [ -n "$home" ] || { printf '%s\n' unavailable; return; }
+  cert="$home/.zorin-mac-bridge/server-cert.pem"
+  [ -f "$cert" ] || { printf '%s\n' missing; return; }
+  [ -x /usr/bin/openssl ] || { printf '%s\n' unavailable; return; }
+  fp="$(/usr/bin/openssl x509 -in "$cert" -noout -fingerprint -sha256 2>/dev/null | /usr/bin/sed -n 's/^.*=//p' | /usr/bin/tr 'a-f' 'A-F' | /usr/bin/head -n1)"
+  if printf '%s' "$fp" | /usr/bin/grep -Eq '^([0-9A-F]{2}:){31}[0-9A-F]{2}$'; then
+    printf '%s\n' "$fp"
+  else
+    printf '%s\n' unavailable
+  fi
+}
+
 status_cmd() {
   require_root
-  local host server_id osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg auto_update_mode update_current update_latest update_available update_checked update_result update_error power_lines developer_dir
+  local host server_id osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired desktop_tls_fp ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg auto_update_mode update_current update_latest update_available update_checked update_result update_error power_lines developer_dir
   host="$(/bin/hostname 2>/dev/null || echo unknown)"
   server_id="$(config_value SERVER_ID unknown)"
   osver="$(/usr/bin/sw_vers -productVersion 2>/dev/null || echo unknown)"
@@ -532,6 +554,7 @@ status_cmd() {
   loadavg="$(/usr/sbin/sysctl -n vm.loadavg 2>/dev/null | /usr/bin/sed 's/^{[[:space:]]*//; s/[[:space:]]*}$//' || true)"
   [ -n "$loadavg" ] || loadavg=unknown
   paired="$(paired_devices_count)"
+  desktop_tls_fp="$(desktop_tls_fingerprint)"
   autoheal_enabled="$(config_value AUTOHEAL 1)"
   autoheal_paused=0; [ -f "$PAUSE_FILE" ] && autoheal_paused=1
   auto_update_mode="$(config_value AUTO_UPDATE notify)"
@@ -583,6 +606,7 @@ status_cmd() {
   printf '%s\n' "$power_lines"
   printf 'xcode_developer_dir=%s\n' "$developer_dir"
   printf 'paired_devices=%s\n' "$paired"
+  printf 'desktop_tls_fingerprint=%s\n' "$desktop_tls_fp"
   printf 'autoheal_enabled=%s\n' "$autoheal_enabled"
   printf 'autoheal_paused=%s\n' "$autoheal_paused"
   printf 'auto_update_mode=%s\n' "$auto_update_mode"

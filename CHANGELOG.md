@@ -1,3 +1,12 @@
+## v0.14.2
+
+- Unified pairing state across System, Desktop, Terminal, Projects, Xcode, and Files.
+- P0 status now exposes the desktop TLS SHA-256 fingerprint only through the already-pinned SSH administration channel; successful System pairing stores that TLS identity automatically, so Desktop no longer requires a second manual fingerprint trust step.
+- Successful pairing now propagates immediately to all feature controllers instead of refreshing only the System tab.
+- Files now reports whether the Mac is paired versus whether the Desktop session is connected, and disables file actions until the authenticated Desktop channel is active.
+- Added pairing-state regression coverage and release packaging checks for the new trust bridge.
+- Version advanced to 0.14.2.
+
 ## v0.14.1
 
 - Hotfix: repaired the native GTK update-result path on Zorin. `linux_client_gtk.py` now implements `_show_update_result()` instead of calling a missing method after GitHub Releases returns.

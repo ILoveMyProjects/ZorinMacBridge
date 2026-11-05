@@ -184,6 +184,15 @@ def _validate_port(port: int) -> int:
     return port
 
 
+def normalize_tls_fingerprint(value: str | None) -> str:
+    """Return a canonical colon-delimited SHA-256 certificate fingerprint or ''."""
+    compact = re.sub(r"[^0-9A-Fa-f]", "", str(value or ""))
+    if len(compact) != 64 or not re.fullmatch(r"[0-9A-Fa-f]{64}", compact):
+        return ""
+    compact = compact.upper()
+    return ":".join(compact[i:i + 2] for i in range(0, 64, 2))
+
+
 def _key_paths(pid: str) -> tuple[Path, Path, Path]:
     root = profile_dir(pid)
     return root / "admin_ed25519", root / "admin_ed25519.pub", root / "known_hosts"
@@ -376,6 +385,13 @@ def pair_device(*, server_id: str, server_name: str, host: str, user: str, passw
     data = get_status_for_profile(candidate)
     if data.get("protocol") != PROTOCOL_VERSION:
         raise AdminError("Pairing key was installed, but the Mac P0 helper returned an unexpected protocol")
+    desktop_tls_fingerprint = normalize_tls_fingerprint(data.get("desktop_tls_fingerprint"))
+    if desktop_tls_fingerprint:
+        # The TLS identity is learned only after the user has verified the SSH
+        # host key and P0 answered over that pinned SSH channel. This lets one
+        # pairing establish both System and Desktop trust without weakening
+        # certificate pinning or trusting Bonjour metadata.
+        candidate["desktop_tls_fingerprint"] = desktop_tls_fingerprint
     return save_profile(server_id, host, candidate)
 
 
@@ -460,7 +476,11 @@ def get_status(*, server_id: str, host: str) -> dict[str, str]:
         raise AdminError("This Mac is not paired for System administration")
     if host and profile.get("host") != host:
         profile = save_profile(server_id, host, {**profile, "host": host})
-    return get_status_for_profile(profile)
+    data = get_status_for_profile(profile)
+    desktop_tls_fingerprint = normalize_tls_fingerprint(data.get("desktop_tls_fingerprint"))
+    if desktop_tls_fingerprint and profile.get("desktop_tls_fingerprint") != desktop_tls_fingerprint:
+        save_profile(server_id, host, {**profile, "desktop_tls_fingerprint": desktop_tls_fingerprint})
+    return data
 
 
 def machine_state(data: dict[str, str]) -> str:
