@@ -202,7 +202,7 @@ def start_shell_command(profile: dict, remote_command: str) -> subprocess.Popen[
         raise AdminError("ssh was not found; install openssh-client") from exc
 
 
-def terminate_shell_process(proc: subprocess.Popen | None) -> None:
+def terminate_shell_process(proc: subprocess.Popen | None, *, wait: bool = True) -> None:
     if proc is None or proc.poll() is not None:
         return
     try:
@@ -214,6 +214,8 @@ def terminate_shell_process(proc: subprocess.Popen | None) -> None:
             proc.terminate()
         except Exception:
             return
+    if not wait:
+        return
     try:
         proc.wait(timeout=2)
         return

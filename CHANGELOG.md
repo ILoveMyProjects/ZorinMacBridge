@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.14.9 - Default input + explicit full-screen controls
+
+- enabled keyboard and mouse forwarding by default for newly started clients and newly connected Desktop sessions, while keeping the capture switch as an explicit view-only override;
+- removed double-click as a local full-screen gesture from both GTK and legacy clients, so remote double-clicks are always delivered to macOS;
+- added an explicit **Full Screen** button in normal Desktop UI;
+- kept **Exit Full Screen**, **Esc**, and **Alt+Esc** as the only local full-screen exit paths;
+- focused the remote desktop automatically after connection when input forwarding is enabled.
+
+## 0.14.8 - Keyboard reconnect + fullscreen escape regression fix
+
+- route printable ASCII through the established physical `KEY` packet path instead of synthesizing physical CoreGraphics events inside `MacInput.text()`;
+- restore the pre-0.14.6 Unicode-only `TEXT` injection path as fallback for non-ASCII text;
+- isolate individual `KEY`/`TEXT` injection failures so one CoreGraphics error is logged and does not tear down the control channel;
+- keep the 0.14.6 clipboard ordering and Linux-shortcut fixes;
+- add regression coverage for `keypress -> reconnect` and the ASCII/Unicode split.
+- keep full-screen state independent from connection/reconnect state so reconnects cannot disable Exit Full Screen;
+- reserve both `Esc` and `Alt+Esc` locally in full-screen using GTK capture phase, and make the Exit Full Screen action idempotent even if internal state was previously desynchronised;
+- extend regression coverage to reconnect-while-fullscreen and all three exit paths (button, Esc, Alt+Esc).
+
+## 0.14.7 - Resilient updater and non-blocking shutdown
+
+- Retried transient update download failures (`408`, `429`, `500`, `502`, `503`, `504`, socket timeouts/resets) up to four attempts with bounded backoff instead of failing the install after one gateway response.
+- Partial update files are deleted before every retry; SHA-256 verification remains mandatory before installation.
+- Closing the GTK window no longer waits for Project/SSH child processes or a pystray backend on the main thread.
+- Explicit close invalidates late discovery/update callbacks and stops the tray asynchronously before quitting the GTK application.
+- Update check/download/render paths are forbidden from owning application shutdown; the only GTK `app.quit()` call is centralized in the explicit close path.
+- Added persistent lifecycle/crash logging at `~/.local/state/zorinmacbridge/client.log`, including process start, explicit shutdown reason, normal `atexit`, unhandled Python/thread exceptions, and Python faulthandler output for native crashes.
+- Added regression coverage for `504 → retry → success`, partial-transfer retry, non-retriable `404`, asynchronous tray shutdown, and the GTK close path.
+
 ## 0.14.6 - Keyboard and clipboard shortcut reliability
 
 - ordinary printable ASCII text now reaches macOS with the corresponding physical Mac virtual keycode instead of using keycode `0` for every Unicode event; this prevents iOS Simulator from interpreting unrelated keys as repeated `A`,

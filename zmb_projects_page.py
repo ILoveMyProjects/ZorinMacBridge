@@ -461,13 +461,14 @@ class ProjectsController:
 
         threading.Thread(target=reader, daemon=True).start()
 
-    def cancel(self):
+    def cancel(self, *, wait: bool = True, update_ui: bool = True):
         if self.proc is None:
             return
         self.run_serial += 1
         proc = self.proc; self.proc = None
         self.busy = False; self.busy_label = ""
-        terminate_shell_process(proc)
-        self._append_output("\n[cancelled by user]\n")
-        self.progress.set_fraction(0.0); self.progress.set_text("Cancelled")
-        self._update_controls()
+        terminate_shell_process(proc, wait=wait)
+        if update_ui:
+            self._append_output("\n[cancelled by user]\n")
+            self.progress.set_fraction(0.0); self.progress.set_text("Cancelled")
+            self._update_controls()

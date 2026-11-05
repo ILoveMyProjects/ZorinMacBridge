@@ -51,5 +51,5 @@ for node in ast.walk(window):
 missing = sorted(calls - methods - core_methods)
 assert not missing, f'GTK calls missing _show_* methods: {missing}'
 
-assert (root / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.6'
+assert (root / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.9'
 print('update UI regression tests: OK')

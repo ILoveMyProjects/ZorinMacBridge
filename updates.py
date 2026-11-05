@@ -201,8 +201,37 @@ def _emit(progress: ProgressCallback | None, message: str) -> None:
         progress(message)
 
 
-def _download(asset: ReleaseAsset, target: Path, progress: ProgressCallback | None, timeout: float) -> None:
-    _emit(progress, f'Downloading {asset.name}…')
+_TRANSIENT_HTTP_CODES = {408, 429, 500, 502, 503, 504}
+_DOWNLOAD_ATTEMPTS = 4
+
+
+def _retry_after_seconds(exc: BaseException, attempt: int) -> float:
+    # Retry-After may be either seconds or an HTTP date. For the updater we only
+    # need a bounded delay; malformed/large values fall back to exponential backoff.
+    delay = min(8.0, float(2 ** max(0, attempt - 1)))
+    headers = getattr(exc, 'headers', None)
+    value = headers.get('Retry-After') if headers is not None else None
+    if value:
+        try:
+            delay = min(30.0, max(0.0, float(str(value).strip())))
+        except (TypeError, ValueError):
+            pass
+    return delay
+
+
+def _is_transient_download_error(exc: BaseException) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return int(getattr(exc, 'code', 0) or 0) in _TRANSIENT_HTTP_CODES
+    if isinstance(exc, (TimeoutError, ConnectionError, ConnectionResetError, BrokenPipeError)):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        # TLS verification errors are converted to RuntimeError in _urlopen and
+        # must never be retried as if they were a transient network condition.
+        return True
+    return False
+
+
+def _download_once(asset: ReleaseAsset, target: Path, progress: ProgressCallback | None, timeout: float) -> None:
     # urllib's timeout is per socket operation, not a total transfer deadline.
     # Keep a generous hard deadline as well so a trickling/broken connection can
     # never leave an update worker alive forever.
@@ -231,7 +260,31 @@ def _download(asset: ReleaseAsset, target: Path, progress: ProgressCallback | No
             raise RuntimeError(
                 f'Downloaded {asset.name} has unexpected size: got {received}, expected {asset.size} bytes.'
             )
-    _emit(progress, f'Downloaded {asset.name}.')
+
+
+def _download(asset: ReleaseAsset, target: Path, progress: ProgressCallback | None, timeout: float) -> None:
+    _emit(progress, f'Downloading {asset.name}…')
+    last_exc: BaseException | None = None
+    for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
+        try:
+            target.unlink(missing_ok=True)
+            _download_once(asset, target, progress, timeout)
+            _emit(progress, f'Downloaded {asset.name}.')
+            return
+        except Exception as exc:
+            target.unlink(missing_ok=True)
+            last_exc = exc
+            if not _is_transient_download_error(exc) or attempt >= _DOWNLOAD_ATTEMPTS:
+                raise
+            delay = _retry_after_seconds(exc, attempt)
+            if isinstance(exc, urllib.error.HTTPError):
+                detail = f'HTTP {exc.code}'
+            else:
+                detail = type(exc).__name__
+            _emit(progress, f'Download failed ({detail}); retry {attempt + 1}/{_DOWNLOAD_ATTEMPTS} in {delay:g}s…')
+            time.sleep(delay)
+    if last_exc is not None:
+        raise last_exc
 
 
 def _checksum_for(text: str, filename: str) -> str:

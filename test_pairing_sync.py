@@ -104,7 +104,7 @@ def main() -> None:
     assert 'ZMB_DESKTOP_TLS_FINGERPRINT=' in backend
     assert 'bootstrap_tls_fingerprint' in backend
     assert 'work="$(cd "$work" && /bin/pwd -P)"' in admin
-    assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.6'
+    assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.9'
 
     print('pairing state sync tests: OK')
 

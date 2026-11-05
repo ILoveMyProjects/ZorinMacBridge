@@ -41,7 +41,7 @@ from protocol import (
     DOWNLOAD_BEGIN, DOWNLOAD_CHUNK, DOWNLOAD_END, DOWNLOAD_REQ, ERROR, VIDEO_H264, VIDEO_STATS,
     KEY, LIST_REQ, LIST_RESP, MKDIR_OK, MKDIR_REQ, MOUSE_BUTTON, MOUSE_MOVE,
     PacketReader, SCROLL, TEXT, UPLOAD_BEGIN, UPLOAD_CHUNK, UPLOAD_END,
-    pack_json, pack_packet, recv_one_blocking, unpack_json,
+    ascii_physical_keysym, pack_json, pack_packet, recv_one_blocking, unpack_json,
 )
 
 CHUNK = 256 * 1024
@@ -121,7 +121,7 @@ class ClientApp:
         self.status_var = tk.StringVar(value='Disconnected')
         self.remote_path_var = tk.StringVar(value='/')
         self.linux_shortcuts_var = tk.BooleanVar(value=True)
-        self.capture_input_var = tk.BooleanVar(value=False)
+        self.capture_input_var = tk.BooleanVar(value=True)
         self.machine_var = tk.StringVar(value='')
         self.discovered_by_label = {}
         self.selected_server_id = ''
@@ -163,6 +163,7 @@ class ClientApp:
 
         self._build_ui()
         self._build_menu()
+        self.root.bind_all('<Escape>', self._exit_fullscreen, add='+')
         self.root.bind_all('<Alt-Escape>', self._exit_fullscreen, add='+')
         self.tray = TrayController(
             self.root,
@@ -249,6 +250,7 @@ class ClientApp:
             variable=self.capture_input_var,
             command=self._capture_input_changed,
         ).pack(side='left', padx=(12, 0))
+        ttk.Button(options, text='Full Screen', command=self._toggle_fullscreen).pack(side='left', padx=(12, 0))
         ttk.Button(options, text='Clipboard Linux → Mac', command=self.push_clipboard).pack(side='right', padx=(4, 0))
         ttk.Button(options, text='Clipboard Mac → Linux', command=self.pull_clipboard).pack(side='right')
 
@@ -265,7 +267,6 @@ class ClientApp:
         self.canvas = tk.Canvas(desk_frame, bg='black', highlightthickness=0, takefocus=True)
         self.canvas.pack(fill='both', expand=True)
         self.canvas.bind('<Configure>', lambda e: self._redraw())
-        self.canvas.bind('<Double-Button-1>', self._toggle_fullscreen)
         self.canvas.bind('<Motion>', self._mouse_move)
         for b in (1, 2, 3):
             self.canvas.bind(f'<ButtonPress-{b}>', lambda e, b=b: self._mouse_button(b, True, e))
@@ -623,7 +624,7 @@ class ClientApp:
             return
         self._connect_snapshot = (ip, port, _password, expected_fp)
         self.disconnect_requested = False
-        self.fullscreen_active = False
+        # Reconnects must not desynchronise logical and actual full-screen state.
         self.mouse_buttons_down: set[int] = set()
         self.remember_credentials_active = bool(self.remember_credentials_var.get())
         if not self.selected_server_id:
@@ -928,7 +929,11 @@ class ClientApp:
                     self._append_log(item[1])
                 elif item[0] == 'connected':
                     self.connected = True
-                    self.status_var.set('Connected — view only; enable Capture keyboard & mouse to control the Mac')
+                    if self.capture_input_var.get():
+                        self.status_var.set('Connected — keyboard & mouse capture enabled')
+                        self.canvas.focus_set()
+                    else:
+                        self.status_var.set('Connected — view only')
                     self._log('INFO', 'Desktop session connected.')
                     self.refresh_files()
                 elif item[0] == 'disconnected':
@@ -1105,7 +1110,7 @@ class ClientApp:
         self.root.attributes('-fullscreen', True)
         self.canvas.focus_set()
         self.root.after_idle(self._redraw)
-        self._log('INFO', 'Entered full-screen desktop view. Press Alt+Esc to exit.')
+        self._log('INFO', 'Entered full-screen desktop view. Press Esc or Alt+Esc to exit.')
         return 'break'
 
     def _exit_fullscreen(self, event=None) -> str | None:
@@ -1186,6 +1191,27 @@ class ClientApp:
             return 'Meta_L' if keysym.endswith('_L') else 'Meta_R'
         return keysym
 
+    def _enqueue_printable_key(self, char: str) -> bool:
+        """Send printable ASCII through the established physical KEY path.
+
+        Returns True when *char* was handled. Non-ASCII returns False so callers
+        can use the Unicode TEXT fallback. Temporary Shift is sent only when the
+        character requires it and the user is not already holding Shift.
+        """
+        physical = ascii_physical_keysym(char)
+        if physical is None:
+            return False
+        keysym, needs_shift = physical
+        shift_held = 'Shift_L' in self.modifiers_down or 'Shift_R' in self.modifiers_down
+        temporary_shift = needs_shift and not shift_held
+        if temporary_shift:
+            self._enqueue(pack_json(KEY, {'keysym': 'Shift_L', 'down': True}))
+        self._enqueue(pack_json(KEY, {'keysym': keysym, 'down': True}))
+        self._enqueue(pack_json(KEY, {'keysym': keysym, 'down': False}))
+        if temporary_shift:
+            self._enqueue(pack_json(KEY, {'keysym': 'Shift_L', 'down': False}))
+        return True
+
     def _enqueue_command_shortcut(self, keysym: str) -> None:
         """Send one macOS Command shortcut without relying on modifier timing.
 
@@ -1218,10 +1244,8 @@ class ClientApp:
         return any(k.startswith(('Meta_', 'Control_', 'Alt_')) for k in self.modifiers_down)
 
     def _key_press(self, event) -> str:
-        # Alt+Esc is reserved locally as the emergency/full-screen escape chord.
-        if event.keysym == 'Escape' and self.fullscreen_active and (
-            (event.state & 0x0008) or 'Alt_L' in self.modifiers_down or 'Alt_R' in self.modifiers_down
-        ):
+        # Esc and Alt+Esc are reserved locally while fullscreen.
+        if event.keysym == 'Escape' and self.fullscreen_active:
             self._exit_fullscreen(event)
             return 'break'
         if not self.capture_input_var.get():
@@ -1251,7 +1275,8 @@ class ClientApp:
             return 'break'
 
         if event.char and event.char.isprintable():
-            self._enqueue(pack_packet(TEXT, event.char.encode('utf-8')))
+            if not self._enqueue_printable_key(event.char):
+                self._enqueue(pack_packet(TEXT, event.char.encode('utf-8')))
         else:
             self._enqueue(pack_json(KEY, {'keysym': keysym, 'down': True}))
             self.keys_down.add(keysym)

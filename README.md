@@ -1,5 +1,18 @@
 # ZorinMacBridge
 
+## v0.14.9 default input + explicit fullscreen controls
+
+0.14.9 enables keyboard and mouse forwarding by default as soon as the Desktop session connects. The remote image no longer uses double-click as a local full-screen gesture: every click, including double-click, is forwarded to the Mac. Full-screen is entered only with the explicit **Full Screen** button and exited with **Exit Full Screen**, **Esc**, or **Alt+Esc**. The existing **Capture keyboard & mouse** switch remains available as an explicit view-only override.
+
+## v0.14.8 keyboard reconnect + fullscreen escape regression fix
+
+0.14.8 fixes the keyboard regression introduced in 0.14.6 where ordinary input could tear down the control channel on real macOS. Printable ASCII is sent through the established physical KEY path, Unicode TEXT is fallback-only, and one input-injection error no longer disconnects the session. It also fixes fullscreen recovery: reconnect no longer clears the fullscreen state, **Exit Full Screen** is idempotent, and both **Esc** and **Alt+Esc** are captured locally before remote input forwarding.
+
+## v0.14.7 updater / shutdown reliability
+
+Transient GitHub/CDN gateway responses no longer abort an update on the first failure: update assets retry up to four times with bounded backoff and partial files are discarded before retry. Closing the GTK client is also non-blocking: the window quits immediately while tray/process cleanup is signalled outside the GTK main thread. Update/discovery workers cannot close the application. Persistent lifecycle/crash diagnostics are written to `~/.local/state/zorinmacbridge/client.log` so an unexpected window/process exit leaves evidence outside the GUI.
+
+
 <p align="center">
   <img src="assets/client.png" width="190" alt="ZorinMacBridge Client icon">
   &nbsp;&nbsp;&nbsp;&nbsp;
@@ -248,8 +261,8 @@ The transport signature from GitHub is not used as the installed identity. Befor
 
 - continuous H.264 macOS screen stream;
 - explicit **Capture keyboard & mouse** switch in the Linux client;
-- mouse movement, left/right/middle click, drag and drop when input capture is enabled;
-- scrolling and keyboard input when input capture is enabled;
+- mouse movement, left/right/middle click, drag and drop with input capture enabled by default;
+- scrolling and keyboard input with input capture enabled by default;
 - Linux-friendly shortcut mapping;
 - bidirectional text clipboard;
 - file and complete-folder transfer;
@@ -260,10 +273,10 @@ The client starts in **view-only mode**. Enable **Capture keyboard & mouse** whe
 
 ### Full-screen remote desktop
 
-- **Double-click** the remote desktop image to enter full-screen mode.
+- Use the explicit **Full Screen** button to enter full-screen mode.
 - While full-screen, a dedicated top toolbar sits outside the remote Mac image and shows connection state, selected video quality, input-capture state, and the exit control. It never overlays the Mac desktop.
-- Leave full-screen with **Alt+Esc**, the **Exit Full Screen** button, or by **double-clicking the top status bar**.
-- Double-clicking the remote image while already full-screen is sent to the Mac instead of exiting, so normal remote double-click actions remain usable.
+- Leave full-screen with **Esc**, **Alt+Esc**, or the **Exit Full Screen** button.
+- Double-click is never consumed by the local UI; it is always delivered to the remote Mac.
 - **Alt+Esc is reserved locally** while full-screen is active and is not sent to the Mac.
 - Entering or leaving full-screen releases held remote input state to avoid a stuck Alt/Ctrl/Command key.
 

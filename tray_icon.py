@@ -47,3 +47,18 @@ class TrayController:
                 icon.stop()
             except Exception:
                 pass
+
+    def stop_async(self) -> None:
+        """Stop a tray backend without ever blocking the GUI/main thread."""
+        icon, self.icon = self.icon, None
+        if icon is None:
+            return
+
+        def worker() -> None:
+            try:
+                icon.stop()
+            except Exception:
+                pass
+
+        import threading
+        threading.Thread(target=worker, name='zmb-tray-stop', daemon=True).start()

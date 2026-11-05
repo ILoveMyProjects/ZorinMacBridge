@@ -13,7 +13,7 @@ assert 'def disconnect_remote(' in client
 assert "Gtk.ListBox()" in client
 assert "folder-symbolic" in client
 assert "Gtk.FileDialog" in client
-assert "Double-click" in (root / 'README.md').read_text(encoding='utf-8')
+assert 'Double-click desktop to enter full screen' not in (root / 'README.md').read_text(encoding='utf-8')
 assert 'def open_shared_folder(' in server
 
 assert 'SystemController' in client
@@ -48,13 +48,13 @@ assert 'bootstrap_installed_app_identity' in server
 
 assert 'Auto reconnect' in client
 assert 'Video quality' in client
-assert "exit_hint = Gtk.Label(label='Alt+Esc exits'" in client
+assert "exit_hint = Gtk.Label(label='Esc / Alt+Esc exits'" in client
 assert 'def _schedule_auto_reconnect' in client
-assert 'def _fullscreen_bar_pressed' in client
+assert 'def _fullscreen_bar_pressed' not in client
 assert 'def _build_fullscreen_bar' in client
 assert 'outer.append(self.fullscreen_bar)' in client
 assert 'overlay.add_overlay(self.fullscreen_bar)' not in client
-assert 'and not self.fullscreen_active' in client
+assert "self.enter_fullscreen_btn = Gtk.Button(label='Full Screen')" in client
 print('native UI static tests: OK')
 
 assert 'ZMB session password' in client

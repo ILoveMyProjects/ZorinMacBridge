@@ -8,7 +8,9 @@ reused from linux_client.ClientApp.  This module replaces the Tk UI with
 GTK4/libadwaita so the installed application follows the Zorin/GNOME theme.
 """
 
+import atexit
 import datetime
+import faulthandler
 import os
 import posixpath
 import queue
@@ -16,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import traceback
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -58,6 +61,75 @@ from zmb_projects_page import ProjectsController
 os.environ.setdefault('PYSTRAY_BACKEND', 'xorg')
 
 
+def _client_state_dir() -> Path:
+    root = os.environ.get('XDG_STATE_HOME')
+    base = Path(root).expanduser() if root else (Path.home() / '.local' / 'state')
+    return base / 'zorinmacbridge'
+
+
+def _client_log_path() -> Path:
+    return _client_state_dir() / 'client.log'
+
+
+def _persistent_log(line: str) -> None:
+    """Best-effort lifecycle/crash log that survives the GTK window disappearing."""
+    try:
+        path = _client_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('a', encoding='utf-8') as handle:
+            handle.write(str(line).rstrip() + '\n')
+    except Exception:
+        pass
+
+
+def _install_crash_logging():
+    """Keep evidence for silent Python/native exits without changing normal control flow."""
+    try:
+        path = _client_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        crash_file = path.open('a', encoding='utf-8', buffering=1)
+        faulthandler.enable(crash_file, all_threads=True)
+    except Exception:
+        crash_file = None
+
+    old_hook = sys.excepthook
+
+    def excepthook(exc_type, exc, tb):
+        stamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        _persistent_log(f'{stamp} [FATAL] Unhandled exception: {exc_type.__name__}: {exc}')
+        try:
+            if crash_file is not None:
+                traceback.print_exception(exc_type, exc, tb, file=crash_file)
+        except Exception:
+            pass
+        old_hook(exc_type, exc, tb)
+
+    sys.excepthook = excepthook
+
+    old_thread_hook = getattr(threading, 'excepthook', None)
+    if old_thread_hook is not None:
+        def thread_hook(args):
+            stamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+            _persistent_log(
+                f'{stamp} [ERROR] Unhandled thread exception in {getattr(args.thread, "name", "thread")}: '
+                f'{args.exc_type.__name__}: {args.exc_value}'
+            )
+            old_thread_hook(args)
+        threading.excepthook = thread_hook
+
+    def process_exit():
+        stamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        _persistent_log(f'{stamp} [INFO] Python process exiting normally (atexit).')
+        try:
+            if crash_file is not None:
+                crash_file.flush()
+        except Exception:
+            pass
+
+    atexit.register(process_exit)
+    return crash_file
+
+
 class ValueVar:
     def __init__(self, value=None, callback=None):
         self._value = value
@@ -85,9 +157,8 @@ class GtkRootAdapter:
         return GLib.timeout_add(max(0, int(ms)), run_once)
 
     def destroy(self):
-        app = self.window.get_application()
-        if app is not None:
-            app.quit()
+        # Legacy CoreClient paths must not bypass the audited GTK shutdown path.
+        self.window.on_close(reason='legacy-root-destroy')
 
 
 class ClientWindow(Adw.ApplicationWindow, CoreClient):
@@ -105,7 +176,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.status_var = ValueVar('Disconnected', self._status_changed)
         self.remote_path_var = ValueVar('/')
         self.linux_shortcuts_var = ValueVar(True)
-        self.capture_input_var = ValueVar(False)
+        self.capture_input_var = ValueVar(True)
         self.auto_reconnect_var = ValueVar(True)
         self.quality_var = ValueVar('Adaptive')
         self.machine_var = ValueVar('')
@@ -138,7 +209,10 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.file_entries = {}
         self._clear_session_queues()
         self.disconnect_requested = False
-        self.fullscreen_active = False
+        # Connection/reconnect state is independent from window full-screen state.
+        # Never clear fullscreen_active here: an automatic reconnect can happen while
+        # the window remains physically fullscreen, which would otherwise disable all
+        # local exit paths (button/Esc/Alt+Esc).
         self.mouse_buttons_down = set()
         self._last_texture = None
         self._last_pixbuf = None
@@ -154,6 +228,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self._credential_serial = 0
         self._file_render_serial = 0
         self._desktop_trust_recovery_busy = False
+        self._closing = False
 
         self._build_native_ui()
         self._install_css()
@@ -328,9 +403,13 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.status_label.add_css_class('zmb-status')
         self.status_label.set_hexpand(True)
         self.status_box.append(self.status_label)
-        hint = Gtk.Label(label='Double-click desktop to enter full screen · Alt+Esc exits', xalign=1)
+        hint = Gtk.Label(label='Keyboard & mouse are forwarded by default · Esc / Alt+Esc exits full screen', xalign=1)
         hint.add_css_class('zmb-muted')
         self.status_box.append(hint)
+        self.enter_fullscreen_btn = Gtk.Button(label='Full Screen')
+        self.enter_fullscreen_btn.set_sensitive(False)
+        self.enter_fullscreen_btn.connect('clicked', lambda *_: self._toggle_fullscreen())
+        self.status_box.append(self.enter_fullscreen_btn)
 
         self.stack_switcher = Gtk.StackSwitcher()
         page.append(self.stack_switcher)
@@ -413,16 +492,13 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.fs_input_label = Gtk.Label(label='Input: view only', xalign=0)
         bar.append(self.fs_input_label)
 
-        exit_hint = Gtk.Label(label='Alt+Esc exits', xalign=1)
+        exit_hint = Gtk.Label(label='Esc / Alt+Esc exits', xalign=1)
         exit_hint.add_css_class('zmb-muted')
         bar.append(exit_hint)
         exit_btn = Gtk.Button(label='Exit Full Screen')
         exit_btn.connect('clicked', lambda *_: self._exit_fullscreen())
         bar.append(exit_btn)
 
-        bar_click = Gtk.GestureClick(button=1)
-        bar_click.connect('pressed', self._fullscreen_bar_pressed)
-        bar.add_controller(bar_click)
         return bar
 
     def _build_desktop_page(self) -> Gtk.Widget:
@@ -542,6 +618,10 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.picture.add_controller(scroll)
 
         keys = Gtk.EventControllerKey()
+        # Full-screen escape shortcuts must win before the focused remote view can
+        # consume/forward the key event.  Capture phase keeps Exit/Esc reliable even
+        # while keyboard capture is enabled.
+        keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         keys.connect('key-pressed', self._gtk_key_pressed)
         keys.connect('key-released', self._gtk_key_released)
         self.add_controller(keys)
@@ -558,6 +638,8 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                 self.fs_status_icon.set_from_icon_name(icon)
             if hasattr(self, 'fs_status_label'):
                 self.fs_status_label.set_text(str(value))
+            if hasattr(self, 'enter_fullscreen_btn'):
+                self.enter_fullscreen_btn.set_sensitive(connected)
             self._refresh_fullscreen_bar()
 
     @staticmethod
@@ -1033,7 +1115,10 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             return
         self._connect_snapshot = (ip, port, _password, expected_fp)
         self.disconnect_requested = False
-        self.fullscreen_active = False
+        # Connection/reconnect state is independent from window full-screen state.
+        # Never clear fullscreen_active here: an automatic reconnect can happen while
+        # the window remains physically fullscreen, which would otherwise disable all
+        # local exit paths (button/Esc/Alt+Esc).
         self.mouse_buttons_down = set()
         self.remember_credentials_active = bool(self.remember_credentials_var.get())
         if not self.selected_server_id:
@@ -1133,7 +1218,11 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                 elif kind == 'connected':
                     self.connected = True
                     self._reconnect_attempt = 0
-                    self.status_var.set('Connected — view only; enable Capture keyboard & mouse to control the Mac')
+                    if self.capture_input_var.get():
+                        self.status_var.set('Connected — keyboard & mouse capture enabled')
+                        self.picture.grab_focus()
+                    else:
+                        self.status_var.set('Connected — view only')
                     self._log('INFO', 'Desktop session connected.')
                     self._refresh_fullscreen_bar()
                     self._refresh_files_state()
@@ -1274,12 +1363,8 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
 
     def _gtk_pressed(self, gesture, n_press, x, y):
         button = int(gesture.get_current_button())
-        # Double-click on the remote image only ENTERS full screen. Once full
-        # screen, double-clicks belong to the remote Mac; exiting is intentionally
-        # moved to the top status bar (or Alt+Esc) so remote double-click remains usable.
-        if button == 1 and n_press == 2 and not self.fullscreen_active:
-            self._toggle_fullscreen()
-            return
+        # Double-click is never a local gesture. Every click belongs to the remote
+        # Mac; full-screen is entered only through the explicit Full Screen button.
         if not self.capture_input_var.get():
             return
         pos = self._norm_point(x, y)
@@ -1316,8 +1401,8 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
 
     def _gtk_key_pressed(self, _controller, keyval, _keycode, state):
         keysym = self._keysym_name(keyval)
-        alt = bool(state & Gdk.ModifierType.ALT_MASK)
-        if keysym == 'Escape' and self.fullscreen_active and alt:
+        if keysym == 'Escape' and self.fullscreen_active:
+            # Both Esc and Alt+Esc are reserved locally while fullscreen.
             self._exit_fullscreen()
             return True
         if not self.capture_input_var.get():
@@ -1349,7 +1434,8 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         codepoint = Gdk.keyval_to_unicode(keyval)
         char = chr(codepoint) if codepoint else ''
         if char and char.isprintable():
-            self._enqueue(pack_packet(TEXT, char.encode('utf-8')))
+            if not self._enqueue_printable_key(char):
+                self._enqueue(pack_packet(TEXT, char.encode('utf-8')))
         elif keysym:
             self._enqueue(pack_json(KEY, {'keysym': keysym, 'down': True}))
             self.keys_down.add(keysym)
@@ -1404,16 +1490,15 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self._refresh_fullscreen_bar()
         self.fullscreen()
         self.picture.grab_focus()
-        self._log('INFO', 'Entered full-screen desktop view. Double-click the top bar or press Alt+Esc to exit.')
+        self._log('INFO', 'Entered full-screen desktop view. Use Exit Full Screen, Esc, or Alt+Esc to exit.')
         return True
 
-    def _fullscreen_bar_pressed(self, _gesture, n_press, _x, _y):
-        if self.fullscreen_active and n_press == 2:
-            self._exit_fullscreen()
-
     def _exit_fullscreen(self, event=None):
-        if not self.fullscreen_active:
-            return False
+        # Idempotent emergency exit.  Do not trust fullscreen_active exclusively:
+        # older reconnect paths could desynchronise the flag from the actual GTK
+        # window state.  A click/Esc must always restore the normal layout.
+        was_fullscreen = bool(self.fullscreen_active)
+        self.fullscreen_active = False
         self._release_remote_input_state()
         self.fullscreen_bar.set_visible(False)
         self.unfullscreen()
@@ -1421,8 +1506,8 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.connection_card.set_visible(True)
         self.status_box.set_visible(True)
         self.stack_switcher.set_visible(True)
-        self.fullscreen_active = False
-        self._log('INFO', 'Exited full-screen desktop view.')
+        if was_fullscreen:
+            self._log('INFO', 'Exited full-screen desktop view.')
         return True
 
     # ---------- Clipboard ----------
@@ -1517,7 +1602,9 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
     def _log(self, level: str, message: str) -> None:
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
         clean = str(message).replace('\r', '\\r')
-        self.ui_queue.put(('log', f'{timestamp} [{level}] {clean}'))
+        line = f'{timestamp} [{level}] {clean}'
+        _persistent_log(line)
+        self.ui_queue.put(('log', line))
 
     def _append_log(self, line: str) -> None:
         end = self.log_buffer.get_end_iter()
@@ -1750,10 +1837,29 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
     # ---------- lifecycle ----------
 
     def _on_close_request(self, *_args):
-        self.on_close()
-        return False
+        self.on_close(reason='window-close')
+        # We own shutdown. Returning True prevents GTK from starting a second
+        # close sequence while asynchronous cleanup is still in progress.
+        return True
 
-    def on_close(self) -> None:
+    def on_close(self, reason: str = 'user-quit') -> None:
+        if self._closing:
+            return
+        self._closing = True
+        self._log('INFO', f'Application shutdown requested explicitly: {reason}.')
+        app_for_reason = self.get_application()
+        if app_for_reason is not None:
+            app_for_reason._zmb_shutdown_reason = str(reason)
+
+        # Invalidate late callbacks immediately. No network/update worker is
+        # allowed to keep the GTK window alive during explicit application exit.
+        self._update_check_busy = False
+        self._update_check_serial += 1
+        self._discovery_busy = False
+        self._discovery_serial += 1
+        self.disconnect_requested = True
+        self.stop_event.set()
+
         try:
             self.disconnect_remote()
         except Exception:
@@ -1763,11 +1869,18 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         except Exception:
             pass
         try:
-            self.projects_controller.cancel()
+            # Never wait for an SSH/project child on the GTK main thread.
+            self.projects_controller.cancel(wait=False, update_ui=False)
         except Exception:
             pass
+
+        # pystray backends can block while their native loop is shutting down.
+        # Stop the tray asynchronously and quit GTK immediately.
         if self.tray is not None:
-            self.tray.stop()
+            try:
+                self.tray.stop_async()
+            except Exception:
+                pass
         app = self.get_application()
         if app is not None:
             app.quit()
@@ -1777,7 +1890,13 @@ class ClientApplication(Adw.Application):
     def __init__(self):
         super().__init__(application_id='com.ilovemyprojects.ZorinMacBridge', flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
         self.window = None
+        self._zmb_shutdown_reason = 'unrequested'
+        self.connect('shutdown', self._shutdown_observed)
         self._install_actions()
+
+    def _shutdown_observed(self, *_args):
+        stamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        _persistent_log(f'{stamp} [INFO] GApplication shutdown observed; reason={self._zmb_shutdown_reason}.')
 
     def _install_actions(self):
         update = Gio.SimpleAction.new('update', None)
@@ -1794,9 +1913,19 @@ class ClientApplication(Adw.Application):
 
 
 def main() -> int:
+    crash_file = _install_crash_logging()
+    stamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+    _persistent_log(f'{stamp} [INFO] Process start pid={os.getpid()} argv={sys.argv!r}.')
     Adw.init()
     app = ClientApplication()
-    return app.run(sys.argv)
+    try:
+        return app.run(sys.argv)
+    finally:
+        try:
+            if crash_file is not None:
+                crash_file.flush()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':

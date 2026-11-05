@@ -4,7 +4,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from mac_server import MacInput, ascii_keystroke_for_char
+from mac_server import MacInput
+from protocol import KEY, TEXT, PacketReader, ascii_physical_keysym, unpack_json
 
 ROOT = Path(__file__).resolve().parent
 
@@ -18,6 +19,15 @@ def _method_source(filename: str, class_name: str, method_name: str) -> str:
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == method_name:
                     return ast.get_source_segment(text, child) or ''
     raise AssertionError(f'{class_name}.{method_name} not found in {filename}')
+
+
+def _function_source(filename: str, function_name: str) -> str:
+    text = (ROOT / filename).read_text()
+    tree = ast.parse(text)
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name:
+            return ast.get_source_segment(text, node) or ''
+    raise AssertionError(f'{function_name} not found in {filename}')
 
 
 def test_linux_shortcut_keeps_right_ctrl_as_real_macos_control():
@@ -42,20 +52,44 @@ def test_copy_cut_pull_is_scheduled_on_press_not_release():
     assert '_request_remote_clipboard' not in release
 
 
-def test_ascii_key_mapping_for_simulator():
-    assert ascii_keystroke_for_char('b') == ('b', False)
-    assert ascii_keystroke_for_char('A') == ('a', True)
-    assert ascii_keystroke_for_char('7') == ('7', False)
-    assert ascii_keystroke_for_char('!') == ('1', True)
-    assert ascii_keystroke_for_char('?') == ('slash', True)
-    assert ascii_keystroke_for_char(' ') == ('space', False)
-    assert ascii_keystroke_for_char('ą') is None
+def test_ascii_mapping_uses_existing_key_packet_path():
+    assert ascii_physical_keysym('b') == ('b', False)
+    assert ascii_physical_keysym('A') == ('a', True)
+    assert ascii_physical_keysym('7') == ('7', False)
+    assert ascii_physical_keysym('!') == ('1', True)
+    assert ascii_physical_keysym('?') == ('slash', True)
+    assert ascii_physical_keysym(' ') == ('space', False)
+    assert ascii_physical_keysym('ą') is None
+
+
+def test_clients_route_printable_ascii_to_physical_key_helper_before_text_fallback():
+    tk = _method_source('linux_client.py', 'ClientApp', '_key_press')
+    gtk = _method_source('linux_client_gtk.py', 'ClientWindow', '_gtk_key_pressed')
+    for src in (tk, gtk):
+        assert '_enqueue_printable_key' in src
+        assert 'pack_packet(TEXT' in src
+        assert src.index('_enqueue_printable_key') < src.index('pack_packet(TEXT')
+
+
+def test_server_text_is_unicode_fallback_not_physical_ascii_synthesis():
+    src = _method_source('mac_server.py', 'MacInput', 'text')
+    assert 'ascii_keystroke_for_char' not in src
+    assert 'CGEventSetFlags' not in src
+    assert 'CGEventKeyboardSetUnicodeString' in src
+    # ASCII is routed as KEY by the client; TEXT is only the Unicode fallback.
+    assert 'CGEventCreateKeyboardEvent(None, 0, True)' in src
+
+
+def test_control_session_does_not_disconnect_on_single_keyboard_injection_error():
+    src = _function_source('mac_server.py', 'control_session')
+    assert '[control] keyboard event rejected:' in src
+    assert '[control] text event rejected:' in src
+    assert 'except Exception as exc:' in src
 
 
 class _FakeCG:
     def __init__(self):
         self.created = []
-        self.flags = []
         self.unicode = []
         self.posted = []
 
@@ -63,10 +97,6 @@ class _FakeCG:
         event = {'code': int(code), 'down': bool(down)}
         self.created.append(event)
         return event
-
-    def CGEventSetFlags(self, event, flags):
-        value = flags.value if hasattr(flags, 'value') else int(flags)
-        self.flags.append((event, int(value)))
 
     def CGEventKeyboardSetUnicodeString(self, event, count, _arr):
         self.unicode.append((event, int(count)))
@@ -80,32 +110,24 @@ class _FakeCF:
         pass
 
 
-def test_ascii_text_uses_real_mac_keycodes_not_keycode_zero_for_every_char():
+def test_unicode_fallback_still_posts_text_without_throwing():
     inp = MacInput.__new__(MacInput)
     inp.cg = _FakeCG()
     inp.cf = _FakeCF()
     inp.held_modifiers = set()
     inp.held_buttons = set()
-    inp.text('bc!')
-    # b=11, c=8, !=Shift+1 (18). The old implementation used keycode 0
-    # for every character, which iOS Simulator could interpret as repeated A.
-    down_events = [event for event in inp.cg.created if event['down']]
-    assert [event['code'] for event in down_events] == [11, 8, 18]
-    assert all(event['code'] != 0 for event in down_events)
-    # ! must carry the macOS Shift flag.
-    shifted_event = down_events[-1]
-    shifted_flags = [flags for event, flags in inp.cg.flags if event is shifted_event]
-    assert shifted_flags == [MacInput.MOD_FLAGS['Shift_L']]
+    inp.text('ą')
+    assert [(e['code'], e['down']) for e in inp.cg.created] == [(0, True), (0, False)]
+    assert len(inp.cg.unicode) == 2
+    assert len(inp.cg.posted) == 2
 
 
-def test_runtime_client_helpers_when_dependencies_are_available():
+def test_runtime_client_ascii_helper_when_dependencies_are_available():
     try:
         from linux_client import ClientApp
-        from protocol import CLIPBOARD_SET, KEY, PacketReader, unpack_json
     except ModuleNotFoundError:
-        # Minimal artifact container does not ship PyAV. CI/release installs the
-        # full runtime and executes this branch there; static guards above still
-        # protect the source shape in lightweight environments.
+        # Lightweight artifact container may not ship PyAV/Tk runtime deps. CI/release
+        # installs the full runtime and exercises this branch there.
         return
 
     class Var:
@@ -116,29 +138,40 @@ def test_runtime_client_helpers_when_dependencies_are_available():
 
     client = ClientApp.__new__(ClientApp)
     client.linux_shortcuts_var = Var(True)
-    client.modifiers_down = {'Meta_L'}
-    client.connected = True
+    client.modifiers_down = set()
     packets = []
     client._enqueue = packets.append
-    client._get_local_clipboard = lambda: 'runtime clipboard'
 
-    assert client._map_keysym('Control_L') == 'Meta_L'
-    assert client._map_keysym('Control_R') == 'Control_R'
-    client._paste_clipboard_shortcut()
+    assert client._enqueue_printable_key('b') is True
     decoded = PacketReader().feed(b''.join(packets))
-    assert decoded[0] == (CLIPBOARD_SET, b'runtime clipboard')
-    key_events = [unpack_json(payload) for kind, payload in decoded[1:] if kind == KEY]
-    assert key_events[1:3] == [
-        {'keysym': 'v', 'down': True},
-        {'keysym': 'v', 'down': False},
+    assert [kind for kind, _ in decoded] == [KEY, KEY]
+    events = [unpack_json(payload) for _, payload in decoded]
+    assert events == [
+        {'keysym': 'b', 'down': True},
+        {'keysym': 'b', 'down': False},
     ]
+
+    packets.clear()
+    assert client._enqueue_printable_key('!') is True
+    decoded = PacketReader().feed(b''.join(packets))
+    events = [unpack_json(payload) for kind, payload in decoded if kind == KEY]
+    assert events == [
+        {'keysym': 'Shift_L', 'down': True},
+        {'keysym': '1', 'down': True},
+        {'keysym': '1', 'down': False},
+        {'keysym': 'Shift_L', 'down': False},
+    ]
+    assert client._enqueue_printable_key('ą') is False
 
 
 if __name__ == '__main__':
     test_linux_shortcut_keeps_right_ctrl_as_real_macos_control()
     test_paste_orders_clipboard_before_command_v()
     test_copy_cut_pull_is_scheduled_on_press_not_release()
-    test_ascii_key_mapping_for_simulator()
-    test_ascii_text_uses_real_mac_keycodes_not_keycode_zero_for_every_char()
-    test_runtime_client_helpers_when_dependencies_are_available()
+    test_ascii_mapping_uses_existing_key_packet_path()
+    test_clients_route_printable_ascii_to_physical_key_helper_before_text_fallback()
+    test_server_text_is_unicode_fallback_not_physical_ascii_synthesis()
+    test_control_session_does_not_disconnect_on_single_keyboard_injection_error()
+    test_unicode_fallback_still_posts_text_without_throwing()
+    test_runtime_client_ascii_helper_when_dependencies_are_available()
     print('keyboard/clipboard regression tests: OK')

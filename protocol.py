@@ -36,6 +36,35 @@ MKDIR_REQ = 39
 MKDIR_OK = 40
 ERROR = 255
 
+_ASCII_SHIFTED_KEYSYMS = {
+    '!': '1', '@': '2', '#': '3', '$': '4', '%': '5', '^': '6', '&': '7', '*': '8',
+    '(': '9', ')': '0', '_': 'minus', '+': 'equal', '{': 'bracketleft', '}': 'bracketright',
+    '|': 'backslash', ':': 'semicolon', '"': 'apostrophe', '<': 'comma', '>': 'period',
+    '?': 'slash', '~': 'grave',
+}
+_ASCII_PLAIN_KEYSYMS = {
+    '-': 'minus', '=': 'equal', '[': 'bracketleft', ']': 'bracketright', '\\': 'backslash',
+    ';': 'semicolon', "'": 'apostrophe', ',': 'comma', '.': 'period', '/': 'slash', '`': 'grave',
+    ' ': 'space',
+}
+
+
+def ascii_physical_keysym(char: str) -> tuple[str, bool] | None:
+    """Return (Mac keysym, temporary_shift_required) for printable US-ASCII."""
+    if len(char) != 1:
+        return None
+    if 'a' <= char <= 'z':
+        return char, False
+    if 'A' <= char <= 'Z':
+        return char.lower(), True
+    if '0' <= char <= '9':
+        return char, False
+    if char in _ASCII_PLAIN_KEYSYMS:
+        return _ASCII_PLAIN_KEYSYMS[char], False
+    if char in _ASCII_SHIFTED_KEYSYMS:
+        return _ASCII_SHIFTED_KEYSYMS[char], True
+    return None
+
 
 def pack_packet(kind: int, payload: bytes = b'') -> bytes:
     if not (0 <= kind <= 255):
