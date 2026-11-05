@@ -508,6 +508,42 @@ def parse_status(text: str) -> dict[str, str]:
     return out
 
 
+def recover_desktop_tls_fingerprint_for_profile(profile: dict) -> str:
+    """Recover Desktop TLS identity over the already-pinned SSH channel.
+
+    This is the migration/recovery path for older P0 helpers that do not yet
+    expose desktop_tls_fingerprint in `zmb-admin status`. The SSH connection
+    still uses StrictHostKeyChecking=yes and the profile-specific known_hosts,
+    so discovery or an unauthenticated TLS socket can never establish trust.
+    """
+    if not isinstance(profile, dict):
+        raise AdminError("This Mac is not paired for System administration")
+    remote = (
+        "test -f \"$HOME/.zorin-mac-bridge/server-cert.pem\" || exit 44; "
+        "test -x /usr/bin/openssl || exit 45; "
+        "tlsfp=$(/usr/bin/openssl x509 -in \"$HOME/.zorin-mac-bridge/server-cert.pem\" "
+        "-noout -fingerprint -sha256 2>/dev/null | /usr/bin/sed -n 's/^.*=//p' | /usr/bin/head -n 1); "
+        "test -n \"$tlsfp\" || exit 46; printf 'ZMB_DESKTOP_TLS_FINGERPRINT=%s\\n' \"$tlsfp\""
+    )
+    p = _run(_ssh_base(profile) + [remote], timeout=12)
+    if p.returncode != 0:
+        detail = (p.stderr or p.stdout or f"SSH exited with {p.returncode}").strip()
+        raise AdminError("Could not recover Desktop TLS identity through the paired SSH channel: " + detail)
+    fingerprint = ""
+    for line in (p.stdout or "").splitlines():
+        if line.startswith("ZMB_DESKTOP_TLS_FINGERPRINT="):
+            fingerprint = normalize_tls_fingerprint(line.split("=", 1)[1])
+            if fingerprint:
+                break
+    if not fingerprint:
+        raise AdminError("The paired Mac did not return a valid Desktop TLS identity")
+    server_id = str(profile.get("server_id") or "").strip()
+    host = str(profile.get("host") or "").strip()
+    if server_id and host:
+        save_profile(server_id, host, {**profile, "desktop_tls_fingerprint": fingerprint})
+    return fingerprint
+
+
 def get_status_for_profile(profile: dict) -> dict[str, str]:
     p = run_action_for_profile(profile, "status", timeout=12)
     if p.returncode != 0:

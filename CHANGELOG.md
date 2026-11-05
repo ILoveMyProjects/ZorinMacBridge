@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.14.4 - Desktop trust follows System pairing
+
+- removed the editable/manual Desktop TLS SHA input from the GTK trust path; the field is now read-only diagnostics,
+- Desktop Connect now resolves TLS identity only from persistent trust keyed by stable `server_id`,
+- when upgrading from an older Mac helper, missing Desktop TLS identity is recovered automatically through the already-pinned SSH/System profile,
+- an established Desktop TLS fingerprint is never silently replaced by a later P0/status refresh; identity changes are blocked as a security event,
+- added regression coverage for first trust, remembered trust, old-helper recovery, and changed-certificate rejection.
+
 ## 0.14.3 - Remembered SSH identity and migration hotfix
 
 - Reuse the SSH host key pinned during the first System pairing; reconfiguration automatically compares the live key with the remembered `known_hosts` entry and does not require another walk to the Mac when it matches.

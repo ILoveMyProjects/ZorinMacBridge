@@ -35,6 +35,7 @@ from linux_client import (
     VIDEO_QUALITY_PRESETS,
     format_fp,
     human_size,
+    is_lan_ip,
     normalize_fp,
     remote_join,
 )
@@ -42,7 +43,7 @@ from protocol import CLIPBOARD_GET, CLIPBOARD_SET, KEY, MOUSE_BUTTON, MOUSE_MOVE
 from discovery import DiscoveredServer, discover_servers
 from resources import resource_path
 from settings import client_record
-from zmb_pairing_state import persist_desktop_trust
+from zmb_pairing_state import DesktopTrustMismatch, ensure_desktop_trust, persist_desktop_trust, trusted_desktop_fingerprint
 from secret_store import get_password as get_saved_password
 from tray_icon import TrayController
 from updates import current_version
@@ -152,6 +153,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self._update_check_serial = 0
         self._credential_serial = 0
         self._file_render_serial = 0
+        self._desktop_trust_recovery_busy = False
 
         self._build_native_ui()
         self._install_css()
@@ -271,13 +273,15 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
 
         third = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.connection_card.append(third)
-        fp_label = Gtk.Label(label='TLS fingerprint', xalign=0)
+        fp_label = Gtk.Label(label='Desktop trust', xalign=0)
         fp_label.set_width_chars(12)
         third.append(fp_label)
         self.fp_entry = Gtk.Entry()
         self.fp_entry.set_hexpand(True)
-        self.fp_entry.set_placeholder_text('SHA-256 fingerprint from the Mac server')
-        self.fp_entry.connect('changed', lambda w: self.fp_var.set(w.get_text()))
+        self.fp_entry.set_editable(False)
+        self.fp_entry.set_can_focus(False)
+        self.fp_entry.set_placeholder_text('Established automatically by System pairing')
+        self.fp_entry.set_tooltip_text('Read-only TLS identity pinned automatically through the verified System/SSH pairing.')
         third.append(self.fp_entry)
 
         opts = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
@@ -840,10 +844,18 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             profile_sid = str(profile.get('server_id') or '').strip()
             profile_host = str(profile.get('host') or '').strip()
             if (not sid or not profile_sid or profile_sid == sid) and (not host or not profile_host or profile_host == host):
-                fingerprint = persist_desktop_trust(profile, status)
+                try:
+                    fingerprint = persist_desktop_trust(profile, status)
+                except DesktopTrustMismatch as exc:
+                    fingerprint = trusted_desktop_fingerprint(sid)
+                    self._set_tls_fingerprint(fingerprint)
+                    self._log('ERROR', f'SECURITY: {exc}')
+                    self.status_var.set('SECURITY WARNING — Desktop TLS identity changed. Desktop connection is blocked; System/SSH pairing remains available.')
                 if fingerprint:
                     self._set_tls_fingerprint(fingerprint)
-                    self._log('INFO', 'Desktop TLS trust learned from the verified P0 SSH pairing; no second fingerprint confirmation is required.')
+                    self._log('INFO', 'Desktop TLS trust loaded from the verified System pairing; no second fingerprint confirmation is required.')
+                else:
+                    self._recover_desktop_trust_async(profile, connect_after=False)
         if include_system and hasattr(self, 'system_controller'):
             self.system_controller.selection_changed()
         if hasattr(self, 'terminal_controller'):
@@ -892,7 +904,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
 
         threading.Thread(target=credential_worker, daemon=True).start()
 
-        trust = 'Saved identity loaded.' if saved_fp else 'Verify the TLS fingerprint once.'
+        trust = 'Desktop identity trusted.' if saved_fp else 'Desktop trust will be synchronized automatically from System pairing.'
         host_text = f'{server.hostname} / {server.ip}' if server.hostname else server.ip
         roles = []
         if server.desktop_available:
@@ -905,6 +917,86 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.status_var.set(f'Selected {server.name} at {host_text}:{server.port} ({role_text}). {trust}')
         self._log('INFO', f'Discovery selection: {server.name} hostname={server.hostname or "?"} ip={server.ip}:{server.port}; server_id={self.selected_server_id}; roles={role_text}')
         self.pairing_state_changed(include_system=False)
+
+    def _connection_params(self):
+        """Return Desktop connection parameters using only persisted paired trust.
+
+        GTK deliberately does not accept a user-entered TLS SHA anymore. The
+        fingerprint must be learned through System pairing and stored by stable
+        server_id. This prevents a second/manual trust workflow from reappearing.
+        """
+        ip = str(self.ip_var.get() or '').strip()
+        if not is_lan_ip(ip):
+            raise ValueError('Only a literal LAN/loopback/link-local IP address is allowed. Hostnames and public IPs are blocked.')
+        port = int(str(self.port_var.get() or '').strip())
+        if not (1 <= port <= 65535):
+            raise ValueError('Invalid port')
+        password = self.password_var.get()
+        sid = str(self.selected_server_id or '').strip()
+        expected_fp = normalize_fp(trusted_desktop_fingerprint(sid))
+        if len(expected_fp) != 64:
+            raise ValueError('Desktop trust is not established yet. Pair this Mac once in System; ZorinMacBridge will learn the Desktop identity automatically through the verified SSH channel.')
+        self._set_tls_fingerprint(format_fp(expected_fp))
+        return ip, port, password, expected_fp
+
+    def _recover_desktop_trust_async(self, profile: dict | None = None, *, connect_after: bool = False) -> bool:
+        """Recover missing Desktop trust on a worker through pinned SSH/P0."""
+        if self._desktop_trust_recovery_busy:
+            if connect_after:
+                self.status_var.set('Desktop identity recovery is already running…')
+            return True
+        sid = str(self.selected_server_id or '').strip()
+        if trusted_desktop_fingerprint(sid):
+            self._set_tls_fingerprint(client_record(sid).get('fingerprint', ''))
+            if connect_after:
+                GLib.idle_add(self.connect_remote)
+            return True
+        if profile is None:
+            try:
+                profile = self.system_controller._profile() if hasattr(self, 'system_controller') else None
+            except Exception:
+                profile = None
+        if not isinstance(profile, dict):
+            return False
+        profile_sid = str(profile.get('server_id') or '').strip()
+        if sid and profile_sid and sid != profile_sid:
+            return False
+        self._desktop_trust_recovery_busy = True
+        if connect_after:
+            self.status_var.set('Recovering Desktop identity through the paired SSH channel…')
+        self._log('INFO', 'Recovering missing Desktop TLS trust through the already-pinned System/SSH profile.')
+
+        def worker() -> None:
+            try:
+                fingerprint = ensure_desktop_trust(profile)
+                error = '' if fingerprint else 'The paired Mac did not provide a Desktop TLS identity.'
+            except Exception as exc:
+                fingerprint = ''
+                error = str(exc)
+            GLib.idle_add(done, fingerprint, error)
+
+        def done(fingerprint: str, error: str):
+            self._desktop_trust_recovery_busy = False
+            current_sid = str(self.selected_server_id or '').strip()
+            if sid and current_sid and current_sid != sid:
+                return False
+            if fingerprint:
+                self._set_tls_fingerprint(fingerprint)
+                self._log('INFO', 'Desktop TLS trust recovered through pinned SSH and persisted; no manual SHA is required.')
+                if connect_after:
+                    self.connect_remote()
+            else:
+                self._log('ERROR', 'Desktop trust recovery failed: ' + (error or 'unknown error'))
+                if connect_after:
+                    self._dialog(
+                        'Desktop identity unavailable',
+                        'This Mac is paired, but its Desktop TLS identity could not be recovered through the verified SSH channel. '
+                        'Open System and refresh/recover the Mac. No manual SHA entry is required or accepted.\n\n' + (error or ''),
+                    )
+            return False
+
+        threading.Thread(target=worker, daemon=True).start()
+        return True
 
     def connect_remote(self) -> None:
         if self.connected or (self.net_thread is not None and self.net_thread.is_alive()):
@@ -925,6 +1017,14 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             except Exception:
                 pass
             self._reconnect_source = 0
+        if not trusted_desktop_fingerprint(str(self.selected_server_id or '').strip()):
+            if self._recover_desktop_trust_async(connect_after=True):
+                return
+            self._dialog(
+                'System pairing required',
+                'Pair this Mac once in the System tab. Desktop trust is then learned and remembered automatically; no separate SHA fingerprint is required.',
+            )
+            return
         try:
             ip, port, _password, expected_fp = self._connection_params()
         except Exception as exc:

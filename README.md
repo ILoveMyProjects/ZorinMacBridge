@@ -126,6 +126,12 @@ ZorinMacBridge uses two different credentials:
 `install-macos.sh` now performs unattended setup by default: it enables Remote Login (SSH), installs/repairs P0, verifies that SSH was enabled, and prompts for the ZorinMacBridge session password. Use `./install-macos.sh --app-only` only when you intentionally want to install the app without P0/SSH setup.
 
 
+### Desktop trust is part of System pairing (v0.14.4)
+
+On the Zorin GTK client, Desktop no longer has a second user-managed SHA trust workflow. Pair the Mac once in **System**. The client persists the Desktop TLS fingerprint learned through that verified SSH channel and uses it automatically for Desktop connections. The Desktop trust field is read-only diagnostics.
+
+For Macs still running an older P0 helper, the Zorin client can recover the existing Desktop certificate fingerprint through the already-pinned SSH profile, so migration does not require walking back to the Mac to copy another SHA. Once a Desktop TLS identity is pinned, a different certificate is treated as an identity change and is blocked rather than silently replacing saved trust.
+
 ### Remembered SSH identity and migration hotfix (v0.14.3)
 
 After the first verified System pairing, ZorinMacBridge reuses the pinned SSH host key from its private `known_hosts` file. Reconfiguration automatically compares the live Mac key with the remembered key; normal reboot, logout, DHCP changes and updates do **not** require another trip to the Mac. A genuinely changed SSH host key is treated as a security event and requires explicit re-verification.
