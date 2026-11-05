@@ -200,10 +200,10 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         .zmb-file-row { padding: 7px 9px; }
         .zmb-status { font-weight: 600; }
         .zmb-fullscreen-bar {
-            background: alpha(#111318, 0.88);
-            border-radius: 12px;
-            padding: 8px 10px;
-            margin: 10px;
+            background: alpha(#111318, 0.96);
+            border-radius: 0;
+            padding: 8px 12px;
+            margin: 0;
             color: white;
         }
         .zmb-fullscreen-bar label { color: white; }
@@ -232,6 +232,9 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         menu.append('About ZorinMacBridge', 'app.about')
         menu_button = Gtk.MenuButton(icon_name='open-menu-symbolic', menu_model=menu)
         self.header.pack_end(menu_button)
+
+        self.fullscreen_bar = self._build_fullscreen_bar()
+        outer.append(self.fullscreen_bar)
 
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         page.set_margin_start(12)
@@ -317,17 +320,17 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.video_stats_label.set_tooltip_text('Decoded FPS · receive rate · local latest-frame drops · render queue delay')
         video_row.append(self.video_stats_label)
 
-        status_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        page.append(status_box)
+        self.status_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        page.append(self.status_box)
         self.status_icon = Gtk.Image.new_from_icon_name('network-offline-symbolic')
-        status_box.append(self.status_icon)
+        self.status_box.append(self.status_icon)
         self.status_label = Gtk.Label(label='Disconnected', xalign=0)
         self.status_label.add_css_class('zmb-status')
         self.status_label.set_hexpand(True)
-        status_box.append(self.status_label)
+        self.status_box.append(self.status_label)
         hint = Gtk.Label(label='Double-click desktop to enter full screen · Alt+Esc exits', xalign=1)
         hint.add_css_class('zmb-muted')
-        status_box.append(hint)
+        self.status_box.append(hint)
 
         self.stack_switcher = Gtk.StackSwitcher()
         page.append(self.stack_switcher)
@@ -394,11 +397,35 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         sw.connect('notify::active', changed)
         return sw
 
-    def _build_desktop_page(self) -> Gtk.Widget:
-        overlay = Gtk.Overlay()
-        overlay.set_hexpand(True)
-        overlay.set_vexpand(True)
+    def _build_fullscreen_bar(self) -> Gtk.Widget:
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        bar.add_css_class('zmb-fullscreen-bar')
+        bar.set_hexpand(True)
+        bar.set_visible(False)
 
+        self.fs_status_icon = Gtk.Image.new_from_icon_name('network-offline-symbolic')
+        bar.append(self.fs_status_icon)
+        self.fs_status_label = Gtk.Label(label='Disconnected', xalign=0)
+        self.fs_status_label.set_hexpand(True)
+        bar.append(self.fs_status_label)
+        self.fs_quality_label = Gtk.Label(label='Quality: Adaptive', xalign=0)
+        bar.append(self.fs_quality_label)
+        self.fs_input_label = Gtk.Label(label='Input: view only', xalign=0)
+        bar.append(self.fs_input_label)
+
+        exit_hint = Gtk.Label(label='Alt+Esc exits', xalign=1)
+        exit_hint.add_css_class('zmb-muted')
+        bar.append(exit_hint)
+        exit_btn = Gtk.Button(label='Exit Full Screen')
+        exit_btn.connect('clicked', lambda *_: self._exit_fullscreen())
+        bar.append(exit_btn)
+
+        bar_click = Gtk.GestureClick(button=1)
+        bar_click.connect('pressed', self._fullscreen_bar_pressed)
+        bar.add_controller(bar_click)
+        return bar
+
+    def _build_desktop_page(self) -> Gtk.Widget:
         frame = Gtk.Frame()
         frame.add_css_class('zmb-remote')
         frame.set_hexpand(True)
@@ -410,34 +437,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.picture.set_content_fit(Gtk.ContentFit.CONTAIN)
         self.picture.set_focusable(True)
         frame.set_child(self.picture)
-        overlay.set_child(frame)
-
-        self.fullscreen_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        self.fullscreen_bar.add_css_class('zmb-fullscreen-bar')
-        self.fullscreen_bar.set_halign(Gtk.Align.FILL)
-        self.fullscreen_bar.set_valign(Gtk.Align.START)
-        self.fullscreen_bar.set_visible(False)
-        self.fs_status_icon = Gtk.Image.new_from_icon_name('network-offline-symbolic')
-        self.fullscreen_bar.append(self.fs_status_icon)
-        self.fs_status_label = Gtk.Label(label='Disconnected', xalign=0)
-        self.fs_status_label.set_hexpand(True)
-        self.fullscreen_bar.append(self.fs_status_label)
-        self.fs_quality_label = Gtk.Label(label='Balanced', xalign=0)
-        self.fullscreen_bar.append(self.fs_quality_label)
-        self.fs_input_label = Gtk.Label(label='Input: view only', xalign=0)
-        self.fullscreen_bar.append(self.fs_input_label)
-        exit_hint = Gtk.Label(label='Double-click this bar or press Alt+Esc to exit', xalign=1)
-        exit_hint.add_css_class('zmb-muted')
-        self.fullscreen_bar.append(exit_hint)
-        exit_btn = Gtk.Button(label='Exit Full Screen')
-        exit_btn.connect('clicked', lambda *_: self._exit_fullscreen())
-        self.fullscreen_bar.append(exit_btn)
-        overlay.add_overlay(self.fullscreen_bar)
-
-        bar_click = Gtk.GestureClick(button=1)
-        bar_click.connect('pressed', self._fullscreen_bar_pressed)
-        self.fullscreen_bar.add_controller(bar_click)
-        return overlay
+        return frame
 
     def _build_files_page(self) -> Gtk.Widget:
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -1331,8 +1331,15 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             return True
 
         key_lower = keysym.lower() if len(keysym) == 1 else keysym
+        if self._command_down() and key_lower in {'c', 'x'}:
+            # Copy/cut updates the Mac pasteboard on the key-down chord.  Pull it
+            # shortly afterwards regardless of which key the user releases first.
+            self.root.after(140, self._request_remote_clipboard)
         if self._command_down() and key_lower == 'v':
-            self._push_clipboard_silent()
+            # Read the Linux clipboard off the GTK thread, then send the clipboard
+            # update and only afterwards synthesize Command+V on the Mac.
+            self._paste_clipboard_shortcut()
+            return True
 
         if keysym in SPECIAL_KEYS or self._has_non_text_modifier():
             self._enqueue(pack_json(KEY, {'keysym': keysym, 'down': True}))
@@ -1360,8 +1367,6 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         elif keysym in self.keys_down:
             self.keys_down.discard(keysym)
             self._enqueue(pack_json(KEY, {'keysym': keysym, 'down': False}))
-        if command_was_down and key_lower in {'c', 'x'}:
-            self.root.after(120, self._request_remote_clipboard)
         return True
 
     def _capture_input_changed(self) -> None:
@@ -1393,6 +1398,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.stack.set_visible_child_name('desktop')
         self.header.set_visible(False)
         self.connection_card.set_visible(False)
+        self.status_box.set_visible(False)
         self.stack_switcher.set_visible(False)
         self.fullscreen_bar.set_visible(True)
         self._refresh_fullscreen_bar()
@@ -1413,6 +1419,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.unfullscreen()
         self.header.set_visible(True)
         self.connection_card.set_visible(True)
+        self.status_box.set_visible(True)
         self.stack_switcher.set_visible(True)
         self.fullscreen_active = False
         self._log('INFO', 'Exited full-screen desktop view.')
@@ -1473,6 +1480,15 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             GLib.idle_add(callback, text)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _paste_clipboard_shortcut(self) -> None:
+        def done(text):
+            if text is not None:
+                self._enqueue(pack_packet(CLIPBOARD_SET, text.encode('utf-8')))
+            self._enqueue_command_shortcut('v')
+            return False
+
+        self._read_local_clipboard_async(done)
 
     def _push_clipboard_silent(self) -> None:
         def done(text):

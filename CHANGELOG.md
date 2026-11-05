@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.14.6 - Keyboard and clipboard shortcut reliability
+
+- ordinary printable ASCII text now reaches macOS with the corresponding physical Mac virtual keycode instead of using keycode `0` for every Unicode event; this prevents iOS Simulator from interpreting unrelated keys as repeated `A`,
+- the Unicode payload is retained alongside the physical keycode so normal macOS text controls continue to receive the intended character,
+- `Ctrl+V` / `Command+V` clipboard bridging now waits for Linux → Mac clipboard synchronization before synthesizing the paste shortcut, eliminating the old race that could paste stale data or nothing,
+- copy/cut clipboard pullback is scheduled from the key-down chord instead of depending on key-release order, so releasing Ctrl before `C`/`X` no longer loses synchronization,
+- preserved the documented shortcut model: left Ctrl maps to macOS Command when **Linux shortcuts** is enabled, while right Ctrl remains real macOS Control,
+- added keyboard/clipboard regression coverage for Simulator keycodes and shortcut ordering.
+
+## 0.14.5 - Full-screen toolbar outside the remote image
+
+- moved the full-screen status/quality/input/exit controls out of the remote-desktop overlay and into the application top layout,
+- the Mac image now starts below the full-screen toolbar, so controls never cover the remote desktop,
+- the normal Desktop status/hint row is hidden while full-screen is active to avoid two competing top bars,
+- kept `Alt+Esc` and double-click-on-toolbar exit behavior while making **Exit Full Screen** permanently visible at the top,
+- added regression coverage preventing the full-screen toolbar from being reintroduced as a `Gtk.Overlay` child.
+
 ## 0.14.4 - Desktop trust follows System pairing
 
 - removed the editable/manual Desktop TLS SHA input from the GTK trust path; the field is now read-only diagnostics,

@@ -36,6 +36,7 @@ jobs:
           /usr/bin/python3 test_update_ui.py
           /usr/bin/python3 test_pairing_sync.py
           /usr/bin/python3 test_desktop_trust.py
+          /usr/bin/python3 test_keyboard_clipboard.py
           /usr/bin/python3 -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); gi.require_version('Vte','3.91'); from gi.repository import Gtk, Adw, Vte; import av; av.CodecContext.create('h264','r'); import keyring; print('GTK4/libadwaita/VTE + H.264 runtime OK')"
           bash -n install-linux.sh
           bash -n install-macos.sh

@@ -261,7 +261,7 @@ The client starts in **view-only mode**. Enable **Capture keyboard & mouse** whe
 ### Full-screen remote desktop
 
 - **Double-click** the remote desktop image to enter full-screen mode.
-- While full-screen, a top status bar shows connection state, selected video quality, input-capture state, and the exit instructions.
+- While full-screen, a dedicated top toolbar sits outside the remote Mac image and shows connection state, selected video quality, input-capture state, and the exit control. It never overlays the Mac desktop.
 - Leave full-screen with **Alt+Esc**, the **Exit Full Screen** button, or by **double-clicking the top status bar**.
 - Double-clicking the remote image while already full-screen is sent to the Mac instead of exiting, so normal remote double-click actions remain usable.
 - **Alt+Esc is reserved locally** while full-screen is active and is not sent to the Mac.
@@ -287,6 +287,8 @@ The connection card also shows live P5 video telemetry. **Auto reconnect** is en
 | `Ctrl+F` | `⌘F` |
 
 Use **Right Ctrl+C** when you need real macOS `Control+C`, for example to interrupt a process in Terminal.
+
+Starting with v0.14.6, ordinary printable ASCII keys are delivered with their real macOS virtual keycodes (plus the intended Unicode character). This matters for Xcode's iOS Simulator, which can treat keycode-only/Unicode-only synthetic events differently from normal AppKit text fields; typing `b`, `c`, digits, punctuation, and shifted ASCII no longer reuses the physical `A` keycode.
 
 ## Clipboard
 

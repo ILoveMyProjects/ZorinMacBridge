@@ -48,9 +48,12 @@ assert 'bootstrap_installed_app_identity' in server
 
 assert 'Auto reconnect' in client
 assert 'Video quality' in client
-assert 'Double-click this bar or press Alt+Esc to exit' in client
+assert "exit_hint = Gtk.Label(label='Alt+Esc exits'" in client
 assert 'def _schedule_auto_reconnect' in client
 assert 'def _fullscreen_bar_pressed' in client
+assert 'def _build_fullscreen_bar' in client
+assert 'outer.append(self.fullscreen_bar)' in client
+assert 'overlay.add_overlay(self.fullscreen_bar)' not in client
 assert 'and not self.fullscreen_active' in client
 print('native UI static tests: OK')
 

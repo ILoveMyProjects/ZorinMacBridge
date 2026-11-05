@@ -37,6 +37,41 @@ KEY_PATH = APP_DIR / 'server-key.pem'
 DEFAULT_SHARE = Path.home() / 'ZorinMac-Share'
 CHUNK = 256 * 1024
 MAX_CLIPBOARD = 2 * 1024 * 1024
+
+
+_ASCII_SHIFTED_KEYS = {
+    '!': '1', '@': '2', '#': '3', '$': '4', '%': '5', '^': '6', '&': '7', '*': '8',
+    '(': '9', ')': '0', '_': 'minus', '+': 'equal', '{': 'bracketleft', '}': 'bracketright',
+    '|': 'backslash', ':': 'semicolon', '"': 'apostrophe', '<': 'comma', '>': 'period',
+    '?': 'slash', '~': 'grave',
+}
+_ASCII_PLAIN_KEYS = {
+    '-': 'minus', '=': 'equal', '[': 'bracketleft', ']': 'bracketright', '\\': 'backslash',
+    ';': 'semicolon', "'": 'apostrophe', ',': 'comma', '.': 'period', '/': 'slash', '`': 'grave',
+    ' ': 'space',
+}
+
+
+def ascii_keystroke_for_char(char: str) -> tuple[str, bool] | None:
+    """Return (Mac key symbol, shift_required) for printable US-ASCII text.
+
+    iOS Simulator consumes physical keyboard events more faithfully than a
+    keycode-0 CGEvent carrying only a Unicode payload.  Mapping ASCII to the
+    actual Mac virtual key keeps Simulator typing and normal macOS apps aligned.
+    """
+    if len(char) != 1:
+        return None
+    if 'a' <= char <= 'z':
+        return char, False
+    if 'A' <= char <= 'Z':
+        return char.lower(), True
+    if '0' <= char <= '9':
+        return char, False
+    if char in _ASCII_PLAIN_KEYS:
+        return _ASCII_PLAIN_KEYS[char], False
+    if char in _ASCII_SHIFTED_KEYS:
+        return _ASCII_SHIFTED_KEYS[char], True
+    return None
 MAX_FILE_SIZE = 100 * 1024**3
 
 V4_ALLOWED = tuple(ipaddress.ip_network(n) for n in (
@@ -363,15 +398,37 @@ class MacInput:
     def text(self, text: str) -> None:
         if not text:
             return
-        units = text.encode('utf-16-le')
-        count = len(units) // 2
-        arr = (ctypes.c_uint16 * count).from_buffer_copy(units)
-        event = self.cg.CGEventCreateKeyboardEvent(None, 0, True)
-        self.cg.CGEventKeyboardSetUnicodeString(event, count, arr)
-        self._post(event)
-        event = self.cg.CGEventCreateKeyboardEvent(None, 0, False)
-        self.cg.CGEventKeyboardSetUnicodeString(event, count, arr)
-        self._post(event)
+        for char in text:
+            physical = ascii_keystroke_for_char(char)
+            if physical is not None:
+                keysym, needs_shift = physical
+                code = self.KEYCODES.get(keysym)
+                if code is not None:
+                    flags = self.MOD_FLAGS['Shift_L'] if needs_shift else 0
+                    units = char.encode('utf-16-le')
+                    count = len(units) // 2
+                    arr = (ctypes.c_uint16 * count).from_buffer_copy(units)
+                    for down in (True, False):
+                        event = self.cg.CGEventCreateKeyboardEvent(None, code, down)
+                        self.cg.CGEventSetFlags(event, ctypes.c_uint64(flags))
+                        # Keep the Unicode payload for normal macOS text controls,
+                        # while the real keycode lets iOS Simulator see the actual key.
+                        self.cg.CGEventKeyboardSetUnicodeString(event, count, arr)
+                        self._post(event)
+                    continue
+
+            # Non-ASCII fallback keeps the previous Unicode path.  It is still
+            # useful for AppKit text controls, while ASCII (the Simulator failure
+            # case) never uses keycode 0 anymore.
+            units = char.encode('utf-16-le')
+            count = len(units) // 2
+            arr = (ctypes.c_uint16 * count).from_buffer_copy(units)
+            event = self.cg.CGEventCreateKeyboardEvent(None, 0, True)
+            self.cg.CGEventKeyboardSetUnicodeString(event, count, arr)
+            self._post(event)
+            event = self.cg.CGEventCreateKeyboardEvent(None, 0, False)
+            self.cg.CGEventKeyboardSetUnicodeString(event, count, arr)
+            self._post(event)
 
     def release_all(self) -> None:
         for key in list(self.held_modifiers):

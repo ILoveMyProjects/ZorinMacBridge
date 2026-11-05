@@ -1186,6 +1186,28 @@ class ClientApp:
             return 'Meta_L' if keysym.endswith('_L') else 'Meta_R'
         return keysym
 
+    def _enqueue_command_shortcut(self, keysym: str) -> None:
+        """Send one macOS Command shortcut without relying on modifier timing.
+
+        This is used for clipboard paste after the Linux clipboard has been copied
+        to the Mac.  A physical Ctrl key may already have been mapped to Meta_L;
+        restore that logical hold after the synthetic chord so continued shortcuts
+        still work while the user keeps Ctrl pressed.
+        """
+        restore_left_meta = 'Meta_L' in self.modifiers_down
+        self._enqueue(pack_json(KEY, {'keysym': 'Meta_L', 'down': True}))
+        self._enqueue(pack_json(KEY, {'keysym': keysym, 'down': True}))
+        self._enqueue(pack_json(KEY, {'keysym': keysym, 'down': False}))
+        self._enqueue(pack_json(KEY, {'keysym': 'Meta_L', 'down': False}))
+        if restore_left_meta:
+            self._enqueue(pack_json(KEY, {'keysym': 'Meta_L', 'down': True}))
+
+    def _paste_clipboard_shortcut(self) -> None:
+        text = self._get_local_clipboard()
+        if text is not None:
+            self._enqueue(pack_packet(CLIPBOARD_SET, text.encode('utf-8')))
+        self._enqueue_command_shortcut('v')
+
     def _shortcut_mode_changed(self) -> None:
         self._release_local_modifiers()
 
@@ -1212,8 +1234,16 @@ class ClientApp:
             return 'break'
 
         key_lower = keysym.lower() if len(keysym) == 1 else keysym
+        if self._command_down() and key_lower in {'c', 'x'}:
+            # Copy/cut updates the Mac pasteboard on the key-down chord.  Pull it
+            # shortly afterwards regardless of which key the user releases first.
+            self.root.after(140, self._request_remote_clipboard)
         if self._command_down() and key_lower == 'v':
-            self._push_clipboard_silent()
+            # Clipboard synchronization must finish before macOS sees Command+V.
+            # The old path started an async clipboard copy and immediately sent V,
+            # so the Mac could paste stale data (or nothing).
+            self._paste_clipboard_shortcut()
+            return 'break'
 
         if keysym in SPECIAL_KEYS or self._has_non_text_modifier():
             self._enqueue(pack_json(KEY, {'keysym': keysym, 'down': True}))
@@ -1231,9 +1261,6 @@ class ClientApp:
         if not self.capture_input_var.get():
             return 'break'
         keysym = self._map_keysym(event.keysym)
-        key_lower = keysym.lower() if len(keysym) == 1 else keysym
-        command_was_down = self._command_down()
-
         if keysym in self.modifiers_down:
             self.modifiers_down.discard(keysym)
             self._enqueue(pack_json(KEY, {'keysym': keysym, 'down': False}))
@@ -1241,8 +1268,6 @@ class ClientApp:
             self.keys_down.discard(keysym)
             self._enqueue(pack_json(KEY, {'keysym': keysym, 'down': False}))
 
-        if command_was_down and key_lower in {'c', 'x'}:
-            self.root.after(120, self._request_remote_clipboard)
         return 'break'
 
     def _release_local_modifiers(self) -> None:
