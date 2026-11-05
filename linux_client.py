@@ -133,6 +133,8 @@ class ClientApp:
         self._credential_serial = 0
         self._discovery_serial = 0
         self._discovery_busy = False
+        self._update_check_busy = False
+        self._update_check_serial = 0
 
         self.outgoing: queue.Queue[bytes] = queue.Queue(maxsize=1000)
         self._mouse_move_lock = threading.Lock()
@@ -441,15 +443,37 @@ class ClientApp:
         threading.Thread(target=worker, daemon=True).start()
 
     def check_updates(self) -> None:
+        if self._update_check_busy:
+            self.status_var.set('Update check is already running…')
+            return
+
+        self._update_check_busy = True
+        self._update_check_serial += 1
+        token = self._update_check_serial
         self.status_var.set('Checking GitHub Releases for updates…')
-        self._log('INFO', 'Manual update check requested.')
+        self._log('INFO', f'Manual update check requested (token={token}).')
+
+        def watchdog() -> None:
+            if token != self._update_check_serial or not self._update_check_busy:
+                return
+            # Invalidate any late worker result. urllib's timeout is per socket
+            # operation, so this main-loop watchdog is the final UI deadline.
+            self._update_check_busy = False
+            self._update_check_serial += 1
+            watchdog_token = self._update_check_serial
+            message = 'GitHub Releases did not respond within 15 seconds. Try again when the network is available.'
+            self._log('WARNING', f'Update check watchdog expired (token={token}).')
+            self.ui_queue.put(('update_timeout', watchdog_token, message))
+
+        self.root.after(15000, watchdog)
 
         def worker() -> None:
             try:
-                self.ui_queue.put(('update', check_for_updates()))
+                info = check_for_updates(timeout=8.0)
+                self.ui_queue.put(('update', token, info))
             except Exception as exc:
                 self._log('ERROR', f'Update check failed: {type(exc).__name__}: {exc}')
-                self.ui_queue.put(('update_error', str(exc)))
+                self.ui_queue.put(('update_error', token, str(exc)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -953,7 +977,10 @@ class ClientApp:
                     self.status_var.set(f'LAN discovery error: {error}')
                     self._log('ERROR', f'LAN discovery error: {error}')
                 elif item[0] == 'update':
-                    info = item[1]
+                    _, token, info = item
+                    if token != self._update_check_serial:
+                        continue
+                    self._update_check_busy = False
                     self._log('INFO', f'Update check completed: installed={info.current}, latest={info.latest}, available={info.available}')
                     if info.available:
                         if messagebox.askyesno(
@@ -984,11 +1011,21 @@ class ClientApp:
                         'The update was not installed.\n\n' + item[1],
                     )
                 elif item[0] == 'update_error':
+                    _, token, error = item
+                    if token != self._update_check_serial:
+                        continue
+                    self._update_check_busy = False
                     self.status_var.set('Update check failed.')
                     messagebox.showerror(
                         'Update check failed',
-                        'The manual update check could not reach GitHub Releases.\n\n' + item[1],
+                        'The manual update check could not reach GitHub Releases.\n\n' + error,
                     )
+                elif item[0] == 'update_timeout':
+                    _, token, error = item
+                    if token != self._update_check_serial:
+                        continue
+                    self.status_var.set('Update check timed out.')
+                    messagebox.showerror('Update check timed out', error)
         except queue.Empty:
             pass
 

@@ -1,3 +1,12 @@
+## v0.14.1
+
+- Hotfix: repaired the native GTK update-result path on Zorin. `linux_client_gtk.py` now implements `_show_update_result()` instead of calling a missing method after GitHub Releases returns.
+- Manual update checks now reject duplicate concurrent checks and carry a generation token so late/stale network results cannot overwrite a newer UI state.
+- Added a 15-second main-loop watchdog around the GitHub release check; the client returns to a usable state even if DNS/TLS/socket behavior outlives urllib's per-operation timeout.
+- The GTK periodic tick now catches and logs individual queue-handler failures instead of allowing one callback exception to remove the periodic GLib source and make the whole client appear hung.
+- Added regression coverage for update-result handling and wired it into CI/release tests.
+- Version advanced to 0.14.1.
+
 ## v0.14.0
 
 - P7 setup hardening: the macOS app now has a prominent **Required setup for full Zorin operation** panel. Missing prerequisites are shown in red as `REQUIRED` instead of being buried in logs or optional-looking status text.

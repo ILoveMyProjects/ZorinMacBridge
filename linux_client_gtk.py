@@ -147,6 +147,8 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self._discovery_serial = 0
         self._discovery_watchdog = 0
         self._discovery_busy = False
+        self._update_check_busy = False
+        self._update_check_serial = 0
         self._credential_serial = 0
         self._file_render_serial = 0
 
@@ -617,6 +619,34 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         dlg.connect('response', lambda _d, response: callback() if response == 'ok' else None)
         dlg.present()
 
+    def _show_update_result(self, info) -> None:
+        self._log('INFO', f'Update check completed: installed={info.current}, latest={info.latest}, available={info.available}')
+        if not info.available:
+            self.status_var.set('Update check completed.')
+            self._dialog('ZorinMacBridge update', f'You are up to date (version {info.current}).')
+            return
+
+        self.status_var.set(f'ZorinMacBridge {info.latest} is available.')
+        dlg = Adw.MessageDialog(
+            transient_for=self,
+            heading='ZorinMacBridge update',
+            body=f'Version {info.latest} is available.\nInstalled: {info.current}\n\nDownload, verify, and install it now?',
+        )
+        dlg.add_response('cancel', 'Cancel')
+        dlg.add_response('install', 'Install update')
+        dlg.set_default_response('install')
+        dlg.set_close_response('cancel')
+        dlg.set_response_appearance('install', Adw.ResponseAppearance.SUGGESTED)
+
+        def responded(_dialog, response: str) -> None:
+            if response == 'install':
+                self._install_update(info)
+            else:
+                self.status_var.set('Update cancelled.')
+
+        dlg.connect('response', responded)
+        dlg.present()
+
     def show_window(self) -> None:
         self.present()
 
@@ -888,7 +918,14 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
     # ---------- Queue / video ----------
 
     def _gtk_tick(self):
-        self._process_gtk_queue()
+        try:
+            self._process_gtk_queue()
+        except Exception as exc:
+            # Never let a single UI event remove the GLib periodic source.
+            # The failed queue item has already been consumed, so the next tick
+            # can continue servicing video/input and future actions.
+            self.status_var.set('A UI action failed; ZorinMacBridge kept running. See Logs.')
+            self._log('ERROR', f'GTK queue handler failed: {type(exc).__name__}: {exc}')
         try:
             viewport = int(self.picture.get_allocated_width())
             if viewport >= 320:
@@ -965,7 +1002,11 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                 elif kind == 'discovery_error':
                     self._discovery_error(*item[1:])
                 elif kind == 'update':
-                    self._show_update_result(item[1])
+                    _, token, info = item
+                    if token != self._update_check_serial:
+                        continue
+                    self._update_check_busy = False
+                    self._show_update_result(info)
                 elif kind == 'update_progress':
                     self.status_var.set(item[1])
                 elif kind == 'update_installed':
@@ -977,8 +1018,18 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                     self.status_var.set('Update installation failed.')
                     self._dialog('Update installation failed', 'The update was not installed.\n\n' + item[1])
                 elif kind == 'update_error':
+                    _, token, error = item
+                    if token != self._update_check_serial:
+                        continue
+                    self._update_check_busy = False
                     self.status_var.set('Update check failed.')
-                    self._dialog('Update check failed', 'The manual update check could not reach GitHub Releases.\n\n' + item[1])
+                    self._dialog('Update check failed', 'The manual update check could not reach GitHub Releases.\n\n' + error)
+                elif kind == 'update_timeout':
+                    _, token, error = item
+                    if token != self._update_check_serial:
+                        continue
+                    self.status_var.set('Update check timed out.')
+                    self._dialog('Update check timed out', error)
         except queue.Empty:
             pass
 
