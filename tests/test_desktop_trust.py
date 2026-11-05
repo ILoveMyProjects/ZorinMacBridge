@@ -7,7 +7,7 @@ import settings
 import zmb_pairing_state as pairing
 from zmb_pairing_state import DesktopTrustMismatch, ensure_desktop_trust, persist_desktop_trust, trusted_desktop_fingerprint
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def fp(byte: str) -> str:
@@ -79,9 +79,9 @@ def main() -> None:
     assert 'recover_desktop_tls_fingerprint_for_profile' in backend
     assert 'StrictHostKeyChecking=yes' in backend
     assert 'class DesktopTrustMismatch' in pairing_src
-    assert 'test_desktop_trust.py' in ci
-    assert 'test_desktop_trust.py' in release
-    assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.9'
+    assert 'scripts/run-tests.sh' in ci
+    assert 'scripts/run-tests.sh' in release
+    assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.10'
 
     print('desktop trust tests: OK')
 

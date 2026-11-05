@@ -7,7 +7,7 @@ from pathlib import Path
 from mac_server import MacInput
 from protocol import KEY, TEXT, PacketReader, ascii_physical_keysym, unpack_json
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _method_source(filename: str, class_name: str, method_name: str) -> str:

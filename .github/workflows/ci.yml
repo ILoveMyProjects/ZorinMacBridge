@@ -21,24 +21,7 @@ jobs:
       - name: Syntax and protocol tests
         run: |
           /usr/bin/python3 -m compileall -q .
-          /usr/bin/python3 test_protocol.py
-          /usr/bin/python3 test_support.py
-          /usr/bin/python3 test_updater.py
-          /usr/bin/python3 test_native_ui.py
-          /usr/bin/python3 test_local_signing.py
-          /usr/bin/python3 test_p0_admin.py
-          /usr/bin/python3 test_xcode.py
-          /usr/bin/python3 test_p3.py
-          /usr/bin/python3 test_p4.py
-          /usr/bin/python3 test_p5.py
-          /usr/bin/python3 test_p6.py
-          /usr/bin/python3 test_p7.py
-          /usr/bin/python3 test_update_ui.py
-          /usr/bin/python3 test_pairing_sync.py
-          /usr/bin/python3 test_desktop_trust.py
-          /usr/bin/python3 test_keyboard_clipboard.py
-          /usr/bin/python3 test_update_shutdown.py
-          /usr/bin/python3 test_input_defaults.py
+          scripts/run-tests.sh
           /usr/bin/python3 -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); gi.require_version('Vte','3.91'); from gi.repository import Gtk, Adw, Vte; import av; av.CodecContext.create('h264','r'); import keyring; print('GTK4/libadwaita/VTE + H.264 runtime OK')"
           bash -n install-linux.sh
           bash -n install-macos.sh

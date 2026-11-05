@@ -1,5 +1,9 @@
 # ZorinMacBridge
 
+## v0.14.10 repository layout cleanup
+
+0.14.10 is a source-layout cleanup only; runtime behavior is unchanged from 0.14.9. Regression tests now live in `tests/`, acceptance checklists in `docs/acceptance/`, developer notes in `docs/development/`, and CI/release use the single `scripts/run-tests.sh` entry point.
+
 ## v0.14.9 default input + explicit fullscreen controls
 
 0.14.9 enables keyboard and mouse forwarding by default as soon as the Desktop session connects. The remote image no longer uses double-click as a local full-screen gesture: every click, including double-click, is forwarded to the Mac. Full-screen is entered only with the explicit **Full Screen** button and exited with **Exit Full Screen**, **Esc**, or **Alt+Esc**. The existing **Capture keyboard & mouse** switch remains available as an explicit view-only override.
@@ -33,6 +37,30 @@ v0.5 moves the Linux client to **GTK4 + libadwaita**. On Zorin OS / Ubuntu, cont
 
 The `.deb` declares the required Ubuntu/Zorin runtime packages, so the one-command installer still handles everything through `apt`. The client uses system symbolic icons and native file dialogs.
 
+
+## Repository layout
+
+```text
+.
+├── assets/                 application artwork
+├── docs/
+│   ├── acceptance/         real-device/release acceptance checklists
+│   └── development/        developer notes
+├── native/                 macOS native helper/streamer sources
+├── packaging/              Linux desktop/package metadata
+├── scripts/                build, signing, verification and test runners
+├── tests/                  regression and source-invariant tests
+├── *.py                    runtime Python modules
+├── install-linux.sh        Linux installer entry point
+├── install-macos.sh        macOS installer entry point
+└── VERSION                 release version
+```
+
+Run the complete regression suite with:
+
+```bash
+scripts/run-tests.sh
+```
 
 ## Install
 
@@ -196,7 +224,7 @@ After P0 pairing, the Zorin client includes an **Xcode** tab. It reads the activ
 
 The **System** tab also exposes a P1 machine state (`DESKTOP READY`, `SYSTEM ONLINE`, `RECOVERY NEEDED`, or `DEGRADED`), power/battery information, **Recover desktop**, and the macOS Wake-for-network-access setting. Network wake is configuration only: whether a sleeping MacBook can actually be awakened depends on its hardware, power state, and network.
 
-For real-Mac validation before tagging the release, follow [`P1_P2_ACCEPTANCE.md`](P1_P2_ACCEPTANCE.md).
+For real-Mac validation before tagging the release, follow [`docs/acceptance/P1_P2_ACCEPTANCE.md`](docs/acceptance/P1_P2_ACCEPTANCE.md).
 
 
 ## Terminal and Project Actions (v0.10.0)
@@ -207,7 +235,7 @@ The **Terminal** page uses GTK4 VTE for a real PTY-backed SSH session. The **Pro
 
 Because projects are bound to the persistent `server_id`, a DHCP address change only updates the transport address; it does not create a new project identity.
 
-See [`P3_ACCEPTANCE.md`](P3_ACCEPTANCE.md) before publishing the first 0.10.0 release.
+See [`docs/acceptance/P3_ACCEPTANCE.md`](docs/acceptance/P3_ACCEPTANCE.md) before publishing the first 0.10.0 release.
 
 ## Project Sync (v0.11.0)
 
@@ -217,7 +245,7 @@ The default excludes are `.git/`, `DerivedData/`, `.build/`, `build/`, `xcuserda
 
 The first P4 release intentionally does **not** implement blind bidirectional sync or remote deletion. A newer/different Mac-side file is treated as something to protect, not something to overwrite automatically.
 
-See [`P4_ACCEPTANCE.md`](P4_ACCEPTANCE.md) before publishing the first 0.11.0 release.
+See [`docs/acceptance/P4_ACCEPTANCE.md`](docs/acceptance/P4_ACCEPTANCE.md) before publishing the first 0.11.0 release.
 
 ## Remote desktop performance (v0.12.0)
 
@@ -227,7 +255,7 @@ Changing video quality no longer tears down the authenticated desktop/control se
 
 Both ends are deliberately latency-biased: the Linux frame queue stores only the newest frame; GTK avoids texture work while unmapped; the native ScreenCaptureKit queue depth is two; VideoToolbox is configured for real-time one-frame delay; and the Swift pipe writer never accumulates more than one pending encoded access unit. If the consumer slows down, stale video is discarded instead of being delivered late.
 
-See [`P5_ACCEPTANCE.md`](P5_ACCEPTANCE.md) before publishing the first 0.12.0 release.
+See [`docs/acceptance/P5_ACCEPTANCE.md`](docs/acceptance/P5_ACCEPTANCE.md) before publishing the first 0.12.0 release.
 
 ## Layered recovery (v0.13.0)
 
@@ -235,7 +263,7 @@ P6 turns recovery into an explicit diagnostic workflow. **System → Run diagnos
 
 **Recover all safe layers** is deliberately bounded: it can reload valid launchd jobs, regenerate the user LaunchAgent, clear only a stale updater lock, restore only a verified update backup, and restart/verify the desktop service. It does not alter FileVault or user accounts, does not force-enable SSH, and refuses to launch an unverified application when no verified backup exists. Autoheal records a bounded recovery event log and waits for three consecutive desktop-port failures before restarting a still-running process.
 
-See [`P6_ACCEPTANCE.md`](P6_ACCEPTANCE.md) before publishing the first 0.13.0 release.
+See [`docs/acceptance/P6_ACCEPTANCE.md`](docs/acceptance/P6_ACCEPTANCE.md) before publishing the first 0.13.0 release.
 
 ## Stable macOS permissions
 
@@ -376,7 +404,7 @@ After P0 pairing, the Zorin client includes an **Xcode** tab. It reads the activ
 
 The **System** tab also exposes a P1 machine state (`DESKTOP READY`, `SYSTEM ONLINE`, `RECOVERY NEEDED`, or `DEGRADED`), power/battery information, **Recover desktop**, and the macOS Wake-for-network-access setting. Network wake is configuration only: whether a sleeping MacBook can actually be awakened depends on its hardware, power state, and network.
 
-For real-Mac validation before tagging the release, follow [`P1_P2_ACCEPTANCE.md`](P1_P2_ACCEPTANCE.md).
+For real-Mac validation before tagging the release, follow [`docs/acceptance/P1_P2_ACCEPTANCE.md`](docs/acceptance/P1_P2_ACCEPTANCE.md).
 
 ## Stable macOS permissions across updates
 
@@ -448,12 +476,7 @@ chmod +x scripts/setup-source-macos.sh scripts/build-macos-streamer.sh
 ## Tests
 
 ```bash
-python test_protocol.py
-python test_support.py
-python test_updater.py
-python test_native_ui.py
-python test_local_signing.py
-python test_p0_admin.py
+scripts/run-tests.sh
 python -m compileall -q .
 swiftc -frontend -parse native/macos/ZMBStreamerLib.swift
 ```

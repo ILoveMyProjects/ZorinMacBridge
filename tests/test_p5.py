@@ -6,7 +6,7 @@ from pathlib import Path
 
 from zmb_video_policy import ADAPTIVE_TIERS, choose_adaptive_step, initial_tier_for_viewport, profile_for_tier
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_policy() -> None:

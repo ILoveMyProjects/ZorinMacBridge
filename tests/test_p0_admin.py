@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 
 spec = importlib.util.spec_from_file_location('zmb_admin_backend_test', ROOT / 'zmb_admin_backend.py')
 backend = importlib.util.module_from_spec(spec)

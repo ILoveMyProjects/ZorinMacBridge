@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-root = Path(__file__).resolve().parent
+root = Path(__file__).resolve().parents[1]
 core_text = (root / 'linux_client.py').read_text(encoding='utf-8')
 gtk_text = (root / 'linux_client_gtk.py').read_text(encoding='utf-8')
 
@@ -51,5 +51,5 @@ for node in ast.walk(window):
 missing = sorted(calls - methods - core_methods)
 assert not missing, f'GTK calls missing _show_* methods: {missing}'
 
-assert (root / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.9'
+assert (root / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.10'
 print('update UI regression tests: OK')

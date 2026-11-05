@@ -3,7 +3,7 @@ from pathlib import Path
 
 from zmb_recovery import classify_transport_error, parse_recovery_report, recovery_summary, render_recovery_report
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_parser():
@@ -81,8 +81,8 @@ def test_source_guards():
     assert '_confirm_recover_all' in page
 
     assert 'zmb_recovery.py' in workflow
-    assert 'test_p6.py' in workflow
-    assert 'test_p6.py' in ci
+    assert 'scripts/run-tests.sh' in workflow
+    assert 'scripts/run-tests.sh' in ci
 
     # P6 must stay closed: no generic shell action is added to the P0 gateway.
     assert 'zmb-admin exec' not in gate

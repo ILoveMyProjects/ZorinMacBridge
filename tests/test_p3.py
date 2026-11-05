@@ -82,7 +82,7 @@ with tempfile.TemporaryDirectory() as td:
     finally:
         projects.CONFIG_ROOT, projects.PROJECTS_PATH = old_root, old_path
 
-root = Path(__file__).resolve().parent
+root = Path(__file__).resolve().parents[1]
 client = (root / "linux_client_gtk.py").read_text(encoding="utf-8")
 system = (root / "zmb_system_page.py").read_text(encoding="utf-8")
 terminal = (root / "zmb_terminal_page.py").read_text(encoding="utf-8")
@@ -100,5 +100,5 @@ assert "Cancel running action" in project_page
 assert "git pull --ff-only" in (root / "zmb_project_data.py").read_text(encoding="utf-8")
 assert "gir1.2-vte-3.91" in release
 assert "zmb_shell_backend.py" in release and "zmb_projects_page.py" in release
-assert "test_p3.py" in release
+assert 'scripts/run-tests.sh' in release
 print("P3 terminal/projects tests: OK")

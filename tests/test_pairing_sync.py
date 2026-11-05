@@ -9,7 +9,7 @@ import zmb_admin_backend as admin_backend
 from zmb_admin_backend import normalize_tls_fingerprint
 from zmb_pairing_state import persist_desktop_trust
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> None:
@@ -97,14 +97,14 @@ def main() -> None:
     assert 'Mac paired ✓ · Desktop is not connected. Connect Desktop to use Files.' in client
     assert 'self._set_tls_fingerprint(fingerprint)' in client
     assert 'zmb_pairing_state.py' in release
-    assert 'test_pairing_sync.py' in release
-    assert 'test_pairing_sync.py' in ci
+    assert 'scripts/run-tests.sh' in release
+    assert 'scripts/run-tests.sh' in ci
     assert 'remembered_host_key_matches' in backend
     assert 'Remembered SSH identity verified automatically' in system
     assert 'ZMB_DESKTOP_TLS_FINGERPRINT=' in backend
     assert 'bootstrap_tls_fingerprint' in backend
     assert 'work="$(cd "$work" && /bin/pwd -P)"' in admin
-    assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.9'
+    assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.10'
 
     print('pairing state sync tests: OK')
 

@@ -2,7 +2,7 @@ from pathlib import Path
 
 from mac_requirements import evaluate_setup_requirements, missing_setup_requirements
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> None:
@@ -70,8 +70,8 @@ def main() -> None:
     assert 'REQUIRED_SETUP_BEGIN' in terminal and 'REQUIRED_SETUP_END' in terminal
     assert 'v0.14.0 or newer' in install_macos
     assert 'requires v0.14.0 or newer' in install_macos
-    assert 'test_p7.py' in ci
-    assert 'test_p7.py' in release
+    assert 'scripts/run-tests.sh' in ci
+    assert 'scripts/run-tests.sh' in release
     print('P7 required-setup tests: OK')
 
 

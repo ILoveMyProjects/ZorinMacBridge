@@ -1,6 +1,6 @@
 from pathlib import Path
 
-root = Path(__file__).resolve().parent
+root = Path(__file__).resolve().parents[1]
 client = (root / 'linux_client_gtk.py').read_text(encoding='utf-8')
 server = (root / 'mac_server_gui.py').read_text(encoding='utf-8')
 release = (root / '.github/workflows/release.yml').read_text(encoding='utf-8')

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.14.10
+
+- Repository layout cleanup only; no runtime feature changes.
+- Moved regression tests to `tests/` and added `scripts/run-tests.sh` as the single CI/release test entry point.
+- Moved acceptance checklists to `docs/acceptance/` and P0 developer notes to `docs/development/`.
+- Updated README, contributor docs, CI, release workflow, and source-invariant tests for the new paths.
+
 ## 0.14.9 - Default input + explicit full-screen controls
 
 - enabled keyboard and mouse forwarding by default for newly started clients and newly connected Desktop sessions, while keeping the capture switch as an explicit view-only override;

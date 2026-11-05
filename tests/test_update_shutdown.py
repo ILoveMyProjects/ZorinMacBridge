@@ -9,7 +9,7 @@ import updates
 from tray_icon import TrayController
 from updates import ReleaseAsset
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class _Response:
@@ -197,7 +197,7 @@ def main() -> None:
     test_update_paths_cannot_quit_application()
     test_persistent_lifecycle_log_and_single_quit_owner()
     test_close_path_is_nonblocking_by_construction()
-    assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.9'
+    assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.10'
     print('update/shutdown regression tests: OK')
 
 

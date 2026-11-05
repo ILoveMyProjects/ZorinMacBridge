@@ -93,7 +93,7 @@ if shutil.which("rsync"):
         subprocess.run(["rsync", "-rlpt", "--update", "--exclude", "/Conflict.swift", str(left) + "/", str(right) + "/"], check=True)
         assert (right / "Conflict.swift").read_text(encoding="utf-8") == "REMOTE-DIFFERENT-SIZE\n"
 
-root = Path(__file__).resolve().parent
+root = Path(__file__).resolve().parents[1]
 projects_page = (root / "zmb_projects_page.py").read_text(encoding="utf-8")
 shell_backend = (root / "zmb_shell_backend.py").read_text(encoding="utf-8")
 release = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
@@ -105,6 +105,6 @@ assert "preview_project_sync" in projects_page
 assert "start_project_sync" in projects_page
 assert "shell_ssh_transport_argv" in shell_backend
 assert "zmb_sync_backend.py" in release
-assert "test_p4.py" in release and "test_p4.py" in ci
+assert 'scripts/run-tests.sh' in release and 'scripts/run-tests.sh' in ci
 assert "rsync" in release and "rsync" in ci
 print("P4 Project Sync tests: OK")
