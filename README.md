@@ -222,7 +222,7 @@ macOS may refuse `systemsetup -setremotelogin on` unless the invoking process ha
 
 After P0 pairing, the Zorin client includes an **Xcode** tab. It reads the active Xcode developer directory and Xcode version, lists available Simulator devices, can boot/shut down a selected Simulator, and can open Xcode or Simulator in the logged-in macOS GUI session. These commands use Apple's `xcodebuild`/`xcrun simctl` toolchain and the same restricted SSH administration key; the key still cannot execute an arbitrary shell command.
 
-The **System** tab also exposes a P1 machine state (`DESKTOP READY`, `SYSTEM ONLINE`, `RECOVERY NEEDED`, or `DEGRADED`), power/battery information, **Recover desktop**, and the macOS Wake-for-network-access setting. Network wake is configuration only: whether a sleeping MacBook can actually be awakened depends on its hardware, power state, and network.
+The **System** tab also exposes a P1 machine state (`DESKTOP READY`, `SYSTEM ONLINE`, `RECOVERY NEEDED`, or `DEGRADED`), power/battery information, **Recover desktop**, and the macOS Wake-for-network-access setting. The client can use the paired Mac network address for Wake-on-Connect; whether a sleeping MacBook actually wakes still depends on its hardware, power state, Wi-Fi/Ethernet path, and network.
 
 For real-Mac validation before tagging the release, follow [`docs/acceptance/P1_P2_ACCEPTANCE.md`](docs/acceptance/P1_P2_ACCEPTANCE.md).
 
@@ -402,7 +402,7 @@ You can also re-run the one-command installers.
 
 After P0 pairing, the Zorin client includes an **Xcode** tab. It reads the active Xcode developer directory and Xcode version, lists available Simulator devices, can boot/shut down a selected Simulator, and can open Xcode or Simulator in the logged-in macOS GUI session. These commands use Apple's `xcodebuild`/`xcrun simctl` toolchain and the same restricted SSH administration key; the key still cannot execute an arbitrary shell command.
 
-The **System** tab also exposes a P1 machine state (`DESKTOP READY`, `SYSTEM ONLINE`, `RECOVERY NEEDED`, or `DEGRADED`), power/battery information, **Recover desktop**, and the macOS Wake-for-network-access setting. Network wake is configuration only: whether a sleeping MacBook can actually be awakened depends on its hardware, power state, and network.
+The **System** tab also exposes a P1 machine state (`DESKTOP READY`, `SYSTEM ONLINE`, `RECOVERY NEEDED`, or `DEGRADED`), power/battery information, **Recover desktop**, and the macOS Wake-for-network-access setting. The client can use the paired Mac network address for Wake-on-Connect; whether a sleeping MacBook actually wakes still depends on its hardware, power state, Wi-Fi/Ethernet path, and network.
 
 For real-Mac validation before tagging the release, follow [`docs/acceptance/P1_P2_ACCEPTANCE.md`](docs/acceptance/P1_P2_ACCEPTANCE.md).
 
@@ -519,3 +519,9 @@ macOS installs from **v0.6 onward use a persistent per-Mac code identity**.
 The release workflow produces an ad-hoc transport artifact with an explicit transport DR; the installer/updater applies that Mac's persistent local DR before installation.
 After the one-time migration from an older build, Screen Recording and mouse/keyboard privacy grants are intended to remain associated with the same installed app identity across normal v0.6+ updates.
 See `SIGNING.md`.
+
+### Wake-on-Connect and full-screen controls (0.14.11)
+
+For a saved paired Mac that is sleeping/offline, pressing **Connect** now sends Wake-on-LAN packets and actively probes the paired Mac until its Desktop service returns, then continues the normal connection. This does **not** change macOS login or lock-screen policy: if the Mac wakes to its login/lock screen, you continue to enter the password yourself through the remote Desktop as before.
+
+GTK full-screen state is synchronized with the real GTK4 window state. **Full Screen**, **Exit Full Screen**, **Esc**, and **Alt+Esc** are local controls and do not depend on the network reconnect state.

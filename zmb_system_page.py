@@ -42,6 +42,7 @@ STATUS_FIELDS = [
     ("Remote reboot unlock", "filevault_ssh_unlock_eligible"),
     ("Reboot state", "reboot_risk"),
     ("Wake on network", "wake_on_network_setting"),
+    ("Wake MAC", "wake_mac_address"),
     ("Power source", "power_source"),
     ("Battery", "battery_percent"),
     ("Battery detail", "battery_detail"),

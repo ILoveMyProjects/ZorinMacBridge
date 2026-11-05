@@ -50,7 +50,16 @@ from zmb_pairing_state import DesktopTrustMismatch, ensure_desktop_trust, persis
 from secret_store import get_password as get_saved_password
 from tray_icon import TrayController
 from updates import current_version
-from zmb_admin_backend import list_profiles
+from zmb_admin_backend import (
+    get_profile,
+    get_status_for_profile,
+    list_profiles,
+    neighbor_mac_for_host,
+    normalize_mac_address,
+    run_action_for_profile,
+    save_profile,
+    send_wake_on_lan,
+)
 from zmb_system_page import SystemController
 from zmb_xcode_page import XcodeController
 from zmb_terminal_page import TerminalController
@@ -188,6 +197,10 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.selected_desktop_available = True
         self.remember_credentials_active = True
         self._connect_snapshot = None
+        # Window state must be initialized once and must never be reset by a
+        # network reconnect. GTK fullscreen requests are asynchronous, so the
+        # notify::fullscreened signal below remains the source of truth.
+        self.fullscreen_active = False
 
         self.outgoing = queue.Queue(maxsize=1000)
         self._mouse_move_lock = threading.Lock()
@@ -228,11 +241,13 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self._credential_serial = 0
         self._file_render_serial = 0
         self._desktop_trust_recovery_busy = False
+        self._wake_connect_busy = False
         self._closing = False
 
         self._build_native_ui()
         self._install_css()
         self._install_controllers()
+        self.connect('notify::fullscreened', self._fullscreened_changed)
 
         self.tray = TrayController(
             self.root,
@@ -948,6 +963,26 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             self.xcode_controller.selection_changed()
         self._refresh_files_state()
 
+    def _prime_wake_identity_async(self) -> None:
+        """Remember the Mac network address while it is awake, before sleep makes discovery disappear."""
+        sid = str(self.selected_server_id or '').strip()
+        host = str(self.ip_var.get() or '').strip()
+        profile = get_profile(sid, host)
+        if not profile or profile.get('wake_mac_address'):
+            return
+
+        def worker():
+            try:
+                status = get_status_for_profile(profile)
+                mac = normalize_mac_address(status.get('wake_mac_address'))
+                if mac:
+                    save_profile(sid, host, {**profile, 'wake_mac_address': mac, 'system_hostname': status.get('hostname') or profile.get('system_hostname', '')})
+                    self._log('INFO', f'Wake-on-Connect: remembered Mac network address {mac} from the pinned P0 channel.')
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name='zmb-wake-identity').start()
+
     def _machine_selected(self, _event=None) -> None:
         server = self.discovered_by_label.get(self.machine_var.get())
         if server is None:
@@ -998,6 +1033,8 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         role_text = ', '.join(roles) or 'legacy'
         self.status_var.set(f'Selected {server.name} at {host_text}:{server.port} ({role_text}). {trust}')
         self._log('INFO', f'Discovery selection: {server.name} hostname={server.hostname or "?"} ip={server.ip}:{server.port}; server_id={self.selected_server_id}; roles={role_text}')
+        if server.admin_available and not server.paired_only:
+            self._prime_wake_identity_async()
         self.pairing_state_changed(include_system=False)
 
     def _connection_params(self):
@@ -1080,18 +1117,107 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         threading.Thread(target=worker, daemon=True).start()
         return True
 
+    def _wake_sleeping_mac_then_connect(self) -> bool:
+        if self._wake_connect_busy:
+            self.status_var.set('Waking Mac…')
+            return True
+        sid = str(self.selected_server_id or '').strip()
+        host = str(self.ip_var.get() or '').strip()
+        profile = get_profile(sid, host)
+        if not profile:
+            return False
+
+        self._wake_connect_busy = True
+        self.connect_btn.set_sensitive(False)
+        self.status_var.set('Waking Mac…')
+        self._log('INFO', 'Wake-on-Connect: selected Mac is saved/offline; starting LAN wake and reachability probes.')
+
+        def worker():
+            active_profile = dict(profile)
+            mac = str(active_profile.get('wake_mac_address') or '').strip()
+            if not mac:
+                mac = neighbor_mac_for_host(str(active_profile.get('host') or host))
+            if mac:
+                send_wake_on_lan(mac, rounds=5)
+                self._log('INFO', f'Wake-on-Connect: magic packet sent to {mac}.')
+            else:
+                self._log('WARNING', 'Wake-on-Connect: no saved/neighbor MAC address; using active network probes only.')
+
+            deadline = time.monotonic() + 60.0
+            last_status = None
+            desktop_seen = False
+            while time.monotonic() < deadline and not self._closing:
+                # A connection attempt itself can participate in macOS Wake for
+                # network access / sleep-proxy handling, so probe both SSH and the
+                # Desktop listener while waiting for the magic packet to take effect.
+                for port in (int(active_profile.get('ssh_port') or 22), int(active_profile.get('desktop_port') or 45950)):
+                    try:
+                        import socket as _socket
+                        with _socket.create_connection((str(active_profile.get('host') or host), port), timeout=1.2):
+                            if port == int(active_profile.get('desktop_port') or 45950):
+                                desktop_seen = True
+                    except Exception:
+                        pass
+                if desktop_seen:
+                    GLib.idle_add(done, active_profile, None)
+                    return
+                try:
+                    last_status = get_status_for_profile(active_profile)
+                    found_mac = normalize_mac_address(last_status.get('wake_mac_address'))
+                    if found_mac and found_mac != active_profile.get('wake_mac_address'):
+                        active_profile['wake_mac_address'] = found_mac
+                    if last_status.get('zmb_port_listening') == '1':
+                        GLib.idle_add(done, active_profile, None)
+                        return
+                    if last_status.get('user_session_available') == '1':
+                        try:
+                            run_action_for_profile(active_profile, 'recover-desktop', timeout=20)
+                        except Exception as exc:
+                            self._log('WARNING', f'Wake-on-Connect: recover-desktop returned {exc}; continuing readiness probes.')
+                except Exception:
+                    # If DHCP changed while the Mac was asleep, Bonjour can reveal
+                    # the new address as soon as it wakes. Keep identity anchored to
+                    # server_id and update only the transport address.
+                    try:
+                        for item in discover_servers(1.2):
+                            if sid and item.server_id == sid:
+                                active_profile['host'] = item.ip
+                                break
+                    except Exception:
+                        pass
+                time.sleep(1.5)
+            GLib.idle_add(done, None, 'Mac did not wake or restore the Desktop service within 60 seconds.')
+
+        def done(active_profile, error):
+            self._wake_connect_busy = False
+            self.connect_btn.set_sensitive(True)
+            if error:
+                self.status_var.set('Mac is still offline after wake attempt.')
+                self._log('ERROR', 'Wake-on-Connect failed: ' + error)
+                self._dialog('Wake failed', error + '\n\nThe saved login settings were not changed.')
+                return False
+            if active_profile:
+                live_host = str(active_profile.get('host') or host)
+                self.ip_var.set(live_host)
+                if sid and live_host:
+                    save_profile(sid, live_host, active_profile)
+            self.selected_desktop_available = True
+            self.status_var.set('Mac woke up — connecting Desktop…')
+            self._log('INFO', 'Wake-on-Connect: Mac/Desktop became reachable; continuing normal Desktop connection.')
+            GLib.timeout_add(100, lambda: (self.connect_remote(), GLib.SOURCE_REMOVE)[1])
+            return False
+
+        threading.Thread(target=worker, daemon=True, name='zmb-wake-connect').start()
+        return True
+
     def connect_remote(self) -> None:
         if self.connected or (self.net_thread is not None and self.net_thread.is_alive()):
             return
         if not self.selected_desktop_available:
-            self.status_var.set('Desktop service is offline; use System to recover/start ZorinMacBridge on this Mac.')
-            self._log('WARNING', 'Connect skipped because the selected Mac currently advertises System/recovery only.')
-            try:
-                self.stack.set_visible_child_name('system')
-                if self.system_controller._profile():
-                    self.system_controller.refresh()
-            except Exception:
-                pass
+            if self._wake_sleeping_mac_then_connect():
+                return
+            self.status_var.set('Saved Mac is offline and cannot be woken until it has been paired once in System.')
+            self._log('WARNING', 'Wake-on-Connect skipped because no paired System profile exists for the selected Mac.')
             return
         if self._reconnect_source:
             try:
@@ -1138,7 +1264,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                 pass
             self._reconnect_source = 0
         self._reconnect_attempt = 0
-        if self.fullscreen_active:
+        if self._window_is_fullscreen() or self.fullscreen_active:
             self._exit_fullscreen()
         self._release_remote_input_state()
         self.disconnect_requested = True
@@ -1401,7 +1527,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
 
     def _gtk_key_pressed(self, _controller, keyval, _keycode, state):
         keysym = self._keysym_name(keyval)
-        if keysym == 'Escape' and self.fullscreen_active:
+        if keysym == 'Escape' and (self._window_is_fullscreen() or self.fullscreen_active):
             # Both Esc and Alt+Esc are reserved locally while fullscreen.
             self._exit_fullscreen()
             return True
@@ -1476,38 +1602,59 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                 self._enqueue(pack_packet(MOUSE_BUTTON, __import__('struct').pack('!BBff', button, 0, 0.5, 0.5)))
         self.mouse_buttons_down.clear()
 
+    def _window_is_fullscreen(self) -> bool:
+        try:
+            return bool(Gtk.Window.is_fullscreen(self))
+        except Exception:
+            try:
+                return bool(self.get_property('fullscreened'))
+            except Exception:
+                return bool(self.fullscreen_active)
+
+    def _apply_fullscreen_layout(self, active: bool) -> None:
+        self.fullscreen_active = bool(active)
+        if active:
+            self.stack.set_visible_child_name('desktop')
+        self.header.set_visible(not active)
+        self.connection_card.set_visible(not active)
+        self.status_box.set_visible(not active)
+        self.stack_switcher.set_visible(not active)
+        self.fullscreen_bar.set_visible(active)
+        if active:
+            self._refresh_fullscreen_bar()
+            self.picture.grab_focus()
+
+    def _fullscreened_changed(self, _window, _pspec) -> None:
+        # GTK4 fullscreen/unfullscreen are asynchronous. Mirror the actual window
+        # manager state instead of letting a hand-maintained flag drift.
+        active = self._window_is_fullscreen()
+        previous = bool(self.fullscreen_active)
+        self._apply_fullscreen_layout(active)
+        if active != previous:
+            self._log('INFO', 'Entered full-screen desktop view.' if active else 'Exited full-screen desktop view.')
+
     def _toggle_fullscreen(self, event=None):
-        if self.fullscreen_active:
-            return True
+        if self._window_is_fullscreen() or self.fullscreen_active:
+            return self._exit_fullscreen(event)
         self._release_remote_input_state()
-        self.fullscreen_active = True
-        self.stack.set_visible_child_name('desktop')
-        self.header.set_visible(False)
-        self.connection_card.set_visible(False)
-        self.status_box.set_visible(False)
-        self.stack_switcher.set_visible(False)
-        self.fullscreen_bar.set_visible(True)
-        self._refresh_fullscreen_bar()
-        self.fullscreen()
+        # Apply the visual layout immediately, then let notify::fullscreened
+        # confirm the asynchronous compositor/window-manager transition.
+        self._apply_fullscreen_layout(True)
+        Gtk.Window.fullscreen(self)
         self.picture.grab_focus()
-        self._log('INFO', 'Entered full-screen desktop view. Use Exit Full Screen, Esc, or Alt+Esc to exit.')
+        self._log('INFO', 'Full-screen requested. Use Exit Full Screen, Esc, or Alt+Esc to exit.')
         return True
 
     def _exit_fullscreen(self, event=None):
-        # Idempotent emergency exit.  Do not trust fullscreen_active exclusively:
-        # older reconnect paths could desynchronise the flag from the actual GTK
-        # window state.  A click/Esc must always restore the normal layout.
-        was_fullscreen = bool(self.fullscreen_active)
-        self.fullscreen_active = False
+        # Emergency/idempotent exit: never reject the click because a stale local
+        # flag says the window is not full-screen. Restore normal controls now and
+        # request unfullscreen from GTK explicitly.
+        was_fullscreen = self._window_is_fullscreen() or bool(self.fullscreen_active)
         self._release_remote_input_state()
-        self.fullscreen_bar.set_visible(False)
-        self.unfullscreen()
-        self.header.set_visible(True)
-        self.connection_card.set_visible(True)
-        self.status_box.set_visible(True)
-        self.stack_switcher.set_visible(True)
+        self._apply_fullscreen_layout(False)
+        Gtk.Window.unfullscreen(self)
         if was_fullscreen:
-            self._log('INFO', 'Exited full-screen desktop view.')
+            self._log('INFO', 'Exit full-screen requested.')
         return True
 
     # ---------- Clipboard ----------

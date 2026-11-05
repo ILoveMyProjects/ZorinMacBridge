@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.14.11 — WakeFullscreen
+
+- Fixed GTK full-screen controls by restoring initialization of the full-screen state and synchronizing UI state with GTK4 `notify::fullscreened`.
+- `Full Screen`, `Exit Full Screen`, `Esc`, and `Alt+Esc` no longer depend on a stale/uninitialized reconnect flag.
+- Added Wake-on-Connect for saved paired Macs: Connect sends LAN wake packets and probes SSH/Desktop until the sleeping Mac wakes, then continues the normal Desktop connection.
+- P0 status now reports the active network interface MAC address so the Zorin client can remember the wake target.
+- Does not change macOS login, lock-screen, FileVault, or automatic-login policy.
+
 ## 0.14.10
 
 - Repository layout cleanup only; no runtime feature changes.

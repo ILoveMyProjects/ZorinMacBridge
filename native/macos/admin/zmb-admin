@@ -133,6 +133,20 @@ user_session_available() {
   /bin/launchctl print "gui/${uid}" >/dev/null 2>&1
 }
 
+wake_mac_address() {
+  local iface candidate mac
+  iface="$(/sbin/route -n get default 2>/dev/null | /usr/bin/awk '/interface:/{print $2; exit}' || true)"
+  for candidate in "$iface" en0 en1; do
+    [ -n "$candidate" ] || continue
+    mac="$(/sbin/ifconfig "$candidate" 2>/dev/null | /usr/bin/awk '/ether /{print $2; exit}' || true)"
+    if printf '%s' "$mac" | /usr/bin/grep -Eq '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'; then
+      printf '%s\n' "$mac"
+      return
+    fi
+  done
+  printf 'unknown\n'
+}
+
 settings_value() {
   local file="$1" key="$2" default="$3" value u
   u="$(target_user || true)"
@@ -503,7 +517,7 @@ desktop_tls_fingerprint() {
 
 status_cmd() {
   require_root
-  local host server_id osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired desktop_tls_fp ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg auto_update_mode update_current update_latest update_available update_checked update_result update_error power_lines developer_dir
+  local host server_id osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired desktop_tls_fp ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg auto_update_mode update_current update_latest update_available update_checked update_result update_error power_lines developer_dir wake_mac
   host="$(/bin/hostname 2>/dev/null || echo unknown)"
   server_id="$(config_value SERVER_ID unknown)"
   osver="$(/usr/bin/sw_vers -productVersion 2>/dev/null || echo unknown)"
@@ -542,6 +556,7 @@ status_cmd() {
   remote_login="$(remote_login_state)"
   fv="$(filevault_state)"
   wake="$(wake_on_network_setting)"
+  wake_mac="$(wake_mac_address)"
   power_lines="$(power_status)"
   developer_dir="$(xcode_developer_dir)"
   mem="$(/usr/sbin/sysctl -n hw.memsize 2>/dev/null || echo unknown)"
@@ -603,6 +618,7 @@ status_cmd() {
   printf 'filevault_ssh_unlock_eligible=%s\n' "$ssh_unlock"
   printf 'reboot_risk=%s\n' "$reboot_risk"
   printf 'wake_on_network_setting=%s\n' "$wake"
+  printf 'wake_mac_address=%s\n' "$wake_mac"
   printf '%s\n' "$power_lines"
   printf 'xcode_developer_dir=%s\n' "$developer_dir"
   printf 'paired_devices=%s\n' "$paired"

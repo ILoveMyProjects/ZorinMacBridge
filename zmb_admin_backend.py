@@ -9,7 +9,9 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import stat
+import time
 import subprocess
 import tempfile
 
@@ -191,6 +193,61 @@ def normalize_tls_fingerprint(value: str | None) -> str:
         return ""
     compact = compact.upper()
     return ":".join(compact[i:i + 2] for i in range(0, 64, 2))
+
+
+def normalize_mac_address(value: str | None) -> str:
+    compact = re.sub(r"[^0-9A-Fa-f]", "", str(value or ""))
+    if len(compact) != 12 or not re.fullmatch(r"[0-9A-Fa-f]{12}", compact):
+        return ""
+    compact = compact.upper()
+    return ":".join(compact[i:i + 2] for i in range(0, 12, 2))
+
+
+def neighbor_mac_for_host(host: str) -> str:
+    """Best-effort lookup of a recently seen LAN peer in the Linux neighbour cache."""
+    host = str(host or "").strip()
+    if not host:
+        return ""
+    commands = []
+    if shutil.which("ip"):
+        commands.append(["ip", "neigh", "show", host])
+    if shutil.which("arp"):
+        commands.append(["arp", "-n", host])
+    for argv in commands:
+        try:
+            p = _run(argv, timeout=3)
+        except Exception:
+            continue
+        match = re.search(r"(?:lladdr\s+)?([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})", (p.stdout or "") + "\n" + (p.stderr or ""))
+        if match:
+            mac = normalize_mac_address(match.group(1))
+            if mac:
+                return mac
+    return ""
+
+
+def send_wake_on_lan(mac_address: str, *, rounds: int = 4) -> bool:
+    """Send a standard Wake-on-LAN magic packet on the local broadcast domain."""
+    mac = normalize_mac_address(mac_address)
+    if not mac:
+        return False
+    payload = b"\xff" * 6 + bytes.fromhex(mac.replace(":", "")) * 16
+    sent = False
+    for idx in range(max(1, min(int(rounds), 8))):
+        for port in (9, 7):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                sock.settimeout(1.0)
+                sock.sendto(payload, ("255.255.255.255", port))
+                sent = True
+            except OSError:
+                pass
+            finally:
+                sock.close()
+        if idx + 1 < max(1, min(int(rounds), 8)):
+            time.sleep(0.30)
+    return sent
 
 
 def _key_paths(pid: str) -> tuple[Path, Path, Path]:
@@ -434,6 +491,11 @@ def pair_device(*, server_id: str, server_name: str, host: str, user: str, passw
     if data.get("protocol") != PROTOCOL_VERSION:
         raise AdminError("Pairing key was installed, but the Mac P0 helper returned an unexpected protocol")
     desktop_tls_fingerprint = normalize_tls_fingerprint(data.get("desktop_tls_fingerprint")) or bootstrap_tls_fingerprint
+    wake_mac_address = normalize_mac_address(data.get("wake_mac_address"))
+    if wake_mac_address:
+        candidate["wake_mac_address"] = wake_mac_address
+    if data.get("hostname"):
+        candidate["system_hostname"] = str(data.get("hostname"))
     if desktop_tls_fingerprint:
         # The TLS identity is learned only after the user has verified the SSH
         # host key and P0 answered over that pinned SSH channel. This lets one
@@ -561,9 +623,18 @@ def get_status(*, server_id: str, host: str) -> dict[str, str]:
     if host and profile.get("host") != host:
         profile = save_profile(server_id, host, {**profile, "host": host})
     data = get_status_for_profile(profile)
+    updates = {}
     desktop_tls_fingerprint = normalize_tls_fingerprint(data.get("desktop_tls_fingerprint"))
     if desktop_tls_fingerprint and profile.get("desktop_tls_fingerprint") != desktop_tls_fingerprint:
-        save_profile(server_id, host, {**profile, "desktop_tls_fingerprint": desktop_tls_fingerprint})
+        updates["desktop_tls_fingerprint"] = desktop_tls_fingerprint
+    wake_mac_address = normalize_mac_address(data.get("wake_mac_address"))
+    if wake_mac_address and profile.get("wake_mac_address") != wake_mac_address:
+        updates["wake_mac_address"] = wake_mac_address
+    hostname = str(data.get("hostname") or "").strip()
+    if hostname and profile.get("system_hostname") != hostname:
+        updates["system_hostname"] = hostname
+    if updates:
+        save_profile(server_id, host, {**profile, **updates})
     return data
 
 

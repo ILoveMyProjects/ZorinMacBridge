@@ -5,15 +5,15 @@ ROOT = Path(__file__).resolve().parents[1]
 client = (ROOT / "linux_client_gtk.py").read_text(encoding="utf-8")
 legacy = (ROOT / "linux_client.py").read_text(encoding="utf-8")
 
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "0.14.10"
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "0.14.11"
 assert "def _build_fullscreen_bar" in client
 assert "self.fullscreen_bar = self._build_fullscreen_bar()" in client
 assert "outer.append(self.fullscreen_bar)" in client
 assert "exit_btn = Gtk.Button(label='Exit Full Screen')" in client
 assert "self.fs_quality_label" in client
 assert "self.fs_input_label" in client
-assert "self.status_box.set_visible(False)" in client
-assert "self.status_box.set_visible(True)" in client
+assert "self.status_box.set_visible(not active)" in client
+assert "self.fullscreen_bar.set_visible(active)" in client
 
 desktop_block = client.split("    def _build_desktop_page(self) -> Gtk.Widget:", 1)[1].split("    def _build_files_page", 1)[0]
 assert "Gtk.Overlay" not in desktop_block
@@ -48,7 +48,7 @@ assert 'self.fullscreen_active = False' not in legacy_connect
 install_src = method_source(client, 'ClientWindow', '_install_controllers')
 assert 'Gtk.PropagationPhase.CAPTURE' in install_src
 press_src = method_source(client, 'ClientWindow', '_gtk_key_pressed')
-assert "keysym == 'Escape' and self.fullscreen_active" in press_src
+assert "keysym == 'Escape' and (self._window_is_fullscreen() or self.fullscreen_active)" in press_src
 assert 'ALT_MASK' not in press_src.split("keysym == 'Escape'", 1)[0]
 legacy_press = method_source(legacy, 'ClientApp', '_key_press')
 assert "event.keysym == 'Escape' and self.fullscreen_active" in legacy_press
@@ -56,9 +56,22 @@ assert "event.keysym == 'Escape' and self.fullscreen_active" in legacy_press
 # Exit is deliberately idempotent: never refuse to unfullscreen just because an
 # internal boolean got out of sync with the real GTK window state.
 exit_src = method_source(client, 'ClientWindow', '_exit_fullscreen')
-assert 'self.unfullscreen()' in exit_src
+assert 'Gtk.Window.unfullscreen(self)' in exit_src
 assert 'if not self.fullscreen_active' not in exit_src
-assert 'self.fullscreen_active = False' in exit_src
+assert '_apply_fullscreen_layout(False)' in exit_src
+
+
+# Regression: the GTK constructor must initialize full-screen state before any
+# button/key callback can read it. The missing initialization made both buttons
+# look dead by raising AttributeError inside the GTK signal callback.
+init_src = method_source(client, 'ClientWindow', '__init__')
+assert 'self.fullscreen_active = False' in init_src
+assert "self.connect('notify::fullscreened', self._fullscreened_changed)" in init_src
+assert 'def _window_is_fullscreen' in client
+assert 'def _fullscreened_changed' in client
+toggle_src = method_source(client, 'ClientWindow', '_toggle_fullscreen')
+assert 'Gtk.Window.fullscreen(self)' in toggle_src
+assert '_apply_fullscreen_layout(True)' in toggle_src
 
 assert "self.root.bind_all('<Escape>'" in legacy
 assert "self.root.bind_all('<Alt-Escape>'" in legacy
