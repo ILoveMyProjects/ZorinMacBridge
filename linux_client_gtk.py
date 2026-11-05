@@ -47,6 +47,9 @@ from tray_icon import TrayController
 from updates import current_version
 from zmb_admin_backend import list_profiles
 from zmb_system_page import SystemController
+from zmb_xcode_page import XcodeController
+from zmb_terminal_page import TerminalController
+from zmb_projects_page import ProjectsController
 
 # GTK4 and the GTK3 AppIndicator backend cannot live in the same process.
 # Prefer pystray's Xorg backend as a best-effort tray icon under X11/XWayland.
@@ -102,7 +105,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.linux_shortcuts_var = ValueVar(True)
         self.capture_input_var = ValueVar(False)
         self.auto_reconnect_var = ValueVar(True)
-        self.quality_var = ValueVar('Balanced')
+        self.quality_var = ValueVar('Adaptive')
         self.machine_var = ValueVar('')
         self.remember_credentials_var = ValueVar(True)
 
@@ -120,7 +123,10 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.stop_event = threading.Event()
         self.net_thread = None
         self.video_thread = None
-        self.video_frames = queue.Queue(maxsize=2)
+        self.video_frames = queue.Queue(maxsize=1)
+        self._video_reconfigure_event = threading.Event()
+        self._video_viewport_width = 1600
+        self._last_render_delay_ms = 0.0
         self.connected = False
         self.remote_image_size = (1, 1)
         self.display_rect = (0, 0, 1, 1)
@@ -292,13 +298,17 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         video_row.append(quality_label)
         self.quality_model = Gtk.StringList.new(list(VIDEO_QUALITY_PRESETS))
         self.quality_dropdown = Gtk.DropDown(model=self.quality_model)
-        self.quality_dropdown.set_selected(list(VIDEO_QUALITY_PRESETS).index('Balanced'))
+        self.quality_dropdown.set_selected(list(VIDEO_QUALITY_PRESETS).index('Adaptive'))
         self.quality_dropdown.connect('notify::selected', self._quality_dropdown_changed)
         video_row.append(self.quality_dropdown)
-        self.quality_description = Gtk.Label(label=self._quality_description_text('Balanced'), xalign=0)
+        self.quality_description = Gtk.Label(label=self._quality_description_text('Adaptive'), xalign=0)
         self.quality_description.add_css_class('zmb-muted')
         self.quality_description.set_hexpand(True)
         video_row.append(self.quality_description)
+        self.video_stats_label = Gtk.Label(label='Stream: waiting', xalign=1)
+        self.video_stats_label.add_css_class('zmb-muted')
+        self.video_stats_label.set_tooltip_text('Decoded FPS · receive rate · local latest-frame drops · render queue delay')
+        video_row.append(self.video_stats_label)
 
         status_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         page.append(status_box)
@@ -324,10 +334,19 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.files_page = self._build_files_page()
         self.system_controller = SystemController(self)
         self.system_page = self.system_controller.page
+        self.xcode_controller = XcodeController(self)
+        self.xcode_page = self.xcode_controller.page
+        self.terminal_controller = TerminalController(self)
+        self.terminal_page = self.terminal_controller.page
+        self.projects_controller = ProjectsController(self)
+        self.projects_page = self.projects_controller.page
         self.logs_page = self._build_logs_page()
         self.stack.add_titled(self.desktop_page, 'desktop', 'Desktop')
         self.stack.add_titled(self.files_page, 'files', 'Files')
         self.stack.add_titled(self.system_page, 'system', 'System')
+        self.stack.add_titled(self.xcode_page, 'xcode', 'Xcode')
+        self.stack.add_titled(self.terminal_page, 'terminal', 'Terminal')
+        self.stack.add_titled(self.projects_page, 'projects', 'Projects')
         self.stack.add_titled(self.logs_page, 'logs', 'Logs')
         self.stack.set_visible_child_name('desktop')
 
@@ -523,8 +542,9 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
 
     @staticmethod
     def _quality_description_text(name: str) -> str:
-        profile = VIDEO_QUALITY_PRESETS.get(name, VIDEO_QUALITY_PRESETS['Balanced'])
-        return f"up to {profile['max_width']} px · {profile['fps']} FPS · {profile['bitrate'] // 1_000_000} Mbit/s"
+        profile = VIDEO_QUALITY_PRESETS.get(name, VIDEO_QUALITY_PRESETS['Adaptive'])
+        text = f"up to {profile['max_width']} px · {profile['fps']} FPS · {profile['bitrate'] // 1_000_000} Mbit/s"
+        return ('auto · ' + text) if name == 'Adaptive' else text
 
     def _quality_dropdown_changed(self, _widget, _pspec) -> None:
         idx = self.quality_dropdown.get_selected()
@@ -537,7 +557,8 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self._refresh_fullscreen_bar()
         self._log('INFO', f'Video quality selected: {name} ({self._quality_description_text(name)}).')
         if self.connected:
-            self.status_var.set(f'Connected — {name} quality selected; reconnect to apply it')
+            self._request_video_reconfigure()
+            self.status_var.set(f'Connected — applying {name} on the video channel')
 
     def _refresh_fullscreen_bar(self) -> None:
         if hasattr(self, 'fs_quality_label'):
@@ -868,6 +889,12 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
 
     def _gtk_tick(self):
         self._process_gtk_queue()
+        try:
+            viewport = int(self.picture.get_allocated_width())
+            if viewport >= 320:
+                self._video_viewport_width = viewport
+        except Exception:
+            pass
         latest = None
         try:
             while True:
@@ -876,7 +903,13 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             pass
         if latest is not None:
             self._last_image = latest
-            self._redraw()
+            try:
+                self._last_render_delay_ms = max(0.0, (time.monotonic() - float(latest[3])) * 1000.0)
+            except Exception:
+                self._last_render_delay_ms = 0.0
+            # Do not spend CPU constructing textures for a minimized/unmapped window.
+            if self.get_mapped():
+                self._redraw()
         return GLib.SOURCE_CONTINUE
 
     def _process_gtk_queue(self) -> None:
@@ -908,32 +941,31 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                 elif kind == 'error':
                     self.status_var.set(f'Error: {item[1]}')
                     self._log('ERROR', item[1])
+                elif kind == 'video_stats':
+                    stats = item[1]
+                    server = stats.get('server') or {}
+                    server_fps = server.get('fps')
+                    fps = float(server_fps) if isinstance(server_fps, (int, float)) else float(stats.get('decode_fps', 0.0))
+                    self.video_stats_label.set_text(
+                        f"{stats.get('profile', 'video')} · {fps:.0f} fps · "
+                        f"{float(stats.get('receive_mbps', 0.0)):.1f} Mbit/s · "
+                        f"drop {float(stats.get('drop_pct', 0.0)):.1f}% · "
+                        f"queue {float(stats.get('queue_ms', 0.0)):.0f} ms"
+                    )
                 elif kind == 'files':
                     self._show_files(item[1])
                 elif kind == 'info':
                     self.status_var.set(item[1])
                 elif kind == 'clipboard':
                     self._set_local_clipboard(item[1])
+                elif kind == 'credential':
+                    self._credential_result(*item[1:])
                 elif kind == 'discovery':
-                    # Compatibility path for inherited/legacy workers. Normal GTK
-                    # scans use the bounded discover_macs() implementation above.
-                    self._apply_discovery_results(item[1])
+                    self._discovery_result(*item[1:])
                 elif kind == 'discovery_error':
-                    self.status_var.set(f'LAN discovery error: {item[1]}')
-                    self._log('ERROR', f'LAN discovery error: {item[1]}')
+                    self._discovery_error(*item[1:])
                 elif kind == 'update':
-                    info = item[1]
-                    self._log('INFO', f'Update check completed: installed={info.current}, latest={info.latest}, available={info.available}')
-                    if info.available:
-                        self._confirm(
-                            'ZorinMacBridge update',
-                            f'Version {info.latest} is available.\nInstalled: {info.current}\n\nDownload, verify and install it now?',
-                            'Install update',
-                            lambda info=info: self._install_update(info),
-                        )
-                    else:
-                        self._dialog('ZorinMacBridge update', f'You are up to date (version {info.current}).')
-                        self.status_var.set('Update check completed.')
+                    self._show_update_result(item[1])
                 elif kind == 'update_progress':
                     self.status_var.set(item[1])
                 elif kind == 'update_installed':
@@ -950,14 +982,16 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         except queue.Empty:
             pass
 
-    def _queue_video_image(self, image) -> None:
-        """Prepare expensive RGB bytes on the decoder thread, not GTK."""
+    def _queue_video_image(self, image) -> bool:
+        """Prepare RGB bytes off the GTK thread and keep only the latest frame."""
+        dropped = False
         try:
             rgb = image if getattr(image, 'mode', None) == 'RGB' else image.convert('RGB')
-            prepared = (rgb.width, rgb.height, rgb.tobytes())
+            prepared = (rgb.width, rgb.height, rgb.tobytes(), time.monotonic())
             try:
                 self.video_frames.put_nowait(prepared)
             except queue.Full:
+                dropped = True
                 try:
                     self.video_frames.get_nowait()
                 except queue.Empty:
@@ -965,22 +999,29 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                 try:
                     self.video_frames.put_nowait(prepared)
                 except queue.Full:
-                    pass
+                    dropped = True
         except Exception as exc:
             self._log('WARNING', f'Could not prepare decoded video frame: {exc}')
+        return dropped
 
     def _redraw(self) -> None:
         prepared = getattr(self, '_last_image', None)
         if prepared is None:
             return
         try:
-            width, height, raw = prepared
+            width, height, raw = prepared[:3]
         except Exception:
             return
         data = GLib.Bytes.new(raw)
-        pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(data, GdkPixbuf.Colorspace.RGB, False, 8, width, height, width * 3)
-        texture = Gdk.Texture.new_for_pixbuf(pixbuf)
-        self._last_pixbuf = pixbuf
+        # GTK 4 can present RGB memory directly; fall back to Pixbuf on older
+        # GI builds. This removes one conversion/copy from the common path.
+        try:
+            texture = Gdk.MemoryTexture.new(width, height, Gdk.MemoryFormat.R8G8B8, data, width * 3)
+            self._last_pixbuf = None
+        except Exception:
+            pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(data, GdkPixbuf.Colorspace.RGB, False, 8, width, height, width * 3)
+            texture = Gdk.Texture.new_for_pixbuf(pixbuf)
+            self._last_pixbuf = pixbuf
         self._last_texture = texture
         self.picture.set_paintable(texture)
 
@@ -1477,6 +1518,14 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
     def on_close(self) -> None:
         try:
             self.disconnect_remote()
+        except Exception:
+            pass
+        try:
+            self.terminal_controller.disconnect()
+        except Exception:
+            pass
+        try:
+            self.projects_controller.cancel()
         except Exception:
             pass
         if self.tray is not None:

@@ -34,10 +34,11 @@ from tray_icon import TrayController
 from updates import check_for_updates, install_update, updater_tls_self_test
 from settings import client_record, save_client_record
 from secret_store import get_password as get_saved_password, set_password as save_password_secret
+from zmb_video_policy import choose_adaptive_step, initial_tier_for_viewport, profile_for_tier
 
 from protocol import (
     AUTH, AUTH_FAIL, AUTH_OK, CLIPBOARD_DATA, CLIPBOARD_GET, CLIPBOARD_SET,
-    DOWNLOAD_BEGIN, DOWNLOAD_CHUNK, DOWNLOAD_END, DOWNLOAD_REQ, ERROR, VIDEO_H264,
+    DOWNLOAD_BEGIN, DOWNLOAD_CHUNK, DOWNLOAD_END, DOWNLOAD_REQ, ERROR, VIDEO_H264, VIDEO_STATS,
     KEY, LIST_REQ, LIST_RESP, MKDIR_OK, MKDIR_REQ, MOUSE_BUTTON, MOUSE_MOVE,
     PacketReader, SCROLL, TEXT, UPLOAD_BEGIN, UPLOAD_CHUNK, UPLOAD_END,
     pack_json, pack_packet, recv_one_blocking, unpack_json,
@@ -64,6 +65,7 @@ SPECIAL_KEYS = {
 }
 
 VIDEO_QUALITY_PRESETS = {
+    'Adaptive': {'fps': 30, 'max_width': 1920, 'bitrate': 8_000_000, 'adaptive': True},
     'Low': {'fps': 15, 'max_width': 1280, 'bitrate': 3_000_000},
     'Balanced': {'fps': 30, 'max_width': 1920, 'bitrate': 8_000_000},
     'High': {'fps': 30, 'max_width': 2560, 'bitrate': 14_000_000},
@@ -125,7 +127,7 @@ class ClientApp:
         self.selected_server_id = ''
         self.selected_server_name = ''
         self.remember_credentials_var = tk.BooleanVar(value=True)
-        self.quality_var = tk.StringVar(value='Balanced')
+        self.quality_var = tk.StringVar(value='Adaptive')
         self.remember_credentials_active = True
         self._connect_snapshot = None
         self._credential_serial = 0
@@ -139,7 +141,10 @@ class ClientApp:
         self.stop_event = threading.Event()
         self.net_thread: threading.Thread | None = None
         self.video_thread: threading.Thread | None = None
-        self.video_frames: queue.Queue[Image.Image] = queue.Queue(maxsize=2)
+        self.video_frames: queue.Queue[Image.Image] = queue.Queue(maxsize=1)
+        self._video_reconfigure_event = threading.Event()
+        self._video_viewport_width = 1600
+        self._last_render_delay_ms = 0.0
         self.connected = False
         self.last_photo = None
         self.remote_image_size = (1, 1)
@@ -518,6 +523,10 @@ class ClientApp:
         family = socket.AF_INET6 if parsed_ip.version == 6 else socket.AF_INET
         raw = socket.socket(family, socket.SOCK_STREAM)
         raw.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        try:
+            raw.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
         # Detect a genuinely dead LAN peer without treating a static video image
         # as a failure. These options are Linux-specific and best-effort.
         for opt_name, value in (('TCP_KEEPIDLE', 15), ('TCP_KEEPINTVL', 5), ('TCP_KEEPCNT', 3)):
@@ -687,10 +696,13 @@ class ClientApp:
                 disconnect_reason = 'Desktop session ended'
             self.ui_queue.put(('disconnected', disconnect_reason))
 
-    def _queue_video_image(self, image: Image.Image) -> None:
+    def _queue_video_image(self, image: Image.Image) -> bool:
+        """Queue only the freshest decoded frame; return True if an older frame was dropped."""
+        dropped = False
         try:
             self.video_frames.put_nowait(image)
         except queue.Full:
+            dropped = True
             try:
                 self.video_frames.get_nowait()
             except queue.Empty:
@@ -698,80 +710,188 @@ class ClientApp:
             try:
                 self.video_frames.put_nowait(image)
             except queue.Full:
-                pass
+                dropped = True
+        return dropped
 
     def _video_preferences(self) -> tuple[str, dict]:
         var = getattr(self, 'quality_var', None)
         try:
-            name = str(var.get()) if var is not None else 'Balanced'
+            name = str(var.get()) if var is not None else 'Adaptive'
         except Exception:
-            name = 'Balanced'
+            name = 'Adaptive'
         if name not in VIDEO_QUALITY_PRESETS:
-            name = 'Balanced'
+            name = 'Adaptive'
         return name, dict(VIDEO_QUALITY_PRESETS[name])
 
+    def _request_video_reconfigure(self) -> None:
+        event = getattr(self, '_video_reconfigure_event', None)
+        if event is not None:
+            event.set()
+
     def _video_loop(self) -> None:
-        sock = None
-        decoder = None
-        frames = 0
-        try:
-            profile_name, profile = self._video_preferences()
-            self._log(
-                'INFO',
-                f'Opening dedicated H.264 video connection ({profile_name}: '
-                f'{profile["max_width"]}px, {profile["fps"]} FPS, {profile["bitrate"] // 1_000_000} Mbit/s).',
-            )
-            sock = self._secure_connect('video', {
-                'video': profile,
-                'quality': profile_name,
-            })
-            # ScreenCaptureKit may legitimately emit no frames while the display is
-            # completely unchanged. A read timeout is therefore an idle tick, NOT a
-            # broken session. TCP keepalive/control-channel EOF detect real failures.
-            sock.settimeout(5.0)
-            reader = PacketReader()
-            decoder = av.CodecContext.create('h264', 'r')
-            self._log('INFO', 'H.264 decoder initialized (PyAV/FFmpeg).')
-            while not self.stop_event.is_set():
-                try:
-                    data = sock.recv(262144)
-                except (socket.timeout, ssl.SSLWantReadError):
+        """Run a low-latency video-only connection with optional adaptive reconnects.
+
+        The control channel owns the desktop session lifetime. P5 can therefore
+        reconnect only the H.264 channel when quality changes or adaptive policy
+        selects a cheaper profile, without dropping keyboard/mouse/file state.
+        """
+        adaptive_tier = initial_tier_for_viewport(getattr(self, '_video_viewport_width', 0))
+        last_selected = ''
+        stable_windows = 0
+        total_frames = 0
+
+        while not self.stop_event.is_set():
+            sock = None
+            decoder = None
+            intentional_reconnect = False
+            # Clear a previous request before reading the latest UI selection so
+            # an event cannot be lost between snapshot and socket creation.
+            self._video_reconfigure_event.clear()
+            profile_name, requested = self._video_preferences()
+            if profile_name != last_selected:
+                stable_windows = 0
+                if profile_name == 'Adaptive':
+                    adaptive_tier = initial_tier_for_viewport(getattr(self, '_video_viewport_width', 0))
+                last_selected = profile_name
+
+            if profile_name == 'Adaptive':
+                tier_name, profile = profile_for_tier(adaptive_tier)
+                effective_name = f'Adaptive/{tier_name}'
+            else:
+                profile = {k: v for k, v in requested.items() if k != 'adaptive'}
+                effective_name = profile_name
+
+            try:
+                self._log(
+                    'INFO',
+                    f'Opening dedicated H.264 video connection ({effective_name}: '
+                    f'{profile["max_width"]}px, {profile["fps"]} FPS, {profile["bitrate"] // 1_000_000} Mbit/s).',
+                )
+                sock = self._secure_connect('video', {
+                    'video': profile,
+                    'quality': effective_name,
+                })
+                # ScreenCaptureKit may legitimately emit no frames while the display is
+                # completely unchanged. A read timeout is therefore an idle tick, NOT a
+                # broken session. Keep the timeout short so video-only reconfiguration
+                # stays responsive without disturbing the control channel.
+                sock.settimeout(0.5)
+                reader = PacketReader()
+                decoder = av.CodecContext.create('h264', 'r')
+                self._log('INFO', 'H.264 decoder initialized (PyAV/FFmpeg).')
+
+                stat_started = adapt_started = time.monotonic()
+                stat_bytes = stat_decoded = stat_dropped = 0
+                adapt_decoded = adapt_dropped = 0
+                server_stats = {}
+
+                while not self.stop_event.is_set():
+                    if self._video_reconfigure_event.is_set():
+                        intentional_reconnect = True
+                        break
+                    timed_out = False
+                    try:
+                        data = sock.recv(262144)
+                    except (socket.timeout, ssl.SSLWantReadError):
+                        timed_out = True
+                        data = b''
+                    if not timed_out and not data:
+                        raise ConnectionError('Video connection closed by server')
+                    if data:
+                        stat_bytes += len(data)
+                        for kind, payload in reader.feed(data):
+                            if kind == VIDEO_H264:
+                                for packet in decoder.parse(payload):
+                                    for frame in decoder.decode(packet):
+                                        img = frame.to_image().convert('RGB')
+                                        self.remote_image_size = (img.width, img.height)
+                                        dropped = bool(self._queue_video_image(img))
+                                        total_frames += 1
+                                        stat_decoded += 1
+                                        adapt_decoded += 1
+                                        if dropped:
+                                            stat_dropped += 1
+                                            adapt_dropped += 1
+                                        if total_frames == 1:
+                                            self._log('INFO', f'First H.264 frame decoded: {img.width}x{img.height}.')
+                            elif kind == VIDEO_STATS:
+                                try:
+                                    decoded_stats = unpack_json(payload)
+                                    if isinstance(decoded_stats, dict):
+                                        server_stats = decoded_stats
+                                except Exception:
+                                    pass
+                            elif kind == ERROR:
+                                message = payload.decode('utf-8', 'replace')
+                                raise RuntimeError('Video server error: ' + message)
+                    elif not data and self._video_reconfigure_event.is_set():
+                        intentional_reconnect = True
+                        break
+
+                    now = time.monotonic()
+                    stat_elapsed = now - stat_started
+                    if stat_elapsed >= 2.0:
+                        local_fps = stat_decoded / max(0.001, stat_elapsed)
+                        mbps = stat_bytes * 8.0 / max(0.001, stat_elapsed) / 1_000_000.0
+                        drop_pct = stat_dropped * 100.0 / max(1, stat_decoded)
+                        self.ui_queue.put(('video_stats', {
+                            'profile': effective_name,
+                            'decode_fps': local_fps,
+                            'receive_mbps': mbps,
+                            'drop_pct': drop_pct,
+                            'queue_ms': float(getattr(self, '_last_render_delay_ms', 0.0)),
+                            'server': server_stats,
+                        }))
+                        stat_started = now
+                        stat_bytes = stat_decoded = stat_dropped = 0
+
+                    adapt_elapsed = now - adapt_started
+                    if profile_name == 'Adaptive' and adapt_elapsed >= 5.0:
+                        if adapt_decoded >= 20 and adapt_dropped == 0:
+                            stable_windows += 1
+                        elif adapt_dropped:
+                            stable_windows = 0
+                        step = choose_adaptive_step(
+                            decoded=adapt_decoded,
+                            dropped=adapt_dropped,
+                            stable_windows=stable_windows,
+                            current_tier=adaptive_tier,
+                            viewport_width=getattr(self, '_video_viewport_width', 0),
+                        )
+                        if step:
+                            old_name, _ = profile_for_tier(adaptive_tier)
+                            adaptive_tier = max(0, min(3, adaptive_tier + step))
+                            new_name, _ = profile_for_tier(adaptive_tier)
+                            self._log(
+                                'INFO',
+                                f'Adaptive video: {old_name} → {new_name} '
+                                f'(decoded={adapt_decoded}, dropped={adapt_dropped}, stable={stable_windows}).',
+                            )
+                            intentional_reconnect = True
+                            break
+                        adapt_started = now
+                        adapt_decoded = adapt_dropped = 0
+
+                if intentional_reconnect and not self.stop_event.is_set():
                     continue
-                if not data:
-                    raise ConnectionError('Video connection closed by server')
-                for kind, payload in reader.feed(data):
-                    if kind == VIDEO_H264:
-                        for packet in decoder.parse(payload):
-                            for frame in decoder.decode(packet):
-                                img = frame.to_image().convert('RGB')
-                                self.remote_image_size = (img.width, img.height)
-                                self._queue_video_image(img)
-                                frames += 1
-                                if frames == 1:
-                                    self._log('INFO', f'First H.264 frame decoded: {img.width}x{img.height}.')
-                    elif kind == ERROR:
-                        message = payload.decode('utf-8', 'replace')
-                        raise RuntimeError('Video server error: ' + message)
-        except Exception as exc:
-            if not self.stop_event.is_set():
-                reason = f'{type(exc).__name__}: {exc}'
-                self._log('ERROR', f'Video stream failed: {reason}')
-                self.ui_queue.put(('error', f'Video stream failed: {exc}'))
-                self.stop_event.set()
-        finally:
-            if decoder is not None:
+            except Exception as exc:
+                if not self.stop_event.is_set():
+                    reason = f'{type(exc).__name__}: {exc}'
+                    self._log('ERROR', f'Video stream failed: {reason}')
+                    self.ui_queue.put(('error', f'Video stream failed: {exc}'))
+                    self.stop_event.set()
+            finally:
                 try:
-                    for frame in decoder.decode(None):
-                        img = frame.to_image().convert('RGB')
-                        self._queue_video_image(img)
+                    if sock is not None:
+                        sock.close()
                 except Exception:
                     pass
-            try:
-                if sock is not None:
-                    sock.close()
-            except Exception:
-                pass
-            self._log('INFO', 'H.264 video connection closed.')
+                decoder = None
+
+            if not intentional_reconnect:
+                break
+
+        self._log('INFO', 'H.264 video connection closed.')
 
     def _process_ui_queue(self) -> None:
         started = time.monotonic()

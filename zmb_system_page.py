@@ -10,6 +10,7 @@ from zmb_admin_backend import (
     get_profile,
     get_status,
     pair_device,
+    machine_state,
     reboot_readiness,
     revoke_current_device,
     run_action,
@@ -17,8 +18,12 @@ from zmb_admin_backend import (
     status_summary,
 )
 
+from zmb_shell_backend import get_shell_profile, install_shell_access, revoke_shell_access, shell_ready
+from zmb_recovery import classify_transport_error, parse_recovery_report, recovery_summary, render_recovery_report
+
 
 STATUS_FIELDS = [
+    ("State", "machine_state"),
     ("Hostname", "hostname"),
     ("Machine ID", "server_id"),
     ("macOS", "macos_version"),
@@ -35,6 +40,10 @@ STATUS_FIELDS = [
     ("Remote reboot unlock", "filevault_ssh_unlock_eligible"),
     ("Reboot state", "reboot_risk"),
     ("Wake on network", "wake_on_network_setting"),
+    ("Power source", "power_source"),
+    ("Battery", "battery_percent"),
+    ("Battery detail", "battery_detail"),
+    ("Xcode developer dir", "xcode_developer_dir"),
     ("CPU usage", "cpu_usage_percent"),
     ("Load average", "load_average"),
     ("Memory", "memory_summary"),
@@ -59,7 +68,7 @@ def _display_value(key: str, value: str) -> str:
         return "No"
     if key == "admin_heartbeat_age_seconds" and value not in {"-1", "unknown", "?"}:
         return value + " s"
-    if key == "cpu_usage_percent" and value not in {"unknown", "?"}:
+    if key in {"cpu_usage_percent", "battery_percent"} and value not in {"unknown", "?"}:
         return value + "%"
     if key in {"memory_total_bytes", "disk_root_available_bytes"} and value.isdigit():
         return f"{int(value) / (1024 ** 3):.1f} GiB"
@@ -151,6 +160,7 @@ class SystemController:
             ("Start ZMB", "start-zmb"),
             ("Stop ZMB", "stop-zmb"),
             ("Restart ZMB", "restart-zmb"),
+            ("Recover desktop", "recover-desktop"),
             ("Repair startup", "repair-launch-agent"),
             ("Logs", "logs"),
             ("Sleep", "sleep"),
@@ -161,6 +171,47 @@ class SystemController:
             btn.connect("clicked", self._action_clicked, action)
             flow.insert(btn, -1)
             self.action_buttons.append(btn)
+
+        wake_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        action_card.append(wake_row)
+        wake_row.append(Gtk.Label(label="Wake for network access", xalign=0))
+        wake_note = Gtk.Label(label="Configures macOS network-wake support while the Mac is online; actual wake capability depends on the Mac/network.", xalign=0, wrap=True)
+        wake_note.add_css_class("zmb-muted")
+        wake_note.set_hexpand(True)
+        wake_row.append(wake_note)
+        wake_on = Gtk.Button(label="Enable")
+        wake_off = Gtk.Button(label="Disable")
+        wake_on.connect("clicked", lambda *_: self._run_action("set-wake-network", arg="on"))
+        wake_off.connect("clicked", lambda *_: self._run_action("set-wake-network", arg="off"))
+        wake_row.append(wake_on)
+        wake_row.append(wake_off)
+        self.action_buttons.extend([wake_on, wake_off])
+
+        recovery_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        recovery_card.add_css_class("zmb-card")
+        outer.append(recovery_card)
+        recovery_title = Gtk.Label(label="P6 diagnostics and recovery", xalign=0)
+        recovery_title.add_css_class("title-4")
+        recovery_card.append(recovery_title)
+        self.recovery_summary_label = Gtk.Label(
+            label="Run diagnostics to identify the failed layer before repairing it.",
+            xalign=0, wrap=True, selectable=True,
+        )
+        self.recovery_summary_label.add_css_class("zmb-muted")
+        recovery_card.append(self.recovery_summary_label)
+        recovery_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        recovery_card.append(recovery_row)
+        diagnose_btn = Gtk.Button(label="Run diagnostics")
+        diagnose_btn.connect("clicked", lambda *_: self._run_action(
+            "diagnose", backend_timeout=20, watchdog_ms=30000,
+            operation_message="Running layered P6 recovery diagnostics…",
+        ))
+        recovery_row.append(diagnose_btn)
+        recover_all_btn = Gtk.Button(label="Recover all safe layers")
+        recover_all_btn.add_css_class("suggested-action")
+        recover_all_btn.connect("clicked", lambda *_: self._confirm_recover_all())
+        recovery_row.append(recover_all_btn)
+        self.action_buttons.extend([diagnose_btn, recover_all_btn])
 
         update_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         update_card.add_css_class("zmb-card")
@@ -234,6 +285,7 @@ class SystemController:
 
     def selection_changed(self):
         sid, host, name = self.current()
+        self.recovery_summary_label.set_text("Run diagnostics to identify the failed layer before repairing it.")
         profile = get_profile(sid, host) if host else None
         if not host:
             self.summary.set_text("Select a Mac first.")
@@ -241,8 +293,9 @@ class SystemController:
             self.pairing_label.set_text("No Mac selected")
             return False
         if profile:
+            shell_state = "terminal enabled" if shell_ready(profile) else "terminal disabled"
             self.pairing_label.set_text(
-                f"Paired as {profile.get('user', '?')}@{host} · device {profile.get('device_id', '?')}"
+                f"Paired as {profile.get('user', '?')}@{host} · device {profile.get('device_id', '?')} · {shell_state}"
             )
             self._set_actions(True)
             self.summary.set_text(f"{name or host} is paired. Refreshing system status…")
@@ -331,14 +384,19 @@ class SystemController:
             self.last_status = None
             self.state_icon.set_from_icon_name("dialog-warning-symbolic")
             self.summary.set_text(error)
+            issue = classify_transport_error(error)
+            self.recovery_summary_label.set_text(f"{issue.code} — {issue.summary}")
             self.window._log("ERROR", f"System admin: {error}")
             return False
         assert data is not None
         self.last_status = data
         self.title.set_text(data.get("hostname") or self.current()[2] or "Mac")
+        state = machine_state(data)
+        data = {**data, "machine_state": state}
+        self.last_status = data
         summary = status_summary(data)
-        self.summary.set_text(summary)
-        icon = "emblem-ok-symbolic" if summary.startswith("READY") else "dialog-information-symbolic"
+        self.summary.set_text(f"{state.replace('_', ' ')} — {summary}")
+        icon = "emblem-ok-symbolic" if state == "DESKTOP_READY" else ("dialog-warning-symbolic" if state in {"DEGRADED", "RECOVERY_NEEDED"} else "dialog-information-symbolic")
         self.state_icon.set_from_icon_name(icon)
         self._clear_grid()
         for row, (label, key) in enumerate(STATUS_FIELDS):
@@ -442,11 +500,22 @@ class SystemController:
             if not self._finish_operation(op_token):
                 return False
             if error:
+                issue = classify_transport_error(error)
+                self.recovery_summary_label.set_text(f"{issue.code} — {issue.summary}")
                 self.window._dialog("System action failed", error, destructive=True)
                 self.window._log("ERROR", f"System action {action}: {error}")
                 return False
             self.window._log("INFO", f"System action {action}: OK")
-            if action == "logs":
+            if action in {"diagnose", "recover-all"}:
+                meta, issues = parse_recovery_report(output)
+                summary_text = recovery_summary(meta, issues)
+                self.recovery_summary_label.set_text(summary_text)
+                self._show_text(
+                    "ZorinMacBridge P6 diagnostics" if action == "diagnose" else "ZorinMacBridge P6 recovery result",
+                    render_recovery_report(meta, issues),
+                )
+                GLib.timeout_add(700, lambda: (self.refresh(), False)[1])
+            elif action == "logs":
                 self._show_text("ZorinMacBridge system logs", output or "No log output")
             elif action in {"reboot", "shutdown", "sleep"}:
                 self.summary.set_text(f"{action}: command accepted by Mac")
@@ -460,6 +529,17 @@ class SystemController:
             return False
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _confirm_recover_all(self) -> None:
+        self.window._confirm(
+            "Recover ZorinMacBridge",
+            "Run the bounded P6 repair sequence? It can repair P0/LaunchAgent state, clear a stale updater lock, restore a verified update backup when the installed app is missing/invalid, and restart the desktop service. It will NOT change FileVault, user accounts, or force-enable Remote Login.",
+            "Recover",
+            lambda: self._run_action(
+                "recover-all", backend_timeout=65, watchdog_ms=85000,
+                operation_message="Recovering safe ZorinMacBridge layers and verifying the result…",
+            ),
+        )
 
     def _selected_update_mode(self) -> str:
         return {0: "off", 1: "notify", 2: "install"}.get(int(self.update_mode_dropdown.get_selected()), "notify")
@@ -508,7 +588,7 @@ class SystemController:
         title.add_css_class("title-2")
         box.append(title)
         note = Gtk.Label(
-            label="This is a one-time setup. Use the SAME password you use to log in/unlock this Mac. This is NOT the ZorinMacBridge session password. It is used only to install a restricted SSH key and is not saved.",
+            label="This is a one-time setup. Use the SAME password you use to log in/unlock this Mac. This is NOT the ZorinMacBridge session password. The password is used only during this pairing and is not saved. P0 installs a restricted admin key; optionally P3 also installs a separate normal-user Terminal key.",
             xalign=0, wrap=True,
         )
         note.add_css_class("zmb-muted")
@@ -529,6 +609,11 @@ class SystemController:
         ]):
             grid.attach(Gtk.Label(label=label, xalign=0), 0, row, 1, 1)
             grid.attach(widget, 1, row, 1, 1)
+
+        shell_checkbox = Gtk.CheckButton(label="Enable Terminal / Project Actions (normal macOS user SSH key)")
+        shell_checkbox.set_active(bool(existing.get("shell_enabled", True)))
+        shell_checkbox.set_tooltip_text("Creates a separate user-level Ed25519 key. It has no ZorinMacBridge sudoers privileges and is not the restricted P0 admin key.")
+        box.append(shell_checkbox)
 
         fingerprint = Gtk.Label(label="SSH fingerprint has not been read yet.", xalign=0, wrap=True, selectable=True)
         box.append(fingerprint)
@@ -695,8 +780,9 @@ class SystemController:
                     "The UI has been released and the password field cleared. Check Remote Login/P0 on the Mac and retry."
                 ),
             )
-            fingerprint.set_text("Installing restricted device key and testing P0 service…")
+            fingerprint.set_text("Installing restricted admin key, testing P0, and configuring the optional user Terminal key…")
             pair_host = host_entry.get_text().strip()
+            enable_shell = bool(shell_checkbox.get_active())
 
             def worker():
                 try:
@@ -710,6 +796,11 @@ class SystemController:
                         desktop_port=desktop_port,
                         scanned_host_keys=[result["preferred"]["line"]],
                     )
+                    if enable_shell:
+                        profile = install_shell_access(profile, password)
+                    elif shell_ready(profile):
+                        revoke_shell_access(profile)
+                        profile = get_profile(sid, pair_host) or profile
                     GLib.idle_add(pair_done, token, profile, None)
                 except Exception as exc:
                     GLib.idle_add(pair_done, token, None, str(exc))
@@ -725,7 +816,7 @@ class SystemController:
                 set_pair_sensitive()
                 return False
             dialog.close()
-            self.window._log("INFO", f"System administration paired with {profile.get('server_name') or profile.get('host')}.")
+            self.window._log("INFO", f"System administration paired with {profile.get('server_name') or profile.get('host')}; Terminal/Projects={'enabled' if profile.get('shell_enabled') else 'disabled'}.")
             self.selection_changed()
             return False
 
@@ -738,7 +829,7 @@ class SystemController:
             return
         self.window._confirm(
             "Revoke Zorin device",
-            "Remove this Zorin machine's restricted administration key from the Mac? Desktop trust/password settings are not changed.",
+            "Remove this Zorin machine's restricted administration key and P3 user Terminal key from the Mac? Desktop trust/password settings are not changed.",
             "Revoke",
             self._unpair,
         )
@@ -753,6 +844,12 @@ class SystemController:
 
         def worker():
             try:
+                profile = get_shell_profile(sid, host)
+                if profile and shell_ready(profile):
+                    # Do not leave a normal-user shell key behind when the admin
+                    # device is revoked. If removal fails, keep the local profile
+                    # so the user can retry instead of silently orphaning access.
+                    revoke_shell_access(profile)
                 revoke_current_device(server_id=sid, host=host)
                 GLib.idle_add(done, token, None)
             except Exception as exc:

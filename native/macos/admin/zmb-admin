@@ -3,6 +3,7 @@ set -u
 
 LABEL="com.ilovemyprojects.zorinmacbridge.server"
 ADMIN_LABEL="com.ilovemyprojects.zorinmacbridge.admin"
+UPDATE_LABEL="com.ilovemyprojects.zorinmacbridge.update"
 APP_NAME="ZorinMacBridge Server"
 APP_PATH="/Applications/ZorinMacBridge Server.app"
 DEFAULT_PORT="45950"
@@ -13,6 +14,12 @@ HEARTBEAT_FILE="$HEARTBEAT_DIR/heartbeat"
 PAUSE_FILE="$HEARTBEAT_DIR/autoheal.paused"
 DAEMON_LOG="/var/log/zorinmacbridge-admin.log"
 DAEMON_ERR="/var/log/zorinmacbridge-admin.err"
+RECOVERY_LOG="/var/log/zorinmacbridge-recovery.log"
+ADVERTISER_PID_FILE="$HEARTBEAT_DIR/advertiser.pid"
+PORT_FAIL_FILE="$HEARTBEAT_DIR/port-fail-count"
+ADMIN_PLIST="/Library/LaunchDaemons/${ADMIN_LABEL}.plist"
+UPDATE_PLIST="/Library/LaunchDaemons/com.ilovemyprojects.zorinmacbridge.update.plist"
+APP_BACKUP="${APP_PATH}.zmb-update-backup"
 UPDATE_STATUS_FILE="$ADMIN_DIR/update-status"
 UPDATE_LOCK_DIR="$HEARTBEAT_DIR/update.lock"
 APP_BIN="$APP_PATH/Contents/MacOS/ZorinMacBridge Server"
@@ -157,6 +164,10 @@ admin_daemon_loaded() {
   /bin/launchctl print "system/${ADMIN_LABEL}" >/dev/null 2>&1
 }
 
+update_daemon_loaded() {
+  /bin/launchctl print "system/${UPDATE_LABEL}" >/dev/null 2>&1
+}
+
 heartbeat_age() {
   local now hb
   [ -f "$HEARTBEAT_FILE" ] || { printf '%s\n' -1; return; }
@@ -164,6 +175,257 @@ heartbeat_age() {
   printf '%s' "$hb" | /usr/bin/grep -Eq '^[0-9]+$' || { printf '%s\n' -1; return; }
   now="$(/bin/date +%s)"
   printf '%s\n' "$(( now - hb ))"
+}
+
+recovery_log() {
+  local level="$1" code="$2" message="$3" size tmp
+  /bin/mkdir -p "$HEARTBEAT_DIR"
+  message="$(sanitize_value "$message")"
+  size="$(/usr/bin/stat -f '%z' "$RECOVERY_LOG" 2>/dev/null || echo 0)"
+  if printf '%s' "$size" | /usr/bin/grep -Eq '^[0-9]+$' && [ "$size" -gt 1048576 ]; then
+    tmp="${RECOVERY_LOG}.tmp.$$"
+    /usr/bin/tail -n 500 "$RECOVERY_LOG" > "$tmp" 2>/dev/null || : > "$tmp"
+    /bin/mv "$tmp" "$RECOVERY_LOG"
+  fi
+  printf '%s level=%s code=%s %s\n' "$(/bin/date '+%Y-%m-%dT%H:%M:%S%z')" "$level" "$code" "$message" >> "$RECOVERY_LOG"
+  /bin/chmod 644 "$RECOVERY_LOG" 2>/dev/null || true
+}
+
+pid_file_alive() {
+  local file="$1" pid
+  [ -f "$file" ] || return 1
+  pid="$(/bin/cat "$file" 2>/dev/null || true)"
+  printf '%s' "$pid" | /usr/bin/grep -Eq '^[0-9]+$' || return 1
+  /bin/kill -0 "$pid" >/dev/null 2>&1
+}
+
+advertiser_alive() { pid_file_alive "$ADVERTISER_PID_FILE"; }
+
+update_lock_stale() {
+  local pid
+  [ -d "$UPDATE_LOCK_DIR" ] || return 1
+  pid="$(/bin/cat "$UPDATE_LOCK_DIR/pid" 2>/dev/null || true)"
+  ! printf '%s' "$pid" | /usr/bin/grep -Eq '^[0-9]+$' && return 0
+  ! /bin/kill -0 "$pid" >/dev/null 2>&1
+}
+
+app_signature_ok() {
+  [ -d "$APP_PATH" ] || return 1
+  /usr/bin/codesign --verify --deep --strict "$APP_PATH" >/dev/null 2>&1
+}
+
+backup_signature_ok() {
+  [ -d "$APP_BACKUP" ] || return 1
+  /usr/bin/codesign --verify --deep --strict "$APP_BACKUP" >/dev/null 2>&1
+}
+
+diag_add() {
+  local file="$1" severity="$2" code="$3" repairable="$4" summary="$5"
+  summary="$(printf '%s' "$summary" | /usr/bin/tr '\r\n|' '   ' | /usr/bin/cut -c1-500)"
+  printf 'issue=%s|%s|%s|%s\n' "$severity" "$code" "$repairable" "$summary" >> "$file"
+}
+
+diagnose_cmd() {
+  require_root
+  local tmp now critical warning user uid home plist port session=0 app_running=0 agent_exists=0 agent_loaded=0 listening=0 hb daemon=0 remote update_result
+  tmp="$(/usr/bin/mktemp /var/tmp/zmb-diagnose.XXXXXX)" || fail "could not create diagnostics buffer" 73
+  now="$(/bin/date +%s)"
+  user="$(target_user || true)"
+  uid=""; home=""; plist=""; port="$DEFAULT_PORT"
+  admin_daemon_loaded && daemon=1 || true
+  hb="$(heartbeat_age)"
+  remote="$(remote_login_state)"
+
+  if ! /usr/bin/plutil -lint "$ADMIN_PLIST" >/dev/null 2>&1; then
+    diag_add "$tmp" critical ADMIN_PLIST_INVALID 0 "The installed P0 LaunchDaemon plist is missing or invalid; run Enable / Repair locally."
+  fi
+  [ "$daemon" = "1" ] || diag_add "$tmp" critical ADMIN_DAEMON_DOWN 1 "P0 LaunchDaemon is not loaded."
+  if ! /usr/bin/plutil -lint "$UPDATE_PLIST" >/dev/null 2>&1; then
+    diag_add "$tmp" warning UPDATE_PLIST_INVALID 0 "The update LaunchDaemon plist is missing or invalid; run Enable / Repair locally."
+  elif ! update_daemon_loaded; then
+    diag_add "$tmp" warning UPDATE_DAEMON_DOWN 1 "The automatic update LaunchDaemon is not loaded."
+  fi
+  if ! printf '%s' "$hb" | /usr/bin/grep -Eq '^[0-9]+$' || [ "$hb" -lt 0 ] || [ "$hb" -gt 60 ]; then
+    diag_add "$tmp" warning HEARTBEAT_STALE 1 "P0 heartbeat is missing or older than 60 seconds."
+  fi
+  advertiser_alive || diag_add "$tmp" warning SYSTEM_MDNS_DOWN 1 "System Bonjour recovery advertisement is not running."
+  ssh_transport_ready || diag_add "$tmp" critical SSH_NOT_READY 0 "SSH is not accepting connections on TCP 22; enable Remote Login in System Settings > General > Sharing."
+
+  if [ ! -d "$APP_PATH" ]; then
+    if backup_signature_ok; then
+      diag_add "$tmp" critical APP_MISSING 1 "The application is missing, but a verified update backup can be restored."
+    else
+      diag_add "$tmp" critical APP_MISSING 0 "The application is missing and no verified update backup is available."
+    fi
+  elif ! app_signature_ok; then
+    if backup_signature_ok; then
+      diag_add "$tmp" critical APP_SIGNATURE_INVALID 1 "The installed application failed code-signature verification; a verified backup is available."
+    else
+      diag_add "$tmp" critical APP_SIGNATURE_INVALID 0 "The installed application failed code-signature verification and no verified backup is available."
+    fi
+  fi
+
+  if [ -z "$user" ]; then
+    diag_add "$tmp" critical TARGET_USER_INVALID 0 "P0 has no valid target desktop user. Run Enable / Repair locally once."
+  else
+    uid="$(user_uid "$user" || true)"
+    home="$(user_home "$user" || true)"
+    if [ -z "$uid" ] || [ -z "$home" ]; then
+      diag_add "$tmp" critical TARGET_USER_INVALID 0 "The configured desktop user no longer resolves to a valid uid/home."
+    else
+      plist="$home/Library/LaunchAgents/${LABEL}.plist"
+      port="$(settings_value "$home/.zorin-mac-bridge/server-settings.json" port "$DEFAULT_PORT")"
+      user_session_available "$uid" && session=1 || true
+      [ -f "$plist" ] && agent_exists=1 || true
+      if [ "$agent_exists" = "1" ] && ! /usr/bin/sudo -u "$user" /usr/bin/plutil -lint "$plist" >/dev/null 2>&1; then
+        diag_add "$tmp" warning LAUNCH_AGENT_INVALID 1 "The desktop LaunchAgent plist is invalid and will be regenerated by recovery."
+      fi
+      launch_agent_loaded "$uid" && agent_loaded=1 || true
+      zmb_process_running "$uid" && app_running=1 || true
+      port_listening "$port" && listening=1 || true
+      if [ "$session" != "1" ]; then
+        diag_add "$tmp" info GUI_SESSION_ABSENT 0 "No logged-in Aqua session is available; ScreenCaptureKit desktop streaming cannot run until the user logs in."
+      else
+        [ "$agent_exists" = "1" ] || diag_add "$tmp" warning LAUNCH_AGENT_MISSING 1 "The desktop LaunchAgent file is missing."
+        [ "$agent_loaded" = "1" ] || diag_add "$tmp" warning LAUNCH_AGENT_NOT_LOADED 1 "The desktop LaunchAgent is not loaded in the GUI session."
+        [ "$app_running" = "1" ] || diag_add "$tmp" warning DESKTOP_PROCESS_DOWN 1 "ZorinMacBridge Server is not running in the GUI session."
+        if [ "$app_running" = "1" ] && [ "$listening" != "1" ]; then
+          diag_add "$tmp" warning DESKTOP_PORT_DOWN 1 "The desktop process is running but its configured TCP port is not listening."
+        fi
+      fi
+    fi
+  fi
+
+  update_lock_stale && diag_add "$tmp" warning UPDATE_LOCK_STALE 1 "A stale update lock remains from an interrupted updater run."
+  if [ -d "$APP_BACKUP" ] && app_signature_ok && ! [ -d "$UPDATE_LOCK_DIR" ]; then
+    diag_add "$tmp" warning UPDATE_BACKUP_STALE 1 "A previous update backup remains although the installed application verifies correctly."
+  fi
+  update_result="$(status_file_value result never)"
+  case "$update_result" in
+    stage-failed|invalid-stage|invalid-signature|install-failed|helper-update-failed)
+      diag_add "$tmp" warning LAST_UPDATE_FAILED 0 "The last recorded update attempt failed: $update_result. Review logs, then use Check update or Update now."
+      ;;
+  esac
+
+  critical="$(/usr/bin/grep -c '^issue=critical|' "$tmp" 2>/dev/null || true)"
+  warning="$(/usr/bin/grep -c '^issue=warning|' "$tmp" 2>/dev/null || true)"
+  printf 'protocol=1\nchecked_at=%s\n' "$now"
+  if [ "${critical:-0}" -gt 0 ]; then printf 'overall=recovery-needed\n';
+  elif [ "${warning:-0}" -gt 0 ]; then printf 'overall=degraded\n';
+  else printf 'overall=healthy\n'; fi
+  printf 'issue_count=%s\n' "$(/usr/bin/grep -c '^issue=' "$tmp" 2>/dev/null || true)"
+  /bin/cat "$tmp"
+  /bin/rm -f "$tmp"
+}
+
+clear_stale_update_lock() {
+  if update_lock_stale; then
+    /bin/rm -rf "$UPDATE_LOCK_DIR"
+    recovery_log INFO UPDATE_LOCK_CLEARED "Removed stale updater lock."
+  fi
+}
+
+repair_system_job() {
+  local label="$1" plist="$2" kick="${3:-0}" attempt=1 rc=0
+  /usr/bin/plutil -lint "$plist" >/dev/null 2>&1 || return 1
+  if ! /bin/launchctl print "system/${label}" >/dev/null 2>&1; then
+    /bin/launchctl enable "system/${label}" >/dev/null 2>&1 || true
+    while [ "$attempt" -le 12 ]; do
+      /bin/launchctl bootstrap system "$plist" >/dev/null 2>&1 || rc=$?
+      /bin/launchctl print "system/${label}" >/dev/null 2>&1 && { rc=0; break; }
+      /bin/sleep 0.25
+      attempt=$((attempt + 1))
+    done
+  fi
+  [ "$rc" -eq 0 ] || return "$rc"
+  if [ "$kick" = "1" ]; then
+    /bin/launchctl kickstart -k "system/${label}" >/dev/null 2>&1 || return $?
+  fi
+  return 0
+}
+
+repair_system_daemon() {
+  repair_system_job "$ADMIN_LABEL" "$ADMIN_PLIST" 1 || {
+    recovery_log ERROR ADMIN_DAEMON_REPAIR_FAILED "Could not bootstrap/kickstart P0 LaunchDaemon."
+    return 1
+  }
+}
+
+repair_update_daemon() {
+  repair_system_job "$UPDATE_LABEL" "$UPDATE_PLIST" 0 || {
+    recovery_log ERROR UPDATE_DAEMON_REPAIR_FAILED "Could not load the automatic update LaunchDaemon."
+    return 1
+  }
+}
+
+restore_verified_backup_if_needed() {
+  if app_signature_ok; then return 0; fi
+  backup_signature_ok || return 1
+  /bin/rm -rf "$APP_PATH"
+  /usr/bin/ditto "$APP_BACKUP" "$APP_PATH" || return 1
+  /usr/sbin/chown -R root:wheel "$APP_PATH" >/dev/null 2>&1 || true
+  app_signature_ok || return 1
+  recovery_log INFO APP_BACKUP_RESTORED "Restored verified application backup after missing/invalid installed app."
+  return 0
+}
+
+cleanup_stale_backup() {
+  [ -d "$APP_BACKUP" ] || return 0
+  [ ! -d "$UPDATE_LOCK_DIR" ] || return 0
+  app_signature_ok || return 0
+  /bin/rm -rf "$APP_BACKUP"
+  recovery_log INFO UPDATE_BACKUP_CLEANED "Removed stale verified update backup after healthy application check."
+}
+
+recover_all_cmd() {
+  require_root
+  local user uid home port i ok=1
+  clear_stale_update_lock
+  if ! app_signature_ok; then
+    restore_verified_backup_if_needed || { recovery_log ERROR APP_RESTORE_FAILED "Could not restore a verified application backup."; ok=0; }
+  fi
+  repair_system_daemon || ok=0
+  repair_update_daemon || ok=0
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    admin_daemon_loaded && advertiser_alive && break
+    /bin/sleep 0.5
+  done
+
+  if app_signature_ok; then
+    user="$(target_user || true)"
+    if [ -n "$user" ]; then
+      uid="$(user_uid "$user" || true)"
+      home="$(user_home "$user" || true)"
+      if [ -n "$uid" ] && [ -n "$home" ] && user_session_available "$uid"; then
+        repair_launch_agent >/dev/null 2>&1 || { recovery_log ERROR LAUNCH_AGENT_REPAIR_FAILED "Could not repair desktop LaunchAgent."; ok=0; }
+        port="$(settings_value "$home/.zorin-mac-bridge/server-settings.json" port "$DEFAULT_PORT")"
+        if zmb_process_running "$uid" && ! port_listening "$port"; then
+          recovery_log WARN DESKTOP_PORT_STUCK "Desktop process was running without a listening port; restarting it."
+          restart_zmb >/dev/null 2>&1 || ok=0
+        elif ! zmb_process_running "$uid"; then
+          recovery_log INFO DESKTOP_RESTART "Desktop process was down; starting it."
+          start_zmb >/dev/null 2>&1 || ok=0
+        fi
+        for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+          port_listening "$port" && break
+          /bin/sleep 1
+        done
+        port_listening "$port" || { recovery_log ERROR DESKTOP_PORT_TIMEOUT "Desktop TCP port did not become ready after recovery."; ok=0; }
+      fi
+    fi
+  else
+    recovery_log ERROR APP_UNTRUSTED "Desktop recovery was skipped because no verified application copy is available."
+    ok=0
+  fi
+  cleanup_stale_backup
+  /bin/rm -f "$PORT_FAIL_FILE" 2>/dev/null || true
+  printf 'ok=%s\n' "$([ "$ok" -eq 1 ] && echo recovered || echo partial)"
+  diagnose_cmd
+  [ "$ok" -eq 1 ]
+}
+
+ssh_transport_ready() {
+  /usr/bin/nc -G 1 -z 127.0.0.1 22 >/dev/null 2>&1
 }
 
 remote_login_state() {
@@ -192,6 +454,21 @@ wake_on_network_setting() {
   [ -n "$v" ] && printf '%s\n' "$v" || printf '%s\n' unknown
 }
 
+power_status() {
+  local batt source percent detail
+  batt="$(/usr/bin/pmset -g batt 2>/dev/null || true)"
+  source="$(printf '%s\n' "$batt" | /usr/bin/sed -n "1s/.*Now drawing from '\([^']*\)'.*/\1/p")"
+  percent="$(printf '%s\n' "$batt" | /usr/bin/grep -Eo '[0-9]+%' | /usr/bin/head -n1 | /usr/bin/tr -d '%')"
+  detail="$(printf '%s\n' "$batt" | /usr/bin/sed -n '2p' | /usr/bin/sed 's/^[[:space:]]*//')"
+  printf 'power_source=%s\n' "${source:-unknown}"
+  printf 'battery_percent=%s\n' "${percent:-unknown}"
+  printf 'battery_detail=%s\n' "${detail:-unknown}"
+}
+
+xcode_developer_dir() {
+  /usr/bin/xcode-select -p 2>/dev/null || printf '%s\n' unavailable
+}
+
 paired_devices_count() {
   local u home f
   u="$(target_user || true)"
@@ -204,7 +481,7 @@ paired_devices_count() {
 
 status_cmd() {
   require_root
-  local host server_id osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg auto_update_mode update_current update_latest update_available update_checked update_result update_error
+  local host server_id osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg auto_update_mode update_current update_latest update_available update_checked update_result update_error power_lines developer_dir
   host="$(/bin/hostname 2>/dev/null || echo unknown)"
   server_id="$(config_value SERVER_ID unknown)"
   osver="$(/usr/bin/sw_vers -productVersion 2>/dev/null || echo unknown)"
@@ -243,6 +520,8 @@ status_cmd() {
   remote_login="$(remote_login_state)"
   fv="$(filevault_state)"
   wake="$(wake_on_network_setting)"
+  power_lines="$(power_status)"
+  developer_dir="$(xcode_developer_dir)"
   mem="$(/usr/sbin/sysctl -n hw.memsize 2>/dev/null || echo unknown)"
   disk="$(/bin/df -k / 2>/dev/null | /usr/bin/awk 'NR==2 {printf "%.0f\n", $4*1024}' || echo unknown)"
   top_out="$(LC_ALL=C /usr/bin/top -l 1 -n 0 2>/dev/null || true)"
@@ -301,6 +580,8 @@ status_cmd() {
   printf 'filevault_ssh_unlock_eligible=%s\n' "$ssh_unlock"
   printf 'reboot_risk=%s\n' "$reboot_risk"
   printf 'wake_on_network_setting=%s\n' "$wake"
+  printf '%s\n' "$power_lines"
+  printf 'xcode_developer_dir=%s\n' "$developer_dir"
   printf 'paired_devices=%s\n' "$paired"
   printf 'autoheal_enabled=%s\n' "$autoheal_enabled"
   printf 'autoheal_paused=%s\n' "$autoheal_paused"
@@ -366,9 +647,23 @@ PLIST
   fi
   /bin/rm -f "$source_tmp"
   if user_session_available "$uid"; then
+    local attempt=1
     /bin/launchctl bootout "gui/${uid}/${LABEL}" >/dev/null 2>&1 || true
-    /bin/launchctl bootstrap "gui/${uid}" "$plist" >/dev/null 2>&1 || true
+    while [ "$attempt" -le 12 ]; do
+      ! launch_agent_loaded "$uid" && break
+      /bin/sleep 0.25
+      attempt=$((attempt + 1))
+    done
+    attempt=1
+    while [ "$attempt" -le 12 ]; do
+      /bin/launchctl bootstrap "gui/${uid}" "$plist" >/dev/null 2>&1 || true
+      launch_agent_loaded "$uid" && return 0
+      /bin/sleep 0.25
+      attempt=$((attempt + 1))
+    done
+    return 1
   fi
+  return 0
 }
 
 start_zmb() {
@@ -417,7 +712,7 @@ repair_launch_agent() {
   [ -n "$user" ] || fail "target user is not configured" 69
   uid="$(user_uid "$user" || true)"
   [ -n "$uid" ] || fail "cannot resolve target user uid" 69
-  write_launch_agent "$user" "$uid"
+  write_launch_agent "$user" "$uid" || fail "could not register the desktop LaunchAgent" 70
   if user_session_available "$uid"; then
     printf 'ok=launch-agent-repaired\nsession_available=1\n'
   else
@@ -427,22 +722,51 @@ repair_launch_agent() {
 
 autoheal() {
   require_root
-  local enabled user uid home plist
+  local enabled user uid home plist port count
   enabled="$(config_value AUTOHEAL 1)"
   [ "$enabled" = "1" ] || return 0
   [ ! -f "$PAUSE_FILE" ] || return 0
   user="$(target_user || true)"; [ -n "$user" ] || return 0
   uid="$(user_uid "$user" || true)"; [ -n "$uid" ] || return 0
-  user_session_available "$uid" || return 0
+  user_session_available "$uid" || { /bin/rm -f "$PORT_FAIL_FILE" 2>/dev/null || true; return 0; }
   [ -d "$APP_PATH" ] || return 0
   home="$(user_home "$user" || true)"; [ -n "$home" ] || return 0
   plist="$home/Library/LaunchAgents/${LABEL}.plist"
-  if [ ! -f "$plist" ]; then write_launch_agent "$user" "$uid"; fi
-  if ! launch_agent_loaded "$uid"; then
-    /bin/launchctl bootstrap "gui/${uid}" "$plist" >/dev/null 2>&1 || true
+  port="$(settings_value "$home/.zorin-mac-bridge/server-settings.json" port "$DEFAULT_PORT")"
+  if [ ! -f "$plist" ]; then
+    if write_launch_agent "$user" "$uid"; then
+      recovery_log INFO AUTOHEAL_LA_CREATED "Auto-recovery recreated and loaded the desktop LaunchAgent."
+    else
+      recovery_log ERROR AUTOHEAL_LA_FAILED "Auto-recovery could not recreate/register the desktop LaunchAgent."
+      return 0
+    fi
+  elif ! launch_agent_loaded "$uid"; then
+    if write_launch_agent "$user" "$uid"; then
+      recovery_log INFO AUTOHEAL_LA_LOADED "Auto-recovery re-registered the desktop LaunchAgent."
+    else
+      recovery_log ERROR AUTOHEAL_LA_FAILED "Auto-recovery could not register the desktop LaunchAgent."
+      return 0
+    fi
   fi
   if ! zmb_process_running "$uid"; then
+    /bin/rm -f "$PORT_FAIL_FILE" 2>/dev/null || true
     /bin/launchctl asuser "$uid" /usr/bin/sudo -u "$user" /usr/bin/open -a "$APP_NAME" >/dev/null 2>&1 || true
+    recovery_log INFO AUTOHEAL_DESKTOP_STARTED "Auto-recovery started the desktop application."
+    return 0
+  fi
+  if port_listening "$port"; then
+    /bin/rm -f "$PORT_FAIL_FILE" 2>/dev/null || true
+    return 0
+  fi
+  count="$(/bin/cat "$PORT_FAIL_FILE" 2>/dev/null || echo 0)"
+  printf '%s' "$count" | /usr/bin/grep -Eq '^[0-9]+$' || count=0
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$PORT_FAIL_FILE"
+  /bin/chmod 644 "$PORT_FAIL_FILE" 2>/dev/null || true
+  if [ "$count" -ge 3 ]; then
+    recovery_log WARN AUTOHEAL_PORT_STUCK "Desktop process stayed up without a listening port for three recovery ticks; restarting it."
+    /bin/rm -f "$PORT_FAIL_FILE"
+    restart_zmb >/dev/null 2>&1 || recovery_log ERROR AUTOHEAL_RESTART_FAILED "Automatic desktop restart failed."
   fi
 }
 
@@ -627,6 +951,110 @@ daemon_tick() {
   autoheal || true
 }
 
+recover_desktop_cmd() {
+  require_root
+  repair_launch_agent >/dev/null
+  start_zmb >/dev/null
+  printf 'ok=recovered\n'
+}
+
+set_wake_network_cmd() {
+  require_root
+  local mode="${1:-}"
+  case "$mode" in
+    on) /usr/bin/pmset -a womp 1 || fail "could not enable Wake for network access" 74 ;;
+    off) /usr/bin/pmset -a womp 0 || fail "could not disable Wake for network access" 74 ;;
+    *) fail "usage: zmb-admin set-wake-network on|off" 64 ;;
+  esac
+  printf 'ok=wake-network-set\nwake_on_network_setting=%s\n' "$(wake_on_network_setting)"
+}
+
+run_user_tool() {
+  require_root
+  local user uid home
+  user="$(target_user || true)"; [ -n "$user" ] || fail "target user is not configured" 69
+  uid="$(user_uid "$user" || true)"; [ -n "$uid" ] || fail "cannot resolve target user uid" 69
+  home="$(user_home "$user" || true)"; [ -n "$home" ] || fail "cannot resolve target user home" 69
+  user_session_available "$uid" || fail "target user's GUI session is not logged in" 69
+  /bin/launchctl asuser "$uid" /usr/bin/sudo -u "$user" /usr/bin/env HOME="$home" USER="$user" LOGNAME="$user" "$@"
+}
+
+xcode_overview_cmd() {
+  require_root
+  local developer version_out xcode_version xcode_build sim_json sim_rc
+  developer="$(/usr/bin/xcode-select -p 2>/dev/null || true)"
+  [ -n "$developer" ] || developer=unavailable
+  version_out="$(run_user_tool /usr/bin/xcodebuild -version 2>/dev/null || true)"
+  xcode_version="$(printf '%s\n' "$version_out" | /usr/bin/sed -n '1p')"
+  xcode_build="$(printf '%s\n' "$version_out" | /usr/bin/sed -n '2p')"
+  [ -n "$xcode_version" ] || xcode_version=unavailable
+  [ -n "$xcode_build" ] || xcode_build=unavailable
+  sim_json="$(run_user_tool /usr/bin/xcrun simctl list --json 2>&1)"; sim_rc=$?
+  printf 'protocol=1\n'
+  printf 'developer_dir=%s\n' "$developer"
+  printf 'xcode_version=%s\n' "$xcode_version"
+  printf 'xcode_build=%s\n' "$xcode_build"
+  if [ "$developer" != "unavailable" ] && [ -d "$developer/Applications/Simulator.app" ]; then
+    printf 'simulator_app=1\n'
+  else
+    printf 'simulator_app=0\n'
+  fi
+  printf 'simctl_ok=%s\n' "$([ "$sim_rc" -eq 0 ] && echo 1 || echo 0)"
+  if [ "$sim_rc" -ne 0 ]; then
+    printf 'simctl_error=%s\n' "$(printf '%s' "$sim_json" | /usr/bin/tr '\n' ' ' | /usr/bin/cut -c1-500)"
+    sim_json='{}'
+  fi
+  printf '%s\n' '---SIMCTL-JSON---'
+  printf '%s\n' "$sim_json"
+  return 0
+}
+
+validate_sim_udid() {
+  printf '%s' "$1" | /usr/bin/grep -Eq '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$' || fail "invalid simulator UDID" 64
+}
+
+sim_boot_cmd() {
+  require_root
+  local id="$1" out rc
+  validate_sim_udid "$id"
+  out="$(run_user_tool /usr/bin/xcrun simctl boot "$id" 2>&1)"; rc=$?
+  if [ "$rc" -ne 0 ] && ! printf '%s' "$out" | /usr/bin/grep -qi 'current state: Booted'; then
+    printf '%s\n' "$out" >&2; return "$rc"
+  fi
+  printf 'ok=simulator-booted\nudid=%s\n' "$id"
+}
+
+sim_shutdown_cmd() {
+  require_root
+  local id="$1" out rc
+  validate_sim_udid "$id"
+  out="$(run_user_tool /usr/bin/xcrun simctl shutdown "$id" 2>&1)"; rc=$?
+  if [ "$rc" -ne 0 ] && ! printf '%s' "$out" | /usr/bin/grep -qi 'current state: Shutdown'; then
+    printf '%s\n' "$out" >&2; return "$rc"
+  fi
+  printf 'ok=simulator-shutdown\nudid=%s\n' "$id"
+}
+
+xcode_open_cmd() {
+  require_root
+  local user uid
+  user="$(target_user || true)"; [ -n "$user" ] || fail "target user is not configured" 69
+  uid="$(user_uid "$user" || true)"; [ -n "$uid" ] || fail "cannot resolve target user uid" 69
+  user_session_available "$uid" || fail "target user's GUI session is not logged in" 69
+  /bin/launchctl asuser "$uid" /usr/bin/sudo -u "$user" /usr/bin/open -a Xcode
+  printf 'ok=xcode-opened\n'
+}
+
+sim_open_cmd() {
+  require_root
+  local user uid
+  user="$(target_user || true)"; [ -n "$user" ] || fail "target user is not configured" 69
+  uid="$(user_uid "$user" || true)"; [ -n "$uid" ] || fail "cannot resolve target user uid" 69
+  user_session_available "$uid" || fail "target user's GUI session is not logged in" 69
+  /bin/launchctl asuser "$uid" /usr/bin/sudo -u "$user" /usr/bin/open -a Simulator
+  printf 'ok=simulator-opened\n'
+}
+
 pairing_list() {
   require_root
   local u home f
@@ -671,6 +1099,8 @@ logs_cmd() {
   /usr/bin/tail -n 100 "$DAEMON_LOG" 2>/dev/null || true
   printf '%s\n' '--- zmb admin daemon stderr ---'
   /usr/bin/tail -n 100 "$DAEMON_ERR" 2>/dev/null || true
+  printf '%s\n' '--- zmb recovery events ---'
+  /usr/bin/tail -n 160 "$RECOVERY_LOG" 2>/dev/null || true
 }
 
 case "${1:-}" in
@@ -678,6 +1108,7 @@ case "${1:-}" in
   start-zmb) start_zmb ;;
   stop-zmb) stop_zmb ;;
   restart-zmb) restart_zmb ;;
+  recover-desktop) recover_desktop_cmd ;;
   repair-launch-agent) repair_launch_agent ;;
   daemon-tick) daemon_tick ;;
   autoheal) autoheal ;;
@@ -685,9 +1116,17 @@ case "${1:-}" in
   pairing-list) pairing_list ;;
   unpair) [ "$#" -eq 2 ] || fail "usage: zmb-admin unpair DEVICE_ID" 64; unpair_device "$2" ;;
   logs) logs_cmd ;;
+  diagnose) diagnose_cmd ;;
+  recover-all) recover_all_cmd ;;
   check-update) check_update_cmd ;;
   update-now) update_now_cmd ;;
   set-auto-update) [ "$#" -eq 2 ] || fail "usage: zmb-admin set-auto-update off|notify|install" 64; set_auto_update_cmd "$2" ;;
+  set-wake-network) [ "$#" -eq 2 ] || fail "usage: zmb-admin set-wake-network on|off" 64; set_wake_network_cmd "$2" ;;
+  xcode-overview) xcode_overview_cmd ;;
+  xcode-open) xcode_open_cmd ;;
+  sim-open) sim_open_cmd ;;
+  sim-boot) [ "$#" -eq 2 ] || fail "usage: zmb-admin sim-boot UDID" 64; sim_boot_cmd "$2" ;;
+  sim-shutdown) [ "$#" -eq 2 ] || fail "usage: zmb-admin sim-shutdown UDID" 64; sim_shutdown_cmd "$2" ;;
   sleep) require_root; /usr/bin/pmset sleepnow ;;
   reboot)
     require_root
@@ -713,14 +1152,23 @@ Usage: zmb-admin COMMAND
   start-zmb
   stop-zmb
   restart-zmb
+  recover-desktop
   repair-launch-agent
   auto-update-run
   pairing-list
   unpair DEVICE_ID
   logs
+  diagnose
+  recover-all
   check-update
   update-now
   set-auto-update off|notify|install
+  set-wake-network on|off
+  xcode-overview
+  xcode-open
+  sim-open
+  sim-boot UDID
+  sim-shutdown UDID
   sleep
   reboot
   shutdown

@@ -155,6 +155,54 @@ The system layer does not bypass macOS login, FileVault, Screen Recording, or Ac
 
 macOS may refuse `systemsetup -setremotelogin on` unless the invoking process has Full Disk Access. ZorinMacBridge therefore treats this as a one-time local action rather than a failed P0 installation. If setup reports `REMOTE_LOGIN=manual_required`, open **System Settings → General → Sharing → Remote Login** and turn it on. The P0 helpers, pairing files, recovery service, and update service are already installed; rerunning P0 is optional.
 
+
+## Xcode and Simulator control (v0.9.0)
+
+After P0 pairing, the Zorin client includes an **Xcode** tab. It reads the active Xcode developer directory and Xcode version, lists available Simulator devices, can boot/shut down a selected Simulator, and can open Xcode or Simulator in the logged-in macOS GUI session. These commands use Apple's `xcodebuild`/`xcrun simctl` toolchain and the same restricted SSH administration key; the key still cannot execute an arbitrary shell command.
+
+The **System** tab also exposes a P1 machine state (`DESKTOP READY`, `SYSTEM ONLINE`, `RECOVERY NEEDED`, or `DEGRADED`), power/battery information, **Recover desktop**, and the macOS Wake-for-network-access setting. Network wake is configuration only: whether a sleeping MacBook can actually be awakened depends on its hardware, power state, and network.
+
+For real-Mac validation before tagging the release, follow [`P1_P2_ACCEPTANCE.md`](P1_P2_ACCEPTANCE.md).
+
+
+## Terminal and Project Actions (v0.10.0)
+
+P3 adds two normal pages to the Zorin client: **Terminal** and **Projects**. They use a separate pinned Ed25519 key for the paired macOS user; they do not reuse or weaken the restricted P0 admin key. Re-open **System → Pair / Configure** once after upgrading and keep **Enable Terminal / Project Actions** checked to install that user-level key. The macOS account password is used only for that one pairing login and is not saved.
+
+The **Terminal** page uses GTK4 VTE for a real PTY-backed SSH session. The **Projects** page stores local per-Mac project metadata and can stream/cancel Git/Xcode actions: Git status, fast-forward-only pull, Xcode inspection/open, build, test, and clean. Long actions run outside the GTK thread so the client remains responsive. Project profiles contain no credentials.
+
+Because projects are bound to the persistent `server_id`, a DHCP address change only updates the transport address; it does not create a new project identity.
+
+See [`P3_ACCEPTANCE.md`](P3_ACCEPTANCE.md) before publishing the first 0.10.0 release.
+
+## Project Sync (v0.11.0)
+
+P4 extends each saved **Projects** profile with an absolute **Local Zorin project directory**, the existing remote macOS project directory, and optional extra exclude patterns. **Preview sync** performs dry-run comparisons in both directions and classifies changes as outgoing, protected Mac-side changes, or remote-only files. **Sync Zorin → Mac** is deliberately one-way: it never uses `--delete`, uses rsync `--update`, and exact-excludes every path identified as a protected conflict before the real transfer starts.
+
+The default excludes are `.git/`, `DerivedData/`, `.build/`, `build/`, `xcuserdata/`, `*.xcuserstate`, and `.DS_Store`. Project-specific excludes such as `node_modules/` can be added to the saved profile. Project Sync reuses the pinned P3 normal-user SSH transport and therefore receives no P0/root privileges. The GTK UI remains responsive and a running transfer can be cancelled.
+
+The first P4 release intentionally does **not** implement blind bidirectional sync or remote deletion. A newer/different Mac-side file is treated as something to protect, not something to overwrite automatically.
+
+See [`P4_ACCEPTANCE.md`](P4_ACCEPTANCE.md) before publishing the first 0.11.0 release.
+
+## Remote desktop performance (v0.12.0)
+
+P5 adds an **Adaptive** video mode intended for running Xcode and Simulator on the Mac without wasting CPU/GPU/network bandwidth on pixels the Zorin window cannot present. Adaptive starts from the current desktop viewport, monitors client latest-frame drops in five-second windows, drops to a cheaper tier quickly when the client falls behind, and only raises quality after sustained stability. Manual Low/Balanced/High/Ultra profiles remain available.
+
+Changing video quality no longer tears down the authenticated desktop/control session. Only the dedicated H.264 connection is replaced, so keyboard/mouse state, file browsing, Terminal, Projects, and P0 remain independent. The GTK client shows the effective profile, stream FPS, receive Mbit/s, local dropped-frame percentage, and render-queue delay.
+
+Both ends are deliberately latency-biased: the Linux frame queue stores only the newest frame; GTK avoids texture work while unmapped; the native ScreenCaptureKit queue depth is two; VideoToolbox is configured for real-time one-frame delay; and the Swift pipe writer never accumulates more than one pending encoded access unit. If the consumer slows down, stale video is discarded instead of being delivered late.
+
+See [`P5_ACCEPTANCE.md`](P5_ACCEPTANCE.md) before publishing the first 0.12.0 release.
+
+## Layered recovery (v0.13.0)
+
+P6 turns recovery into an explicit diagnostic workflow. **System → Run diagnostics** reports which layer failed (P0 daemon/heartbeat, system Bonjour, SSH transport, application/signature/verified backup, desktop LaunchAgent/process/port, updater lock or update scheduler) and marks each issue as automatic or manual. The Zorin client also classifies failures that happen before the Mac helper can answer, including a pinned SSH host-key change, connection refusal, network unreachable and timeout. A changed host key is never accepted automatically.
+
+**Recover all safe layers** is deliberately bounded: it can reload valid launchd jobs, regenerate the user LaunchAgent, clear only a stale updater lock, restore only a verified update backup, and restart/verify the desktop service. It does not alter FileVault or user accounts, does not force-enable SSH, and refuses to launch an unverified application when no verified backup exists. Autoheal records a bounded recovery event log and waits for three consecutive desktop-port failures before restarting a still-running process.
+
+See [`P6_ACCEPTANCE.md`](P6_ACCEPTANCE.md) before publishing the first 0.13.0 release.
+
 ## Stable macOS permissions
 
 macOS controls Screen Recording and mouse/keyboard control through its privacy/TCC system. ZorinMacBridge cannot silently grant itself those permissions. In v0.5.2+, the server window has explicit **Request Screen Recording Access** and **Request Mouse/Keyboard Access** buttons. Those APIs are invoked only by a local click on the Mac; a remote connection never triggers a privacy prompt.
@@ -200,9 +248,9 @@ The client starts in **view-only mode**. Enable **Capture keyboard & mouse** whe
 
 ### Video quality and reconnect
 
-Use **Video quality** in the connection card to choose Low, Balanced, High, or Ultra. The selected profile applies to the next video connection/reconnection.
+Use **Video quality** in the connection card to choose Adaptive, Low, Balanced, High, or Ultra. **Adaptive** is the default and can move between Eco/Efficient/Balanced/Sharp internal tiers according to viewport size and observed client frame drops. A manual quality change is applied by reconnecting only the H.264 channel; the control session stays up.
 
-**Auto reconnect** is enabled by default. If the control session ends unexpectedly, the client retries with bounded backoff. Choosing **Disconnect** manually cancels pending reconnect attempts.
+The connection card also shows live P5 video telemetry. **Auto reconnect** is enabled by default for the control session; if that control session ends unexpectedly, the client retries with bounded backoff. Choosing **Disconnect** manually cancels pending reconnect attempts.
 
 ### Keyboard mapping
 
@@ -284,6 +332,15 @@ On Linux, the regular in-app update path continues to use the verified `.deb` an
 
 You can also re-run the one-command installers.
 
+
+
+## Xcode and Simulator control (v0.9.0)
+
+After P0 pairing, the Zorin client includes an **Xcode** tab. It reads the active Xcode developer directory and Xcode version, lists available Simulator devices, can boot/shut down a selected Simulator, and can open Xcode or Simulator in the logged-in macOS GUI session. These commands use Apple's `xcodebuild`/`xcrun simctl` toolchain and the same restricted SSH administration key; the key still cannot execute an arbitrary shell command.
+
+The **System** tab also exposes a P1 machine state (`DESKTOP READY`, `SYSTEM ONLINE`, `RECOVERY NEEDED`, or `DEGRADED`), power/battery information, **Recover desktop**, and the macOS Wake-for-network-access setting. Network wake is configuration only: whether a sleeping MacBook can actually be awakened depends on its hardware, power state, and network.
+
+For real-Mac validation before tagging the release, follow [`P1_P2_ACCEPTANCE.md`](P1_P2_ACCEPTANCE.md).
 
 ## Stable macOS permissions across updates
 

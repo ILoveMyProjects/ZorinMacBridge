@@ -96,12 +96,12 @@ if [ "$APP_ONLY" -eq 0 ]; then
   fi
   if [ -z "$APP_VERSION" ]; then
     echo "The installed release does not expose its ZorinMacBridge VERSION; unattended setup was not started." >&2
-    echo "Publish/install ZorinMacBridge v0.8.2 or newer, then rerun this installer." >&2
+    echo "Publish/install ZorinMacBridge v0.13.0 or newer, then rerun this installer." >&2
     exit 65
   fi
-  if ! /usr/bin/awk -v v="$APP_VERSION" 'BEGIN { split(v,a,"."); major=a[1]+0; minor=a[2]+0; patch=a[3]+0; if (major>0 || (major==0 && (minor>8 || (minor==8 && patch>=2)))) exit 0; exit 1 }'; then
-    echo "Installed release is ZorinMacBridge $APP_VERSION. Terminal SSH/P0 setup requires v0.8.2 or newer." >&2
-    echo "Create/publish the v0.8.2 release first, then run this installer again." >&2
+  if ! /usr/bin/awk -v v="$APP_VERSION" 'BEGIN { split(v,a,"."); major=a[1]+0; minor=a[2]+0; patch=a[3]+0; if (major>0 || (major==0 && (minor>13 || (minor==13 && patch>=0)))) exit 0; exit 1 }'; then
+    echo "Installed release is ZorinMacBridge $APP_VERSION. Terminal SSH/P0 setup requires v0.13.0 or newer." >&2
+    echo "Create/publish the v0.13.0 release first, then run this installer again." >&2
     exit 65
   fi
   echo "Configuring unattended access, macOS Remote Login (SSH), and the ZorinMacBridge session password…"

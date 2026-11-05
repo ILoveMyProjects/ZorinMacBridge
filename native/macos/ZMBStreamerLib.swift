@@ -13,13 +13,16 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     private let output: FileHandle
     private let logOutput: FileHandle
     private let sampleQueue = DispatchQueue(label: "com.ilovemyprojects.zorinmacbridge.capture", qos: .userInteractive)
-    private let writeQueue = DispatchQueue(label: "com.ilovemyprojects.zorinmacbridge.streamwrite", qos: .userInteractive)
+    private let writeQueue = DispatchQueue(label: "com.ilovemyprojects.zorinmacbridge.streamwrite", qos: .userInitiated)
     private let done = DispatchSemaphore(value: 0)
     private let stateLock = NSLock()
+    private let writerLock = NSLock()
     private var stream: SCStream?
     private var compression: VTCompressionSession?
     private var finished = false
     private var resultCode: Int32 = 0
+    private var writePending = false
+    private var writerDropped: UInt64 = 0
 
     init(fps: Int32, maxWidth: Int, bitrate: Int, outputFD: Int32, logFD: Int32) {
         self.fps = max(1, min(fps, 60))
@@ -102,7 +105,7 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         config.width = width
         config.height = height
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
-        config.queueDepth = 3
+        config.queueDepth = 2
         config.showsCursor = true
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         config.capturesAudio = false
@@ -152,8 +155,12 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Main_AutoLevel)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: fps))
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: bitrate))
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: 1))
+        let dataRateLimits = [NSNumber(value: max(1, bitrate / 8)), NSNumber(value: 1)] as CFArray
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: dataRateLimits)
         let keyInterval = max(1, fps * 2)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: keyInterval))
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: NSNumber(value: 2.0))
         let prep = VTCompressionSessionPrepareToEncodeFrames(session)
         guard prep == noErr else {
             VTCompressionSessionInvalidate(session)
@@ -277,8 +284,30 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         guard !annexB.isEmpty, annexB.count <= 16 * 1024 * 1024 else { return }
+
+        // Never accumulate an unbounded queue of old frames behind a slow pipe.
+        // Remote desktop latency matters more than preserving every frame: when
+        // one encoded access unit is already waiting/writing, drop the new one.
+        writerLock.lock()
+        if writePending {
+            writerDropped &+= 1
+            let dropped = writerDropped
+            writerLock.unlock()
+            if dropped == 1 || dropped % 120 == 0 {
+                log("writer-drop count=\(dropped)")
+            }
+            return
+        }
+        writePending = true
+        writerLock.unlock()
+
         writeQueue.async { [weak self] in
             guard let self else { return }
+            defer {
+                self.writerLock.lock()
+                self.writePending = false
+                self.writerLock.unlock()
+            }
             self.stateLock.lock()
             let isFinished = self.finished
             self.stateLock.unlock()

@@ -14,6 +14,7 @@ AUTH_OK = 2
 AUTH_FAIL = 3
 FRAME = 10  # legacy JPEG frame (pre-0.4 compatibility only)
 VIDEO_H264 = 11
+VIDEO_STATS = 12  # lightweight server-side stream telemetry
 MOUSE_MOVE = 20
 MOUSE_BUTTON = 21
 SCROLL = 22

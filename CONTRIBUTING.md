@@ -12,6 +12,9 @@ python3 -m venv .venv
 python -m pip install -r requirements.txt
 python test_protocol.py
 python test_support.py
+python test_p0_admin.py
+python test_xcode.py
+python test_p3.py
 ```
 
 Before opening a pull request:
@@ -20,6 +23,9 @@ Before opening a pull request:
 python -m compileall -q .
 python test_protocol.py
 python test_support.py
+python test_p0_admin.py
+python test_xcode.py
+python test_p3.py
 ```
 
 ## Project principles

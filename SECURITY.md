@@ -44,6 +44,16 @@ First pairing still requires verifying the Mac SSH host fingerprint. The macOS a
 
 P0 does not modify the TCC database, grant Screen Recording/Accessibility, bypass the login window, or defeat FileVault. The desktop streamer remains a user-session process. Removing P0 deletes ZorinMacBridge-Admin pairing keys but intentionally leaves macOS Remote Login unchanged because the user may rely on ordinary SSH separately.
 
+## P3 Terminal and Project Actions
+
+P3 deliberately does **not** turn the P0 restricted administration key into a shell key. During pairing the user may opt in to a second Ed25519 identity for normal-user SSH. Its `authorized_keys` entry disables agent, port and X11 forwarding and user rc processing, but allows a PTY because the Terminal tab is interactive. The key receives no ZorinMacBridge sudoers entry.
+
+Project profiles contain paths, scheme/configuration and destination metadata only; they contain no passwords or tokens. Project commands are built from validated fields with shell quoting. `git pull` uses `--ff-only` and `GIT_TERMINAL_PROMPT=0` so unattended actions fail rather than block waiting for credentials. Revoking a Zorin device removes the user-shell key before the restricted admin key and deletes local pairing private keys.
+
+## P5 desktop-streaming resource bounds
+
+P5 does not add a new privileged or network service. Video remains a separate authenticated TLS role on the existing LAN-only server. Adaptive quality changes replace only that video connection. The client keeps a single newest decoded frame, and the native Mac writer keeps at most one pending encoded access unit, so a slow consumer cannot create an unbounded video backlog in either application. Server/client sockets use TCP_NODELAY as a latency optimization; TLS pinning and password authentication are unchanged.
+
 ## Updates
 
 The interactive updater remains available, but P0 also supports `Off`, `Notify only`, and `Install automatically`. The automatic checker is a separate root LaunchDaemon with a six-hour interval and no network listener of its own. For unattended installation, the root helper launches the installed ZorinMacBridge application in a tightly scoped update mode with a root-owned staging directory and the root-owned stable local-identity token. The updater selects the official GitHub release, downloads assets over verified TLS, verifies SHA-256, verifies the transport code signature, bundle identifier and release version, and applies that Mac's persistent local designated requirement before replacement. No verified/staged app is handed through a user-writable directory.

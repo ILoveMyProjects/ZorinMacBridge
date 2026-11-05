@@ -31,7 +31,8 @@ jobs:
             python3 python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
             python3-pil python3-pil.imagetk python3-av python3-certifi \
             python3-keyring python3-secretstorage python3-zeroconf python3-pystray \
-            python3-tk wl-clipboard xclip xvfb pkexec openssh-client
+            python3-tk wl-clipboard xclip xvfb pkexec openssh-client \
+            gir1.2-vte-3.91 libvte-2.91-gtk4-0 rsync
       - name: Run Linux tests
         run: |
           /usr/bin/python3 -m compileall -q .
@@ -41,7 +42,12 @@ jobs:
           /usr/bin/python3 test_native_ui.py
           /usr/bin/python3 test_local_signing.py
           /usr/bin/python3 test_p0_admin.py
-          /usr/bin/python3 -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); from gi.repository import Gtk, Adw; import av; av.CodecContext.create('h264','r'); import keyring; print('GTK4/libadwaita + H.264 runtime OK')"
+          /usr/bin/python3 test_xcode.py
+          /usr/bin/python3 test_p3.py
+          /usr/bin/python3 test_p4.py
+          /usr/bin/python3 test_p5.py
+          /usr/bin/python3 test_p6.py
+          /usr/bin/python3 -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); gi.require_version('Vte','3.91'); from gi.repository import Gtk, Adw, Vte; import av; av.CodecContext.create('h264','r'); import keyring; print('GTK4/libadwaita/VTE + H.264 runtime OK')"
           bash -n install-linux.sh
           bash -n native/macos/admin/install-admin.sh
           bash -n native/macos/admin/uninstall-admin.sh
@@ -64,7 +70,7 @@ jobs:
           chmod 0755 "$PKG/DEBIAN"
           chmod g-s "$PKG/DEBIAN"  # clear inherited setgid on unusual build filesystems
           install -m 0644 linux_client_gtk.py linux_client.py protocol.py discovery.py resources.py \
-            tray_icon.py updates.py settings.py secret_store.py zmb_admin_backend.py zmb_system_page.py "$APP/"
+            tray_icon.py updates.py settings.py secret_store.py zmb_admin_backend.py zmb_system_page.py zmb_xcode_page.py zmb_xcode_data.py zmb_shell_backend.py zmb_terminal_page.py zmb_project_data.py zmb_projects_page.py zmb_sync_backend.py zmb_video_policy.py zmb_recovery.py "$APP/"
           install -m 0644 VERSION "$APP/VERSION"
           install -m 0644 assets/client.png "$APP/assets/client.png"
 
@@ -88,10 +94,11 @@ jobs:
           Priority: optional
           Architecture: amd64
           Maintainer: ILoveMyProjects
-          Depends: python3 (>= 3.12), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, libadwaita-1-0, python3-pil, python3-pil.imagetk, python3-av, python3-certifi, python3-keyring, python3-secretstorage, python3-zeroconf, python3-pystray, python3-tk, wl-clipboard, xclip, pkexec, openssh-client
+          Depends: python3 (>= 3.12), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, libadwaita-1-0, gir1.2-vte-3.91, libvte-2.91-gtk4-0, python3-pil, python3-pil.imagetk, python3-av, python3-certifi, python3-keyring, python3-secretstorage, python3-zeroconf, python3-pystray, python3-tk, wl-clipboard, xclip, pkexec, openssh-client, rsync
           Description: Native GTK4/libadwaita LAN client for ZorinMacBridge
            Remote macOS desktop, keyboard/mouse, clipboard, shared-folder transfer,
-           and paired unattended recovery with a Zorin/GNOME-native interface.
+           unattended recovery, layered P6 diagnostics, Xcode controls, user SSH terminal, project actions, safe project sync, and adaptive low-latency H.264 streaming
+           with a Zorin/GNOME-native interface.
           CTRL
 
           mkdir -p release
@@ -105,6 +112,15 @@ jobs:
           dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/share/applications/zorinmacbridge.desktop'
           dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_admin_backend.py'
           dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_system_page.py'
+          dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_xcode_page.py'
+          dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_xcode_data.py'
+          dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_shell_backend.py'
+          dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_terminal_page.py'
+          dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_project_data.py'
+          dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_projects_page.py'
+          dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_sync_backend.py'
+          dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_video_policy.py'
+          dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_recovery.py'
       - uses: actions/upload-artifact@v4
         with:
           name: linux-amd64
@@ -120,6 +136,11 @@ jobs:
           set -euo pipefail
           bash -n scripts/sign-macos-transport.sh
           scripts/sign-macos-transport.sh --self-test
+      - name: Verify macOS Project Sync dependency
+        run: |
+          set -euo pipefail
+          test -x /usr/bin/rsync
+          /usr/bin/rsync --version | head -n 1
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

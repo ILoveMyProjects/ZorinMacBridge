@@ -19,10 +19,14 @@ REMOTE_PREFIX = "zmb-admin"
 PROTOCOL_VERSION = "2"
 
 ADMIN_ACTIONS = {
-    "status", "start-zmb", "stop-zmb", "restart-zmb", "repair-launch-agent",
-    "pairing-list", "logs", "check-update", "update-now", "sleep", "reboot", "shutdown",
+    "status", "start-zmb", "stop-zmb", "restart-zmb", "recover-desktop", "repair-launch-agent",
+    "pairing-list", "logs", "diagnose", "recover-all", "check-update", "update-now", "sleep", "reboot", "shutdown",
+    "xcode-overview", "xcode-open", "sim-open",
 }
 AUTO_UPDATE_MODES = {"off", "notify", "install"}
+WAKE_NETWORK_MODES = {"on", "off"}
+SIMULATOR_ACTIONS = {"sim-boot", "sim-shutdown"}
+SIMULATOR_UDID_RE = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
 
 
 class AdminError(RuntimeError):
@@ -146,6 +150,9 @@ def forget_profile(server_id: str, host: str) -> None:
     data = _load_profiles()
     data.pop(pid, None)
     _save_profiles(data)
+    # Revocation should not leave reusable private keys on disk. The directory is
+    # entirely ZorinMacBridge-owned user state and contains no remote data.
+    shutil.rmtree(profile_dir(pid), ignore_errors=True)
 
 
 def update_profile_host(server_id: str, old_host: str, new_host: str) -> dict | None:
@@ -356,6 +363,12 @@ def pair_device(*, server_id: str, server_name: str, host: str, user: str, passw
         "device_id": device_id,
         "host_key_alias": host_key_alias,
     }
+    # Preserve P3 user-shell state across an admin re-pair long enough for the
+    # pairing UI to either refresh that key or revoke it explicitly.
+    if old.get("shell_enabled"):
+        candidate["shell_enabled"] = True
+    if old.get("shell_key"):
+        candidate["shell_key"] = str(old.get("shell_key"))
 
     # Verify the restricted key and P0 helper before committing a paired profile.
     # The device id is deterministic for this profile, so a retry does not append
@@ -371,6 +384,10 @@ def _remote_command(action: str, arg: str | None = None) -> str:
         return f"{REMOTE_PREFIX} {action}"
     if action == "set-auto-update" and arg in AUTO_UPDATE_MODES:
         return f"{REMOTE_PREFIX} set-auto-update {arg}"
+    if action == "set-wake-network" and arg in WAKE_NETWORK_MODES:
+        return f"{REMOTE_PREFIX} set-wake-network {arg}"
+    if action in SIMULATOR_ACTIONS and arg and SIMULATOR_UDID_RE.fullmatch(arg):
+        return f"{REMOTE_PREFIX} {action} {arg}"
     if action == "unpair" and arg and re.fullmatch(r"[A-Za-z0-9._-]+", arg):
         return f"{REMOTE_PREFIX} unpair {arg}"
     raise AdminError(f"Unsupported admin action: {action}")
@@ -446,8 +463,26 @@ def get_status(*, server_id: str, host: str) -> dict[str, str]:
     return get_status_for_profile(profile)
 
 
-def status_summary(data: dict[str, str]) -> str:
+def machine_state(data: dict[str, str]) -> str:
+    """Return a stable P1 state code for the selected Mac."""
     if data.get("admin_daemon_loaded") != "1":
+        return "DEGRADED"
+    try:
+        age = int(data.get("admin_heartbeat_age_seconds", "-1"))
+    except ValueError:
+        age = -1
+    if age < 0 or age > 60:
+        return "DEGRADED"
+    if data.get("user_session_available") != "1":
+        return "SYSTEM_ONLINE"
+    if data.get("zmb_app_running") == "1" and data.get("zmb_port_listening") == "1":
+        return "DESKTOP_READY"
+    return "RECOVERY_NEEDED"
+
+
+def status_summary(data: dict[str, str]) -> str:
+    state = machine_state(data)
+    if state == "DEGRADED" and data.get("admin_daemon_loaded") != "1":
         return "DEGRADED — system service is not loaded"
     try:
         age = int(data.get("admin_heartbeat_age_seconds", "-1"))

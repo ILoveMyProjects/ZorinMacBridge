@@ -9,14 +9,32 @@ case "$orig" in
   "zmb-admin start-zmb") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin start-zmb ;;
   "zmb-admin stop-zmb") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin stop-zmb ;;
   "zmb-admin restart-zmb") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin restart-zmb ;;
+  "zmb-admin recover-desktop") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin recover-desktop ;;
   "zmb-admin repair-launch-agent") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin repair-launch-agent ;;
   "zmb-admin pairing-list") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin pairing-list ;;
   "zmb-admin logs") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin logs ;;
+  "zmb-admin diagnose") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin diagnose ;;
+  "zmb-admin recover-all") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin recover-all ;;
   "zmb-admin check-update") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin check-update ;;
   "zmb-admin update-now") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin update-now ;;
   "zmb-admin set-auto-update off") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin set-auto-update off ;;
   "zmb-admin set-auto-update notify") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin set-auto-update notify ;;
   "zmb-admin set-auto-update install") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin set-auto-update install ;;
+  "zmb-admin set-wake-network on") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin set-wake-network on ;;
+  "zmb-admin set-wake-network off") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin set-wake-network off ;;
+  "zmb-admin xcode-overview") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin xcode-overview ;;
+  "zmb-admin xcode-open") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin xcode-open ;;
+  "zmb-admin sim-open") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin sim-open ;;
+  zmb-admin\ sim-boot\ *)
+    id="${orig#zmb-admin sim-boot }"
+    printf '%s' "$id" | /usr/bin/grep -Eq '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$' || { echo "ZorinMacBridge admin command denied" >&2; exit 126; }
+    exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin sim-boot "$id"
+    ;;
+  zmb-admin\ sim-shutdown\ *)
+    id="${orig#zmb-admin sim-shutdown }"
+    printf '%s' "$id" | /usr/bin/grep -Eq '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$' || { echo "ZorinMacBridge admin command denied" >&2; exit 126; }
+    exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin sim-shutdown "$id"
+    ;;
   "zmb-admin sleep") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin sleep ;;
   "zmb-admin reboot") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin reboot ;;
   "zmb-admin shutdown") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin shutdown ;;

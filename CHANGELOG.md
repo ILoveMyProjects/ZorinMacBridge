@@ -1,3 +1,53 @@
+## v0.13.0
+
+- P6: added layered read-only recovery diagnostics with explicit issue codes, severity, and auto/manual repair classification instead of a generic connection failure.
+- Added **Recover all safe layers** to repair P0/update LaunchDaemon registration, regenerate/re-register the user LaunchAgent, clear stale updater locks, restore only a code-signature-verified update backup, and restart the desktop service with bounded verification.
+- P0 autoheal now records bounded recovery events and only restarts a desktop process whose port remains unavailable for three consecutive recovery ticks, preventing restart loops on transient stalls.
+- The system Bonjour advertiser now publishes its supervised PID so diagnostics can detect/recover a dead `_zorinmacbridge-admin._tcp` child.
+- Zorin now classifies recovery-transport failures (host-key change, SSH refused/auth failure, network unreachable, timeout) even when Mac-side diagnostics cannot run. Host-key changes are never auto-accepted.
+- Added update-daemon/plist, LaunchAgent-plist, partial-update/backup, stale-heartbeat, application-signature, desktop-process/port and Remote Login diagnostic guards.
+- P6 keeps the P0 command surface closed: no arbitrary root shell or generic command execution was added.
+- Added P6 parser/source regression tests and a real-Mac recovery acceptance checklist; version advanced to 0.13.0.
+
+## v0.12.0
+
+- P5: added an **Adaptive** remote-desktop profile that selects an initial tier from the visible viewport, downgrades quickly on client frame drops, and upgrades only after sustained stability.
+- Video quality changes now reconnect only the dedicated H.264 channel; the authenticated control/file session remains connected.
+- Client video buffering is latest-frame-only (`maxsize=1`) and GTK reports live stream telemetry (effective profile, FPS, receive rate, local drop percentage, and render-queue delay).
+- GTK4 uses `Gdk.MemoryTexture` when available to avoid the Pixbuf conversion path, while retaining a compatibility fallback. Minimized/unmapped windows stop constructing textures.
+- Added TCP_NODELAY to client/server sockets for lower interactive latency and lightweight server video telemetry packets.
+- ScreenCaptureKit queue depth is reduced and VideoToolbox is configured for one-frame maximum delay plus explicit data-rate limits and two-second keyframe duration.
+- The native Swift writer now permits at most one pending encoded access unit; additional frames are dropped instead of building an unbounded pipe backlog and increasing end-to-end latency.
+- Added pure adaptive-policy tests and P5 source guards; version advanced to 0.12.0.
+
+## v0.11.0
+
+- P4: added safe one-way **Project Sync** from a configured Zorin project directory to the paired Mac project directory.
+- Projects now store both local Zorin and remote macOS paths plus optional project-specific rsync exclude patterns.
+- Added **Preview sync** with outgoing, protected remote, and remote-only classifications before any write occurs.
+- Actual sync never uses `--delete`, uses `--update`, and additionally exact-excludes every path classified as a protected Mac-side conflict so equal-mtime divergent files are not overwritten.
+- Project Sync reuses the pinned P3 user SSH identity and host key; it does not use the P0 root helper or add any sudo privilege.
+- Default excludes protect `.git`, DerivedData/build directories, Xcode user state, and `.DS_Store`; sync runs outside GTK and supports cancellation.
+- Linux packaging/source setup now includes `rsync`, `zmb_sync_backend.py`, and P4 regression tests.
+- Version advanced to 0.11.0 for the P4 feature release.
+
+## v0.10.0
+
+- P3: added an integrated **Terminal** tab backed by GTK4 VTE and a pinned, dedicated Ed25519 key for the normal macOS user. This key is separate from the restricted P0 admin key and has no ZorinMacBridge sudoers privileges.
+- P3: added a **Projects** tab with saved per-Mac project profiles and streamed `git status`, `git pull --ff-only`, Xcode inspect/open, build, test, clean, and cancellable long-running actions.
+- System pairing can now optionally install/refresh the P3 user-shell key during the existing one-time macOS password login; revocation removes both P0 and P3 keys.
+- Project actions use shell-safe argument quoting, disable interactive Git credential prompts, follow the persistent `server_id` across DHCP changes, and run outside the GTK main thread.
+- Linux packaging now includes the P3 modules and GTK4 VTE runtime (`gir1.2-vte-3.91`, `libvte-2.91-gtk4-0`).
+- Version advanced to 0.10.0 for the P3 feature release.
+
+## v0.9.0
+
+- P1 dashboard: added explicit machine-state classification, power/battery status, network-wake configuration, and a one-click **Recover desktop** action.
+- P2 developer tools: added an integrated **Xcode** tab in the Zorin client with Xcode/toolchain status, Simulator discovery, boot/shutdown controls, and remote **Open Xcode / Open Simulator** actions.
+- Xcode/Simulator operations run in the logged-in macOS user session through the existing restricted P0 command gateway; no arbitrary shell command was added.
+- Linux release packaging now ships `zmb_xcode_page.py`; macOS P0 sudoers/ForcedCommand rules explicitly allow only the new closed command set.
+- Version advanced to 0.9.0 for the next feature release after the 0.8.x P0 hardening series.
+
 ## v0.8.2
 
 - Fixed P0 setup on current macOS when `systemsetup -setremotelogin on` is denied because the installer process lacks Full Disk Access. P0 now installs successfully and reports Remote Login as a one-time manual action instead of failing the whole setup.

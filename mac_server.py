@@ -25,7 +25,7 @@ from pathlib import Path, PurePosixPath
 
 from protocol import (
     AUTH, AUTH_FAIL, AUTH_OK, CLIPBOARD_DATA, CLIPBOARD_GET, CLIPBOARD_SET,
-    DOWNLOAD_BEGIN, DOWNLOAD_CHUNK, DOWNLOAD_END, DOWNLOAD_REQ, ERROR, VIDEO_H264,
+    DOWNLOAD_BEGIN, DOWNLOAD_CHUNK, DOWNLOAD_END, DOWNLOAD_REQ, ERROR, VIDEO_H264, VIDEO_STATS,
     KEY, LIST_REQ, LIST_RESP, MKDIR_OK, MKDIR_REQ, MOUSE_BUTTON, MOUSE_MOVE,
     PacketReader, SCROLL, TEXT, UPLOAD_BEGIN, UPLOAD_CHUNK, UPLOAD_END,
     pack_json, pack_packet, recv_one_blocking, unpack_json,
@@ -573,6 +573,9 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
 
     sock.settimeout(10.0)
     frames = 0
+    stat_started = time.monotonic()
+    stat_frames = 0
+    stat_bytes = 0
     try:
         with os.fdopen(data_r, 'rb', buffering=0) as stream:
             while True:
@@ -590,8 +593,21 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
                 payload = _read_exact_file(stream, size)
                 sock.sendall(pack_packet(VIDEO_H264, payload))
                 frames += 1
+                stat_frames += 1
+                stat_bytes += len(payload)
                 if frames == 1:
                     log(f'[video] first H.264 access unit sent ({len(payload)} bytes)')
+                now = time.monotonic()
+                elapsed = now - stat_started
+                if elapsed >= 2.0:
+                    sock.sendall(pack_json(VIDEO_STATS, {
+                        'fps': round(stat_frames / max(0.001, elapsed), 1),
+                        'mbps': round(stat_bytes * 8.0 / max(0.001, elapsed) / 1_000_000.0, 2),
+                        'frames': stat_frames,
+                    }))
+                    stat_started = now
+                    stat_frames = 0
+                    stat_bytes = 0
     finally:
         try:
             native.lib.zmb_streamer_stop(handle)
@@ -795,6 +811,10 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
     try:
         log(f'[client {peer_ip}] TCP connection accepted')
         raw.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        try:
+            raw.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
         raw.settimeout(10)
         sock = context.wrap_socket(raw, server_side=True)
         log(f'[client {peer_ip}] TLS handshake completed')

@@ -56,3 +56,19 @@ print('native UI static tests: OK')
 
 assert 'ZMB session password' in client
 assert 'ZorinMacBridge session password' in server
+
+# 0.9.0 P1/P2 integration
+xcode_page = (root / 'zmb_xcode_page.py').read_text(encoding='utf-8')
+assert 'XcodeController' in client
+assert "self.stack.add_titled(self.xcode_page, 'xcode', 'Xcode')" in client
+assert 'Available iOS Simulators' in xcode_page
+assert 'sim-boot' in xcode_page and 'sim-shutdown' in xcode_page
+assert 'Recover desktop' in (root / 'zmb_system_page.py').read_text(encoding='utf-8')
+
+# 0.10.0 P3 integration
+assert 'TerminalController' in client
+assert 'ProjectsController' in client
+assert "self.stack.add_titled(self.terminal_page, 'terminal', 'Terminal')" in client
+assert "self.stack.add_titled(self.projects_page, 'projects', 'Projects')" in client
+assert 'gir1.2-vte-3.91' in release and 'libvte-2.91-gtk4-0' in release
+assert 'zmb_shell_backend.py zmb_terminal_page.py zmb_project_data.py zmb_projects_page.py' in release

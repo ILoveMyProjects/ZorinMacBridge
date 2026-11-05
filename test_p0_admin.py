@@ -42,6 +42,16 @@ def main() -> None:
     assert backend._remote_command('check-update') == 'zmb-admin check-update'
     assert backend._remote_command('update-now') == 'zmb-admin update-now'
     assert backend._remote_command('set-auto-update', 'install') == 'zmb-admin set-auto-update install'
+    assert backend._remote_command('recover-desktop') == 'zmb-admin recover-desktop'
+    assert backend._remote_command('set-wake-network', 'on') == 'zmb-admin set-wake-network on'
+    assert backend._remote_command('xcode-overview') == 'zmb-admin xcode-overview'
+    assert backend._remote_command('sim-boot', '01234567-89AB-CDEF-0123-456789ABCDEF') == 'zmb-admin sim-boot 01234567-89AB-CDEF-0123-456789ABCDEF'
+    try:
+        backend._remote_command('sim-boot', '01234567-89AB-CDEF-0123-456789ABCDEF;id')
+    except backend.AdminError:
+        pass
+    else:
+        raise AssertionError('simulator UDID injection must be rejected')
     try:
         backend._remote_command('set-auto-update', 'whatever')
     except backend.AdminError:
@@ -51,6 +61,10 @@ def main() -> None:
 
     ready = backend.parse_status('protocol=2\nadmin_daemon_loaded=1\nadmin_heartbeat_age_seconds=4\nuser_session_available=1\nzmb_app_running=1\nzmb_port_listening=1\n')
     assert backend.status_summary(ready).startswith('READY')
+    assert backend.machine_state(ready) == 'DESKTOP_READY'
+    assert backend.machine_state({**ready, 'zmb_app_running': '0'}) == 'RECOVERY_NEEDED'
+    assert backend.machine_state({**ready, 'user_session_available': '0'}) == 'SYSTEM_ONLINE'
+    assert backend.machine_state({**ready, 'admin_heartbeat_age_seconds': '99'}) == 'DEGRADED'
     blocked, notes = backend.reboot_readiness({'filevault': 'on', 'filevault_ssh_unlock_eligible': '0'})
     assert blocked is False and notes
 
@@ -102,7 +116,7 @@ def main() -> None:
     assert 'Enable / Repair' in mac_gui and 'install_unattended_access()' in mac_gui
     assert "--add-data 'native/macos/admin:native/macos/admin'" in release
     assert '--hidden-import mac_terminal_setup' in release
-    assert 'zmb_admin_backend.py zmb_system_page.py' in release
+    assert 'zmb_admin_backend.py zmb_system_page.py zmb_xcode_page.py zmb_xcode_data.py' in release
     assert 'openssh-client' in release
     assert 'systemsetup -setremotelogin on' in installer
     assert 'REMOTE_LOGIN_STATE="manual_required"' in installer
@@ -115,10 +129,14 @@ def main() -> None:
     assert 'zmb-admin check-update' in update_gateway
     assert 'zmb-admin update-now' in update_gateway
     assert 'zmb-admin set-auto-update install' in update_gateway
+    assert 'zmb-admin recover-desktop' in update_gateway
+    assert 'zmb-admin xcode-overview' in update_gateway
+    assert 'zmb-admin sim-boot' in update_gateway and 'zmb-admin sim-shutdown' in update_gateway
     assert 'prepare_macos_update_for_root' in updates_py
     assert '--p0-update-stage' in mac_gui
     assert 'Check update' in system_page and 'Update now' in system_page
     assert 'Install automatically' in system_page
+    assert 'Recover desktop' in system_page and 'set-wake-network' in system_page
     assert "'/usr/bin/nc'" in (ROOT / 'mac_admin_setup.py').read_text(encoding='utf-8')
     assert '/usr/local/libexec/zmb-admin-ssh' in installer
     assert 'macos-intel' not in release
@@ -132,6 +150,8 @@ def main() -> None:
     assert 'while [ "$attempt" -le 16 ]' in installer
     assert '/bin/sleep 0.5' in installer
     assert 'Recent launchd messages for ZorinMacBridge:' in installer
+    assert '/usr/local/sbin/zmb-admin recover-desktop' in installer
+    assert '/usr/local/sbin/zmb-admin xcode-overview' in installer
 
     discovery = (ROOT / 'discovery.py').read_text(encoding='utf-8')
     daemon = (ROOT / 'native/macos/admin/zmb-system-daemon').read_text(encoding='utf-8')
