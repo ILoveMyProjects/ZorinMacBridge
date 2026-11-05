@@ -20,6 +20,7 @@ from discovery import LanAdvertiser
 from resources import resource_path, set_tk_icon
 from mac_admin_setup import (admin_component_state, install_unattended_access,
                              ssh_host_fingerprints, uninstall_unattended_access)
+from mac_requirements import evaluate_setup_requirements, missing_setup_requirements
 from tray_icon import TrayController
 from updates import check_for_updates, current_version, install_update, updater_tls_self_test
 from settings import (PasswordVerifier, load_server_password_verifier, load_server_settings,
@@ -68,6 +69,14 @@ class ServerGUI:
         self.input_permission_var = tk.StringVar(value='Mouse/keyboard control: checking…')
         self.signing_var = tk.StringVar(value='Code signing: checking…')
         self.admin_status_var = tk.StringVar(value='Unattended access: checking…')
+        self.required_setup_var = tk.StringVar(value='Checking REQUIRED setup…')
+        self._required_setup_label: tk.Label | None = None
+        self._last_admin_state: dict[str, object] | None = None
+        self._last_screen_permission: bool | None = None
+        self._last_input_permission: bool | None = None
+        self._admin_checked = False
+        self._permissions_checked = False
+        self._required_startup_alert_shown = False
         self._admin_status_serial = 0
         self._signing_status_serial = 0
         self.stop_event: threading.Event | None = None
@@ -232,12 +241,12 @@ class ServerGUI:
             'About ZorinMacBridge',
             f'ZorinMacBridge Server {current_version()}\n\n'
             'LAN-only macOS host with H.264 screen streaming.\n'
-            'Optional unattended administration uses macOS Remote Login plus a local system helper.\n'
+            'Full unattended operation requires macOS Remote Login plus the local P0 system helper.\n'
             'No background update checker is installed.',
         )
 
     def _build(self, ips: list[str]) -> None:
-        self.root.geometry('800x820')
+        self.root.geometry('820x900')
         outer = ttk.Frame(self.root, padding=16)
         outer.pack(fill='both', expand=True)
 
@@ -285,8 +294,25 @@ class ServerGUI:
             variable=self.auto_start_var, command=self._startup_settings_changed,
         ).grid(row=11, column=0, columnspan=3, sticky='w', pady=(2, 6))
 
+        required = ttk.LabelFrame(outer, text='Required setup for full Zorin operation', padding=8)
+        required.grid(row=12, column=0, columnspan=3, sticky='ew', pady=(2, 8))
+        self._required_setup_label = tk.Label(
+            required,
+            textvariable=self.required_setup_var,
+            justify='left',
+            anchor='w',
+            fg='#c62828',
+            font=('', 10, 'bold'),
+            wraplength=690,
+        )
+        self._required_setup_label.grid(row=0, column=0, columnspan=3, sticky='ew')
+        ttk.Button(required, text='Fix next REQUIRED item', command=self.fix_next_required_item).grid(row=1, column=0, sticky='w', pady=(8, 0))
+        ttk.Button(required, text='Refresh REQUIRED setup', command=self.refresh_required_setup).grid(row=1, column=1, sticky='w', padx=(8, 0), pady=(8, 0))
+        ttk.Button(required, text='Open Remote Login Settings', command=self.open_remote_login_settings).grid(row=1, column=2, sticky='e', padx=(8, 0), pady=(8, 0))
+        required.columnconfigure(0, weight=1)
+
         perms = ttk.LabelFrame(outer, text='macOS permissions', padding=8)
-        perms.grid(row=12, column=0, columnspan=3, sticky='ew', pady=(2, 6))
+        perms.grid(row=13, column=0, columnspan=3, sticky='ew', pady=(2, 6))
         ttk.Label(perms, textvariable=self.screen_permission_var).grid(row=0, column=0, sticky='w')
         ttk.Button(perms, text='Request Screen Recording Access', command=self.request_screen_recording_access).grid(row=0, column=1, padx=(12, 0), sticky='e')
         ttk.Button(perms, text='Settings', command=self.open_screen_settings).grid(row=0, column=2, padx=(8, 0), sticky='e')
@@ -301,7 +327,7 @@ class ServerGUI:
         perms.columnconfigure(0, weight=1)
 
         admin = ttk.LabelFrame(outer, text='Unattended access / recovery', padding=8)
-        admin.grid(row=13, column=0, columnspan=3, sticky='ew', pady=(2, 6))
+        admin.grid(row=14, column=0, columnspan=3, sticky='ew', pady=(2, 6))
         ttk.Label(admin, textvariable=self.admin_status_var, wraplength=650).grid(row=0, column=0, columnspan=3, sticky='w')
         ttk.Label(
             admin,
@@ -314,7 +340,7 @@ class ServerGUI:
         admin.columnconfigure(0, weight=1)
 
         buttons = ttk.Frame(outer)
-        buttons.grid(row=14, column=0, columnspan=3, sticky='ew', pady=(8, 8))
+        buttons.grid(row=15, column=0, columnspan=3, sticky='ew', pady=(8, 8))
         self.start_btn = ttk.Button(buttons, text='Start server', command=self.start)
         self.start_btn.pack(side='left')
         self.stop_btn = ttk.Button(buttons, text='Stop server', command=self.stop, state='disabled')
@@ -324,14 +350,113 @@ class ServerGUI:
         note = ('Screen Recording is required for video. Accessibility is required for mouse/keyboard control.\n'
                 'The desktop streamer still requires a logged-in macOS GUI session; P0 keeps system recovery available independently.\n'
                 'Use only on a trusted LAN. Do not expose ZorinMacBridge or SSH directly to the public Internet.')
-        ttk.Label(outer, text=note, wraplength=700).grid(row=15, column=0, columnspan=3, sticky='w', pady=(4, 8))
+        ttk.Label(outer, text=note, wraplength=700).grid(row=16, column=0, columnspan=3, sticky='w', pady=(4, 8))
 
         self.log = tk.Text(outer, height=12, wrap='word', state='disabled')
-        self.log.grid(row=16, column=0, columnspan=3, sticky='nsew')
+        self.log.grid(row=17, column=0, columnspan=3, sticky='nsew')
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(16, weight=1)
+        outer.rowconfigure(17, weight=1)
 
         self.root.protocol('WM_DELETE_WINDOW', self.on_close)
+
+    def _current_required_setup(self):
+        return evaluate_setup_requirements(
+            screen_recording=self._last_screen_permission,
+            accessibility=self._last_input_permission,
+            session_password_configured=self.saved_password is not None,
+            admin_state=self._last_admin_state,
+            launch_at_login=bool(self.launch_at_login_var.get()),
+            auto_start_server=bool(self.auto_start_var.get()),
+        )
+
+    def _update_required_setup(self) -> None:
+        if not (self._permissions_checked and self._admin_checked):
+            self.required_setup_var.set('Checking REQUIRED setup…')
+            return
+
+        missing = missing_setup_requirements(self._current_required_setup())
+        if missing:
+            lines = ['REQUIRED: setup incomplete — fix every item below before relying on full Zorin operation:']
+            lines.extend(f'• {item.label} — {item.impact}' for item in missing)
+            self.required_setup_var.set('\n'.join(lines))
+            if self._required_setup_label is not None:
+                self._required_setup_label.configure(fg='#c62828')
+            if not self._required_startup_alert_shown:
+                self._required_startup_alert_shown = True
+                messagebox.showwarning(
+                    'Required setup incomplete',
+                    'ZorinMacBridge is installed, but the Mac is NOT fully ready.\n\n'
+                    + '\n'.join(f'REQUIRED: {item.label} — {item.impact}' for item in missing)
+                    + '\n\nUse “Fix next REQUIRED item” until this panel becomes READY.',
+                )
+        else:
+            self.required_setup_var.set('READY — all required components for full unattended Zorin operation are available.')
+            if self._required_setup_label is not None:
+                self._required_setup_label.configure(fg='#2e7d32')
+
+    def refresh_required_setup(self) -> None:
+        self.required_setup_var.set('Checking REQUIRED setup…')
+        self.refresh_permission_status()
+        self.refresh_admin_status()
+
+    def open_remote_login_settings(self) -> None:
+        try:
+            subprocess.Popen(
+                ['/usr/bin/open', 'x-apple.systempreferences:com.apple.Sharing-Settings.extension'],
+                cwd='/',
+            )
+        except Exception as exc:
+            messagebox.showerror('Remote Login settings', f'Could not open Sharing settings.\n\n{exc}')
+
+    def fix_next_required_item(self) -> None:
+        if not (self._permissions_checked and self._admin_checked):
+            self.refresh_required_setup()
+            return
+        missing = missing_setup_requirements(self._current_required_setup())
+        if not missing:
+            messagebox.showinfo('Required setup', 'All required items are READY.')
+            return
+        keys = {item.key for item in missing}
+
+        if keys & {'p0_status', 'p0_installed', 'p0_daemon', 'update_daemon'}:
+            self.enable_unattended_access()
+            return
+        if 'remote_login' in keys or 'ssh_transport' in keys:
+            self.open_remote_login_settings()
+            messagebox.showwarning(
+                'REQUIRED: Remote Login',
+                'Turn ON System Settings → General → Sharing → Remote Login.\n\n'
+                'This is required for pairing, System, Terminal and Project actions. '
+                'Then click “Refresh REQUIRED setup”.',
+            )
+            return
+        if 'ssh_host_key' in keys:
+            # Enable / Repair runs the safe ssh-keygen -A repair when Remote Login is on.
+            self.enable_unattended_access()
+            return
+        if 'screen_recording' in keys:
+            self.request_screen_recording_access()
+            return
+        if 'accessibility' in keys:
+            self.request_input_access()
+            return
+        if 'session_password' in keys:
+            try:
+                self.password_entry.focus_set()
+            except Exception:
+                pass
+            messagebox.showwarning(
+                'REQUIRED: ZMB session password',
+                'Enter a ZorinMacBridge session password of at least 12 characters and start the server once with '
+                '“Remember password verifier on this Mac” enabled.',
+            )
+            return
+        if keys & {'launch_at_login', 'auto_start_server'}:
+            self.launch_at_login_var.set(True)
+            self.auto_start_var.set(True)
+            self._startup_settings_changed()
+            self._update_required_setup()
+            messagebox.showinfo('Required setup', 'Launch-at-login and automatic server start were enabled.')
 
 
     def refresh_admin_status(self) -> None:
@@ -356,9 +481,13 @@ class ServerGUI:
         def done(job_token: int, state, error: str | None) -> None:
             if job_token != self._admin_status_serial:
                 return
+            self._admin_checked = True
             if error or state is None:
+                self._last_admin_state = None
                 self.admin_status_var.set(f'Unattended access status unavailable: {error or "unknown error"}')
+                self._update_required_setup()
                 return
+            self._last_admin_state = dict(state)
             installed = bool(state.get('installed'))
             loaded = bool(state.get('daemon_loaded'))
             updater_loaded = bool(state.get('updater_loaded'))
@@ -370,6 +499,7 @@ class ServerGUI:
             else:
                 text = f'P0 unattended access is not installed · Remote Login: {remote}'
             self.admin_status_var.set(text)
+            self._update_required_setup()
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -407,15 +537,12 @@ class ServerGUI:
             except Exception:
                 state = {}
             if state.get('remote_login') != 'on':
-                try:
-                    subprocess.Popen(['/usr/bin/open', 'x-apple.systempreferences:com.apple.Sharing-Settings.extension'], cwd='/')
-                except Exception:
-                    pass
+                self.open_remote_login_settings()
                 messagebox.showwarning(
-                    'One local step remains',
-                    'P0 is installed. macOS did not allow Remote Login (SSH) to be enabled automatically.\n\n'
-                    'Turn on System Settings → General → Sharing → Remote Login once.\n'
-                    'You do not need to reinstall P0 afterwards.',
+                    'REQUIRED: Remote Login is OFF',
+                    'P0 is installed, but full Zorin operation is NOT ready because macOS Remote Login (SSH) is OFF.\n\n'
+                    'REQUIRED: Turn on System Settings → General → Sharing → Remote Login.\n\n'
+                    'Pairing, System, Terminal and Project actions depend on it. You do not need to reinstall P0 afterwards.',
                 )
                 return
             self.copy_ssh_fingerprint(show_dialog=True)
@@ -455,7 +582,10 @@ class ServerGUI:
             try:
                 fingerprints = ssh_host_fingerprints()
                 if not fingerprints:
-                    raise RuntimeError('No macOS SSH host public keys were found. Enable Remote Login first.')
+                    raise RuntimeError(
+                        'REQUIRED: no macOS SSH host public keys were found. '
+                        'Turn on Remote Login, then use Enable / Repair to regenerate missing host keys.'
+                    )
                 text = '\n'.join(fingerprints)
                 error = None
             except Exception as exc:
@@ -469,7 +599,7 @@ class ServerGUI:
         def done(text: str, error: str | None) -> None:
             if error:
                 self._log('Could not read SSH host fingerprint: ' + error)
-                messagebox.showerror('SSH fingerprint', error)
+                messagebox.showerror('REQUIRED: SSH fingerprint unavailable', error)
                 return
             self.root.clipboard_clear()
             self.root.clipboard_append(text)
@@ -523,6 +653,7 @@ class ServerGUI:
             except FileNotFoundError:
                 pass
             self._log('Launch-at-login disabled.')
+        self._update_required_setup()
 
     def _app_bundle_path(self) -> Path | None:
         try:
@@ -579,10 +710,14 @@ class ServerGUI:
     def refresh_permission_status(self) -> None:
         screen = screen_capture_permission_status()
         input_access = accessibility_permission_status()
+        self._last_screen_permission = screen
+        self._last_input_permission = input_access
+        self._permissions_checked = True
         screen_text = 'Granted' if screen is True else ('Not granted' if screen is False else 'Unknown')
         input_text = 'Granted' if input_access is True else ('Not granted' if input_access is False else 'Unknown')
         self.screen_permission_var.set(f'Screen Recording: {screen_text}')
         self.input_permission_var.set(f'Mouse/keyboard control: {input_text}')
+        self._update_required_setup()
 
         # codesign can take seconds on a PyInstaller bundle. Keep it off Tk.
         self._signing_status_serial += 1
@@ -681,6 +816,7 @@ class ServerGUI:
                 self.saved_password = auth
                 self.password_var.set('')
                 self._log('Session password verifier saved; plaintext password is not stored on the Mac.')
+                self._update_required_setup()
         elif self.saved_password is not None:
             auth = self.saved_password
         else:

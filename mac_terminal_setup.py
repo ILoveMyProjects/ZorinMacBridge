@@ -5,9 +5,16 @@ import subprocess
 import sys
 
 from mac_admin_setup import admin_component_state, current_short_user, install_unattended_access, ssh_host_fingerprints
+from mac_requirements import evaluate_setup_requirements, missing_setup_requirements
+from mac_server import accessibility_permission_status, screen_capture_permission_status
 from settings import load_server_password_verifier, save_server_password, update_server_settings
 
 MIN_SESSION_PASSWORD = 12
+
+
+def _required(message: str) -> None:
+    prefix = '\033[1;31mREQUIRED\033[0m' if sys.stderr.isatty() else 'REQUIRED'
+    print(f'{prefix}: {message}', file=sys.stderr)
 
 
 def _prompt_auto_update_mode() -> str:
@@ -72,8 +79,8 @@ def run_terminal_setup() -> int:
     remote_login_ready = state.get('remote_login') == 'on'
     if not remote_login_ready:
         print()
-        print('ACTION REQUIRED ONCE: macOS Remote Login (SSH) is still off.')
-        print('Open System Settings > General > Sharing > Remote Login and turn it on.')
+        _required('macOS Remote Login (SSH) is OFF.')
+        _required('Open System Settings > General > Sharing > Remote Login and turn it ON.')
         print('You do NOT need to reinstall P0 after enabling it; the helpers and pairing state are already prepared.')
 
     # The user-session app must launch and start its desktop server after login.
@@ -94,16 +101,39 @@ def run_terminal_setup() -> int:
     print('SSH host fingerprint(s) — compare one of these when pairing from Zorin:')
     fps = ssh_host_fingerprints()
     if not fps:
-        print('  WARNING: no SSH host fingerprints were found.', file=sys.stderr)
+        _required('No SSH host fingerprints were found. Pairing cannot be completed yet.')
     else:
         for item in fps:
             print('  ' + item)
 
+    # Use the same requirement policy as the macOS GUI. The installer should
+    # never end with a misleading all-good banner while a mandatory component
+    # is missing.
+    state = admin_component_state()
+    requirements = evaluate_setup_requirements(
+        screen_recording=screen_capture_permission_status(),
+        accessibility=accessibility_permission_status(),
+        session_password_configured=load_server_password_verifier() is not None,
+        admin_state=state,
+        launch_at_login=True,
+        auto_start_server=True,
+    )
+    missing = missing_setup_requirements(requirements)
+
     print()
-    print('SETUP_OK=1')
+    print('SETUP_COMPLETE=' + ('1' if not missing else '0'))
     print(f'MACOS_SHORT_USER={user}')
     print('REMOTE_LOGIN=' + ('on' if remote_login_ready else 'manual_required'))
     print(f'AUTO_UPDATE_MODE={auto_update_mode}')
+    if missing:
+        print('REQUIRED_SETUP_BEGIN')
+        for item in missing:
+            print(f'REQUIRED={item.key}|{item.label}|{item.impact}')
+        print('REQUIRED_SETUP_END')
+        print()
+        _required('Setup is incomplete. Open ZorinMacBridge Server on this Mac and resolve every red REQUIRED item before relying on unattended operation.')
+    else:
+        print('SETUP_OK=1')
     if not remote_login_ready:
         try:
             subprocess.Popen(['/usr/bin/open', 'x-apple.systempreferences:com.apple.Sharing-Settings.extension'], cwd='/')

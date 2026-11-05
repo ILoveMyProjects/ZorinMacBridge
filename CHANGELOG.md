@@ -1,3 +1,13 @@
+## v0.14.0
+
+- P7 setup hardening: the macOS app now has a prominent **Required setup for full Zorin operation** panel. Missing prerequisites are shown in red as `REQUIRED` instead of being buried in logs or optional-looking status text.
+- The Mac UI evaluates one shared checklist for Screen Recording, Accessibility, the saved ZMB session password, P0 helper/daemons, Remote Login, SSH transport/host key, launch-at-login, and automatic desktop-server start.
+- A startup alert lists every missing required item, and **Fix next REQUIRED item** routes the user to the appropriate repair/action instead of leaving the failure to appear later on Zorin.
+- Added a dedicated **Open Remote Login Settings** action and stronger Remote Login/fingerprint errors. Remote Login OFF is now explicitly described as blocking pairing, System, Terminal, and Project actions.
+- P0 installation repairs missing macOS SSH host keys with `ssh-keygen -A` when Remote Login is already enabled, then reports a hard `REQUIRED` state if fingerprints are still unavailable.
+- Command-line setup now reports `SETUP_COMPLETE=0` plus a machine-readable `REQUIRED_SETUP_BEGIN/END` block whenever required setup is incomplete; it no longer prints a misleading all-good setup marker in that state.
+- Added P7 regression tests and a real-Mac P7 acceptance checklist; version advanced to 0.14.0.
+
 ## v0.13.0
 
 - P6: added layered read-only recovery diagnostics with explicit issue codes, severity, and auto/manual repair classification instead of a generic connection failure.

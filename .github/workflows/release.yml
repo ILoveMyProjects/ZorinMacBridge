@@ -47,6 +47,7 @@ jobs:
           /usr/bin/python3 test_p4.py
           /usr/bin/python3 test_p5.py
           /usr/bin/python3 test_p6.py
+          /usr/bin/python3 test_p7.py
           /usr/bin/python3 -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); gi.require_version('Vte','3.91'); from gi.repository import Gtk, Adw, Vte; import av; av.CodecContext.create('h264','r'); import keyring; print('GTK4/libadwaita/VTE + H.264 runtime OK')"
           bash -n install-linux.sh
           bash -n native/macos/admin/install-admin.sh
@@ -97,7 +98,7 @@ jobs:
           Depends: python3 (>= 3.12), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, libadwaita-1-0, gir1.2-vte-3.91, libvte-2.91-gtk4-0, python3-pil, python3-pil.imagetk, python3-av, python3-certifi, python3-keyring, python3-secretstorage, python3-zeroconf, python3-pystray, python3-tk, wl-clipboard, xclip, pkexec, openssh-client, rsync
           Description: Native GTK4/libadwaita LAN client for ZorinMacBridge
            Remote macOS desktop, keyboard/mouse, clipboard, shared-folder transfer,
-           unattended recovery, layered P6 diagnostics, Xcode controls, user SSH terminal, project actions, safe project sync, and adaptive low-latency H.264 streaming
+           unattended recovery, layered P6 diagnostics, P7 required-setup health, Xcode controls, user SSH terminal, project actions, safe project sync, and adaptive low-latency H.264 streaming
            with a Zorin/GNOME-native interface.
           CTRL
 

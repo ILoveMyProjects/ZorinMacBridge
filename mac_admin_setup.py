@@ -83,18 +83,21 @@ def admin_component_state() -> dict[str, str | bool]:
     # does not prompt for an administrator password merely to refresh the page.
     remote = _run(['/usr/sbin/systemsetup', '-getremotelogin'], timeout=5)
     remote_text = (remote.stdout or remote.stderr or '').strip().lower()
-    if 'on' in remote_text:
+    probe = _run(['/usr/bin/nc', '-G', '1', '-z', '127.0.0.1', '22'], timeout=3)
+    ssh_port_ready = probe.returncode == 0
+    if 'remote login: on' in remote_text:
         remote_login = 'on'
-    elif 'off' in remote_text:
+    elif 'remote login: off' in remote_text:
         remote_login = 'off'
     else:
-        probe = _run(['/usr/bin/nc', '-G', '1', '-z', '127.0.0.1', '22'], timeout=3)
-        remote_login = 'on' if probe.returncode == 0 else 'unknown'
+        remote_login = 'on' if ssh_port_ready else 'unknown'
     return {
         'installed': files_ok,
         'daemon_loaded': launch.returncode == 0,
         'updater_loaded': updater.returncode == 0,
         'remote_login': remote_login,
+        'ssh_port_ready': ssh_port_ready,
+        'ssh_host_key_ready': bool(ssh_host_fingerprints()),
     }
 
 

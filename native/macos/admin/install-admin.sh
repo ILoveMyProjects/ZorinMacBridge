@@ -205,11 +205,18 @@ else
   if /usr/sbin/systemsetup -setremotelogin on >"$SYSTEMSETUP_OUT" 2>&1; then
     REMOTE_LOGIN_STATE="on"
   else
-    echo "WARNING: macOS did not allow Remote Login (SSH) to be enabled automatically." >&2
+    echo "REQUIRED: macOS did not allow Remote Login (SSH) to be enabled automatically." >&2
     /bin/cat "$SYSTEMSETUP_OUT" >&2 || true
     echo "P0 helper installation will continue." >&2
-    echo "One local action remains: System Settings > General > Sharing > Remote Login -> On." >&2
+    echo "REQUIRED ACTION: System Settings > General > Sharing > Remote Login -> On." >&2
   fi
+fi
+
+# Remote Login normally creates/maintains the OpenSSH host keys. If the switch
+# is already on but keys are missing, repair that safe local prerequisite now
+# so fingerprint pairing cannot fail later with an empty result.
+if [ "$REMOTE_LOGIN_STATE" = "on" ]; then
+  /usr/bin/ssh-keygen -A >/dev/null 2>&1 || true
 fi
 
 # authorized_keys is user-owned state. Create/validate it entirely as the
@@ -241,7 +248,17 @@ printf 'REMOTE_LOGIN=%s\n' "$REMOTE_LOGIN_STATE"
 /usr/local/sbin/zmb-admin status || true
 
 echo 'SSH_FINGERPRINTS_BEGIN'
+SSH_HOST_KEYS=0
 for pub in /etc/ssh/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ecdsa_key.pub /etc/ssh/ssh_host_rsa_key.pub; do
-  if [ -f "$pub" ]; then /usr/bin/ssh-keygen -lf "$pub" -E sha256 2>/dev/null || true; fi
+  if [ -f "$pub" ]; then
+    SSH_HOST_KEYS=1
+    /usr/bin/ssh-keygen -lf "$pub" -E sha256 2>/dev/null || true
+  fi
 done
 echo 'SSH_FINGERPRINTS_END'
+printf 'SSH_HOST_KEYS=%s\n' "$SSH_HOST_KEYS"
+if [ "$REMOTE_LOGIN_STATE" != "on" ]; then
+  echo 'REQUIRED: Remote Login is OFF; Zorin pairing/System/Terminal/Projects cannot work until it is enabled.' >&2
+elif [ "$SSH_HOST_KEYS" != "1" ]; then
+  echo 'REQUIRED: macOS SSH host public keys are missing; fingerprint pairing is not ready.' >&2
+fi

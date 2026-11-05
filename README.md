@@ -125,6 +125,8 @@ ZorinMacBridge uses two different credentials:
 
 `install-macos.sh` now performs unattended setup by default: it enables Remote Login (SSH), installs/repairs P0, verifies that SSH was enabled, and prompts for the ZorinMacBridge session password. Use `./install-macos.sh --app-only` only when you intentionally want to install the app without P0/SSH setup.
 
+Starting with **v0.14.0**, the Mac app treats the prerequisites for the intended full Zorin workflow as an explicit setup contract rather than optional-looking status. The **Required setup for full Zorin operation** panel turns red and lists every missing item: Screen Recording, Accessibility, the saved ZMB session password, P0/recovery services, Remote Login/SSH readiness and host fingerprint, launch-at-login, and automatic desktop-server start. The app also shows a startup alert while any of these are missing and provides **Fix next REQUIRED item** plus a direct **Open Remote Login Settings** action.
+
 ## LAN discovery and changing DHCP addresses
 
 The Zorin client discovers both the normal desktop service and the P0 system service with Bonjour/mDNS. Each Mac has a persistent `server_id` UUID. The current IP address is treated only as a transport address and may change after DHCP renewals or reboots.
@@ -135,7 +137,7 @@ The project deliberately does not use a network-interface MAC address as the per
 
 ## Unattended access / recovery (P0)
 
-The remote desktop still runs in the logged-in macOS user session because ScreenCaptureKit and GUI input belong to that session. v0.8.0 adds an **optional** system recovery layer so a failed desktop service does not force you to reconnect a monitor.
+The remote desktop still runs in the logged-in macOS user session because ScreenCaptureKit and GUI input belong to that session. The P0 system layer remains technically separable from the desktop server, but v0.14.0 marks it **REQUIRED for the intended full unattended Zorin workflow** so a failed desktop service does not force you to reconnect a monitor.
 
 On the Mac, open **ZorinMacBridge Server → Unattended access / recovery → Enable / Repair** once. macOS asks for administrator authorization. The app then:
 
@@ -153,7 +155,7 @@ The system layer does not bypass macOS login, FileVault, Screen Recording, or Ac
 
 ### Remote Login and Full Disk Access on current macOS
 
-macOS may refuse `systemsetup -setremotelogin on` unless the invoking process has Full Disk Access. ZorinMacBridge therefore treats this as a one-time local action rather than a failed P0 installation. If setup reports `REMOTE_LOGIN=manual_required`, open **System Settings → General → Sharing → Remote Login** and turn it on. The P0 helpers, pairing files, recovery service, and update service are already installed; rerunning P0 is optional.
+macOS may refuse `systemsetup -setremotelogin on` unless the invoking process has Full Disk Access. The P0 files can still be installed safely, but v0.14.0 no longer presents that state as effectively finished: command-line setup reports `SETUP_COMPLETE=0`, and the Mac UI shows **REQUIRED: Remote Login (SSH)** in red until **System Settings → General → Sharing → Remote Login** is turned on. Pairing, System, Terminal, and Project actions are not considered ready while this requirement is missing. Rerunning P0 is not required after enabling the switch; **Enable / Repair** can also repair missing SSH host keys.
 
 
 ## Xcode and Simulator control (v0.9.0)
