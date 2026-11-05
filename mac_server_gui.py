@@ -607,7 +607,7 @@ class ServerGUI:
             if show_dialog:
                 messagebox.showinfo(
                     'Unattended access ready',
-                    'P0 is installed. Compare this SSH fingerprint when pairing from the Zorin System tab.\n\n' + text,
+                    'P0 is installed. The SSH fingerprint below is needed only for FIRST enrollment or if macOS SSH host keys genuinely change. Already-paired Zorin clients remember and verify the key automatically.\n\n' + text,
                 )
 
         threading.Thread(target=worker, daemon=True).start()

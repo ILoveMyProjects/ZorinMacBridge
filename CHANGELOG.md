@@ -1,3 +1,13 @@
+# Changelog
+
+## 0.14.3 - Remembered SSH identity and migration hotfix
+
+- Reuse the SSH host key pinned during the first System pairing; reconfiguration automatically compares the live key with the remembered `known_hosts` entry and does not require another walk to the Mac when it matches.
+- Fail closed if the Mac SSH host key actually changes and require explicit manual re-verification before replacing trust.
+- During password-authenticated pairing, learn the Desktop TLS certificate fingerprint over that already-pinned SSH channel so migration from older P0 helpers does not require a second manual Desktop SHA.
+- Canonicalize the macOS root update staging directory before the containment check, fixing the `/var/tmp` vs `/private/var/tmp` false `staged app path escaped the trusted update directory` failure.
+- Clarify on the Mac that printed SSH fingerprints are for first enrollment/key-change recovery, not every reconnect.
+
 ## v0.14.2
 
 - Unified pairing state across System, Desktop, Terminal, Projects, Xcode, and Files.

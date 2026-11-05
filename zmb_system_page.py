@@ -15,6 +15,7 @@ from zmb_admin_backend import (
     revoke_current_device,
     run_action,
     scan_host_keys,
+    remembered_host_key_matches,
     status_summary,
 )
 
@@ -593,7 +594,7 @@ class SystemController:
         title.add_css_class("title-2")
         box.append(title)
         note = Gtk.Label(
-            label="This is a one-time setup. Use the SAME password you use to log in/unlock this Mac. This is NOT the ZorinMacBridge session password. The password is used only during this pairing and is not saved. P0 installs a restricted admin key; optionally P3 also installs a separate normal-user Terminal key.",
+            label="First enrollment verifies the Mac SSH identity once. On later reconfiguration ZorinMacBridge automatically checks the live host key against the remembered pinned key; you only need Mac-side verification if the SSH host key actually changed. The macOS account password is used only for this pairing/configuration and is not saved.",
             xalign=0, wrap=True,
         )
         note.add_css_class("zmb-muted")
@@ -625,6 +626,8 @@ class SystemController:
         verified = Gtk.CheckButton(label="I verified this SSH fingerprint against the Mac")
         verified.set_sensitive(False)
         box.append(verified)
+        if existing:
+            fingerprint.set_text("Saved pairing found. Checking the remembered SSH identity automatically…")
 
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         buttons.set_halign(Gtk.Align.END)
@@ -640,7 +643,7 @@ class SystemController:
         buttons.append(pair_btn)
 
         state: dict[str, object] = {
-            "scan": None, "busy": False, "job_serial": 0, "watchdog": 0, "closed": False,
+            "scan": None, "busy": False, "job_serial": 0, "watchdog": 0, "closed": False, "auto_trusted": False,
         }
 
         def cancel_job_watchdog() -> None:
@@ -700,6 +703,7 @@ class SystemController:
         def invalidate_scan(*_args):
             if state.get("scan") is not None:
                 state["scan"] = None
+                state["auto_trusted"] = False
                 verified.set_active(False)
                 verified.set_sensitive(False)
                 fingerprint.set_text("SSH port changed. Read the fingerprint again before pairing.")
@@ -753,12 +757,31 @@ class SystemController:
                 return False
             state["scan"] = result
             pref = result["preferred"]
-            fingerprint.set_text(
-                f"Mac SSH fingerprint ({pref['type']}):\n{pref['fingerprint']}\n\n"
-                "Compare this with the fingerprint printed by the P0 installer on the Mac."
-            )
-            verified.set_sensitive(True)
-            verified.set_active(False)
+            if existing and remembered_host_key_matches(sid, host_entry.get_text().strip(), result):
+                state["auto_trusted"] = True
+                fingerprint.set_text(
+                    f"Remembered SSH identity verified ✓ ({pref['type']})\n{pref['fingerprint']}\n\n"
+                    "The live Mac host key matches the key saved during the first pairing. No Mac-side fingerprint check is required."
+                )
+                verified.set_label("Remembered SSH identity verified automatically")
+                verified.set_sensitive(False)
+                verified.set_active(True)
+            else:
+                state["auto_trusted"] = False
+                if existing:
+                    fingerprint.set_text(
+                        f"SECURITY WARNING — SSH host key changed\nLive {pref['type']}: {pref['fingerprint']}\n"
+                        "The live key does not match the locally pinned known_hosts identity.\n\n"
+                        "Automatic trust was refused. Verify the new fingerprint on the Mac before replacing the remembered identity."
+                    )
+                else:
+                    fingerprint.set_text(
+                        f"Mac SSH fingerprint ({pref['type']}):\n{pref['fingerprint']}\n\n"
+                        "First enrollment only: compare this with the fingerprint printed by P0 on the Mac."
+                    )
+                verified.set_label("I verified this NEW SSH fingerprint against the Mac")
+                verified.set_sensitive(True)
+                verified.set_active(False)
             set_pair_sensitive()
             return False
 
@@ -832,6 +855,8 @@ class SystemController:
         scan_btn.connect("clicked", do_scan)
         pair_btn.connect("clicked", do_pair)
         dialog.present()
+        if existing:
+            GLib.idle_add(do_scan)
 
     def _confirm_unpair(self) -> None:
         if not self._profile():

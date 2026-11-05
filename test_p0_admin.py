@@ -197,6 +197,8 @@ def main() -> None:
     assert '/var/tmp/zmb-systemsetup.XXXXXX' in installer
     assert '/tmp/zmb-systemsetup.out' not in installer
     assert 'run_app_for_root_update' in root_admin
+    assert 'work="$(cd "$work" && /bin/pwd -P)"' in root_admin
+    assert 'staged app path escaped the trusted update directory' in root_admin
     assert '/usr/sbin/chown -R "$user":staff "$work"' not in root_admin
     assert 'ZMB_LOCAL_IDENTITY_TOKEN="$token"' in root_admin
     assert '/usr/bin/sudo -u "$user" /bin/sh -c' in root_admin

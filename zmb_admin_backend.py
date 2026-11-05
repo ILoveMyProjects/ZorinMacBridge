@@ -256,6 +256,44 @@ def scan_host_keys(host: str, port: int = 22) -> dict:
     return {"lines": lines, "fingerprints": fingerprints, "preferred": preferred}
 
 
+def _ssh_key_material(line: str) -> tuple[str, str] | None:
+    parts = str(line or "").strip().split()
+    if len(parts) < 3 or not parts[0] or not parts[1] or not parts[2]:
+        return None
+    key_type, key_blob = parts[1], parts[2]
+    if not key_type.startswith("ssh-") and not key_type.startswith("ecdsa-"):
+        return None
+    return key_type, key_blob
+
+
+def remembered_host_key_matches(server_id: str, host: str, scan: dict | None) -> bool:
+    """Return True only when a live ssh-keyscan key matches the persisted pinned key.
+
+    This is intentionally key-material based so the saved HostKeyAlias token does
+    not need to match the current IP/hostname. It lets normal reconnect/update
+    paths reuse the first verified identity while still failing closed on a real
+    SSH host-key change.
+    """
+    profile = get_profile(server_id, host)
+    if not profile or not isinstance(scan, dict):
+        return False
+    known_path = Path(str(profile.get("known_hosts") or "")).expanduser()
+    try:
+        remembered = {
+            material for line in known_path.read_text(encoding="utf-8").splitlines()
+            if (material := _ssh_key_material(line)) is not None
+        }
+    except (OSError, ValueError):
+        return False
+    if not remembered:
+        return False
+    live = {
+        material for line in (scan.get("lines") or [])
+        if (material := _ssh_key_material(str(line))) is not None
+    }
+    return bool(remembered & live)
+
+
 def _restricted_authorized_key(pubkey_text: str, device_id: str) -> str:
     parts = pubkey_text.strip().split()
     if len(parts) < 2 or parts[0] != "ssh-ed25519":
@@ -325,7 +363,10 @@ def pair_device(*, server_id: str, server_name: str, host: str, user: str, passw
         "tmp=$(/usr/bin/mktemp ~/.ssh/.zmb-authorized_keys.XXXXXX) || exit 73; "
         f"/usr/bin/awk -v marker={shlex.quote(marker)} 'index($0, marker)==0 {{print}}' ~/.ssh/authorized_keys > \"$tmp\" || {{ rm -f \"$tmp\"; exit 74; }}; "
         f"printf '%s\n' {shlex.quote(restricted)} >> \"$tmp\" || {{ rm -f \"$tmp\"; exit 74; }}; "
-        "chmod 600 \"$tmp\"; mv -f \"$tmp\" ~/.ssh/authorized_keys"
+        "chmod 600 \"$tmp\"; mv -f \"$tmp\" ~/.ssh/authorized_keys || { rm -f \"$tmp\"; exit 74; }; "
+        "if [ -f \"$HOME/.zorin-mac-bridge/server-cert.pem\" ] && [ -x /usr/bin/openssl ]; then "
+        "tlsfp=$(/usr/bin/openssl x509 -in \"$HOME/.zorin-mac-bridge/server-cert.pem\" -noout -fingerprint -sha256 2>/dev/null | /usr/bin/sed -n 's/^.*=//p' | /usr/bin/head -n 1); "
+        "[ -n \"$tlsfp\" ] && printf 'ZMB_DESKTOP_TLS_FINGERPRINT=%s\n' \"$tlsfp\"; fi"
     )
 
     root = profile_dir(pid)
@@ -359,6 +400,13 @@ def pair_device(*, server_id: str, server_name: str, host: str, user: str, passw
         detail = (p.stderr or p.stdout or f"SSH exited with {p.returncode}").strip()
         raise AdminError("First pairing failed: " + detail)
 
+    bootstrap_tls_fingerprint = ""
+    for output_line in (p.stdout or "").splitlines():
+        if output_line.startswith("ZMB_DESKTOP_TLS_FINGERPRINT="):
+            bootstrap_tls_fingerprint = normalize_tls_fingerprint(output_line.split("=", 1)[1])
+            if bootstrap_tls_fingerprint:
+                break
+
     candidate = {
         "server_id": server_id,
         "server_name": server_name or host,
@@ -385,7 +433,7 @@ def pair_device(*, server_id: str, server_name: str, host: str, user: str, passw
     data = get_status_for_profile(candidate)
     if data.get("protocol") != PROTOCOL_VERSION:
         raise AdminError("Pairing key was installed, but the Mac P0 helper returned an unexpected protocol")
-    desktop_tls_fingerprint = normalize_tls_fingerprint(data.get("desktop_tls_fingerprint"))
+    desktop_tls_fingerprint = normalize_tls_fingerprint(data.get("desktop_tls_fingerprint")) or bootstrap_tls_fingerprint
     if desktop_tls_fingerprint:
         # The TLS identity is learned only after the user has verified the SSH
         # host key and P0 answered over that pinned SSH channel. This lets one

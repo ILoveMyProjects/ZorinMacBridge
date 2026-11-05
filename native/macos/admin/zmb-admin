@@ -867,6 +867,10 @@ update_now_cmd() {
   server_name="$(config_value SERVER_NAME '')"
   [ -n "$server_name" ] || server_name="$(/bin/hostname -s 2>/dev/null || echo Mac)"
   work="$(/usr/bin/mktemp -d /var/tmp/zmb-update.XXXXXX)" || { release_update_lock; fail "could not create update staging directory" 73; }
+  # Python Path.resolve() canonicalizes macOS /var -> /private/var. Canonicalize
+  # the trusted root too before comparing the staged path, otherwise a valid
+  # /private/var/tmp/... result is falsely rejected as escaping /var/tmp/....
+  work="$(cd "$work" && /bin/pwd -P)" || { release_update_lock; fail "could not canonicalize update staging directory" 73; }
   /bin/chmod 700 "$work"
   /usr/sbin/chown root:wheel "$work"
 
