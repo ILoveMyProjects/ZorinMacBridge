@@ -1,10 +1,11 @@
-## 0.15.6 — VideoSessionRecovery
+## 0.15.7 — PreloginLoginFlowFix
 
-- Replaces the passive 20-second global video-lock wait with active stale-owner interruption: a replacement video connection shuts down the previous video TLS socket so its Python/native cleanup starts immediately.
-- Adds a 6-second deadline for the first H.264 access unit. A zero-frame native capture now fails with the latest native ScreenCaptureKit diagnostics instead of monopolising the video session indefinitely.
-- Cancels the native Swift capture task during `zmb_streamer_stop`, reducing leaked/hung capture generations during retries.
-- Keeps Desktop/control connected while the independent video channel recovers.
-- Adds a real concurrency regression test proving stale video ownership is interrupted and released within the bounded replacement grace.
+- Fixes the 0.15.6 reconnect deadlock where a logically stopped native streamer could keep `_VIDEO_SESSION_LOCK` until slow Swift cleanup finished. Video ownership is now released immediately after `zmb_streamer_stop()` and before `runner.join()`/destroy.
+- Makes native teardown bounded: stop invalidates VideoToolbox without `VTCompressionSessionCompleteFrames`, closes the output pipe immediately, and no longer waits synchronously on a blocked writer queue.
+- Changes macOS LoginWindow capture to use `CGDisplayStreamCreateWithDispatchQueue` as the primary physical-display path, feeding its IOSurface frames into the existing VideoToolbox H.264 encoder. This path is specifically used by working LoginWindow remote-desktop implementations.
+- Keeps `SCScreenshotManager.captureSampleBuffer()` as a synchronous-start fallback if CGDisplayStream cannot be created/started. Logged-in Aqua capture remains on `SCStream`.
+- Preserves the existing six-second first-H.264 deadline and native diagnostics so a genuine zero-frame capture fails explicitly instead of monopolising the next reconnect.
+- Adds regression coverage for early video-ownership release, non-blocking native teardown, and the LoginWindow CGDisplayStream path.
 
 ## 0.15.5 — PreloginCaptureActivationFix
 

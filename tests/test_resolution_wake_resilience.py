@@ -1,7 +1,7 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "0.15.6"
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "0.15.7"
 
 client = (ROOT / "linux_client.py").read_text(encoding="utf-8")
 gtk = (ROOT / "linux_client_gtk.py").read_text(encoding="utf-8")

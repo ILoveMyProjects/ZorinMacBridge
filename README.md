@@ -1,6 +1,12 @@
-## 0.15.6 video session recovery
+## 0.15.7 pre-login login-flow fix
 
-0.15.6 fixes the pre-login video lifecycle that could leave a stale native video owner holding the global session lock while the client waited for a first frame. A replacement video connection now actively shuts down the stale owner's TLS socket and waits only a bounded 4-second cleanup grace instead of passively blocking for 20 seconds. The first H.264 access unit also has a 6-second startup deadline; if native capture produces no frame, the server returns the latest native ScreenCaptureKit diagnostics instead of leaving the client on an indefinite `waiting for first frame` state. The native Swift runner now cancels its capture task during stop/cleanup.
+0.15.7 targets the real post-reboot LoginWindow failure chain. The server no longer keeps global video ownership during slow native cleanup after capture has already been stopped; this removes the repeated `previous video session did not stop within 4s` reconnect loop seen on real hardware.
+
+For LoginWindow video, the primary capture backend is now `CGDisplayStreamCreateWithDispatchQueue` on the physical display. Frames arrive as IOSurfaces, are wrapped as `CVPixelBuffer`s, and go through the existing VideoToolbox H.264 encoder. `SCScreenshotManager.captureSampleBuffer()` remains a fallback when the display stream cannot be started. The normal logged-in Aqua desktop continues to use `SCStream`.
+
+The first H.264 access unit is still required within six seconds. If neither pre-login capture backend produces a frame, the server returns native diagnostics instead of leaving the client indefinitely on `Waiting for first frame`.
+
+The LoginWindow input path remains IOHIDSystem-first. macOS can still deny synthetic keyboard/click events at SecureEventInput on some builds even when video works; 0.15.7 does not claim to bypass that OS security boundary. Accessibility remains REQUIRED and rejected input is logged per event without tearing down the control session.
 
 # ZorinMacBridge
 

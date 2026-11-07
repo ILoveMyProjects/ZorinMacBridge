@@ -9,7 +9,7 @@ sys.path.insert(0, str(ROOT))
 
 import mac_server
 
-assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.6'
+assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.7'
 
 # Reset shared state in case this file is run in-process with another test runner.
 while mac_server._VIDEO_SESSION_LOCK.locked():
@@ -57,9 +57,23 @@ finally:
         except OSError:
             pass
 
+server = (ROOT / 'mac_server.py').read_text(encoding='utf-8')
+# Ownership must be released immediately after zmb_streamer_stop(), before the
+# potentially slow runner.join()/destroy path. This is the real 0.15.6 failure:
+# cleanup held the global lock even though capture was already logically stopped.
+stop_idx = server.index('native.lib.zmb_streamer_stop(handle)')
+release_idx = server.index('release_ownership()', stop_idx)
+join_idx = server.index('runner.join(timeout=3.0)', stop_idx)
+assert stop_idx < release_idx < join_idx
+assert 'prelogin=prelogin, log=log, release_ownership=release_video_ownership' in server
+
 swift = (ROOT / 'native/macos/ZMBStreamerLib.swift').read_text(encoding='utf-8')
 assert 'private var runTask: Task<Void, Never>?' in swift
 assert 'activeTask?.cancel()' in swift
 assert 'task.cancel()' in swift
+# Teardown must not drain frames or synchronously wait for a blocked pipe writer.
+assert 'VTCompressionSessionCompleteFrames(activeCompression' not in swift
+assert 'writeQueue.sync {}' not in swift
+assert 'try? output.close()' in swift
 
 print('video session recovery regression tests: OK')

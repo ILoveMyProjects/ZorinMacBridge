@@ -888,7 +888,7 @@ def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, log=print) -
         log('[control] disconnected')
 
 
-def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int, display_id: int = 0, target_width: int = 0, target_height: int = 0, *, prelogin: bool = False, log=print) -> None:
+def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int, display_id: int = 0, target_width: int = 0, target_height: int = 0, *, prelogin: bool = False, log=print, release_ownership=None) -> None:
     """Stream H.264 from ScreenCaptureKit running inside the main app process.
 
     The native Swift code is a dylib loaded with ctypes, not a child executable.
@@ -1044,6 +1044,14 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
             native.lib.zmb_streamer_stop(handle)
         except Exception:
             pass
+        # The native streamer is now logically stopped.  Do not keep the global
+        # video-session ownership while Swift drains/cancels its background work:
+        # a slow FileHandle/VideoToolbox cleanup must not block the next client.
+        if release_ownership is not None:
+            try:
+                release_ownership()
+            except Exception as exc:
+                log(f'[video] ownership release warning: {type(exc).__name__}: {exc}')
         runner.join(timeout=3.0)
         try:
             native.lib.zmb_streamer_destroy(handle)
@@ -1362,10 +1370,22 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
                 f'target={target_width}x{target_height} fps={fps:g} bitrate={bitrate} display_id={display_id}'
             )
             _acquire_video_session(sock, log=log)
-            try:
-                video_session(sock, fps, max_width, bitrate, display_id, target_width, target_height, prelogin=prelogin, log=log)
-            finally:
+            video_ownership_released = False
+
+            def release_video_ownership() -> None:
+                nonlocal video_ownership_released
+                if video_ownership_released:
+                    return
+                video_ownership_released = True
                 _release_video_session(sock)
+
+            try:
+                video_session(
+                    sock, fps, max_width, bitrate, display_id, target_width, target_height,
+                    prelogin=prelogin, log=log, release_ownership=release_video_ownership,
+                )
+            finally:
+                release_video_ownership()
         else:
             file_session(sock, share)
     except (ssl.SSLError, ConnectionError, OSError) as exc:
