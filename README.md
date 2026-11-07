@@ -1,8 +1,12 @@
 # ZorinMacBridge
 
-## 0.15.1 session-password input fix
+## 0.15.2 pre-login visible/input fix
 
-The GTK client now keeps local text fields local even though remote keyboard/mouse capture is enabled by default. In particular, **ZMB session password** accepts typing before Desktop connection. Remote keyboard forwarding starts only after the Desktop/control session is connected. A rejected session password also stops automatic reconnect instead of retrying the same bad credential repeatedly.
+The macOS LoginWindow stream now preserves ScreenCaptureKit's initial `.started` frame, so a static login screen is not discarded before the Linux client can render it. Remote input is held until that first frame is decoded. LoginWindow input keeps IOHID as the first path and falls back to Quartz session events when modern macOS rejects `IOHIDPostEvent` as not privileged; individual rejected pointer events no longer tear down the whole Desktop connection.
+
+The 0.15.1 session-password fix remains included: local GTK fields such as **ZMB session password** keep keyboard focus before Desktop connection, and a bad session password does not auto-reconnect in a loop.
+
+**Important:** the black LoginWindow fix is primarily in the macOS server/native streamer. Updating only the Linux client is not sufficient; discovery must show the Mac server on 0.15.2 before validating reboot/login-window behavior.
 
 
 ## 0.15.0 pre-login connect fix

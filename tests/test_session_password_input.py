@@ -4,7 +4,7 @@ import ast
 ROOT = Path(__file__).resolve().parents[1]
 client = (ROOT / 'linux_client_gtk.py').read_text(encoding='utf-8')
 
-assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.1'
+assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.2'
 assert "self.password_entry = self._entry(second, 'ZMB session password'" in client
 
 
@@ -25,12 +25,12 @@ assert 'self.get_focus()' in focus
 
 pressed = method_source('_gtk_key_pressed')
 assert 'self._local_text_input_focused()' in pressed
-assert 'if not self.connected or not self.capture_input_var.get()' in pressed
-assert pressed.index('self._local_text_input_focused()') < pressed.index('self.capture_input_var.get()')
+assert 'if not self._remote_input_ready()' in pressed
+assert pressed.index('self._local_text_input_focused()') < pressed.index('self._remote_input_ready()')
 
 released = method_source('_gtk_key_released')
 assert 'self._local_text_input_focused()' in released
-assert 'if not self.connected or not self.capture_input_var.get()' in released
+assert 'if not self._remote_input_ready()' in released
 
 params = method_source('_connection_params')
 assert "raise ValueError('Enter the ZMB session password.')" in params

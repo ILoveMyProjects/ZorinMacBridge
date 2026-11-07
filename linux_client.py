@@ -174,6 +174,7 @@ class ClientApp:
         self._last_render_delay_ms = 0.0
         self.connected = False
         self.prelogin_session = False
+        self.prelogin_video_ready = False
         self.last_photo = None
         self.remote_image_size = (1, 1)
         self.display_rect = (0, 0, 1, 1)
@@ -627,6 +628,8 @@ class ClientApp:
             auth_info = {}
         if role == 'desktop' and isinstance(auth_info, dict):
             self.prelogin_session = bool(auth_info.get('prelogin'))
+            if self.prelogin_session:
+                self.prelogin_video_ready = False
             self.ui_queue.put(('prelogin_state', self.prelogin_session))
             displays = auth_info.get('displays')
             if isinstance(displays, list):
@@ -966,6 +969,9 @@ class ClientApp:
                                             stat_dropped += 1
                                             adapt_dropped += 1
                                         if total_frames == 1:
+                                            if self.prelogin_session:
+                                                self.prelogin_video_ready = True
+                                                self.ui_queue.put(('prelogin_video_ready', img.width, img.height))
                                             self._log('INFO', f'First H.264 frame decoded: {img.width}x{img.height}.')
                             elif kind == VIDEO_STATS:
                                 try:

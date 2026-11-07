@@ -228,6 +228,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self._last_render_delay_ms = 0.0
         self.connected = False
         self.prelogin_session = False
+        self.prelogin_video_ready = False
         self.remote_image_size = (1, 1)
         self.display_rect = (0, 0, 1, 1)
         self.modifiers_down = set()
@@ -1656,13 +1657,21 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                     self._append_log(item[1])
                 elif kind == 'prelogin_state':
                     self.prelogin_session = bool(item[1])
+                    if self.prelogin_session:
+                        self.prelogin_video_ready = False
                     self._refresh_files_state()
+                elif kind == 'prelogin_video_ready':
+                    self.prelogin_video_ready = True
+                    if self.connected and self.prelogin_session:
+                        self.status_var.set('Connected — macOS login window')
+                        if self.capture_input_var.get():
+                            self.picture.grab_focus()
+                    self._log('INFO', f'Pre-login video is visible ({item[1]}x{item[2]}); remote input enabled.')
                 elif kind == 'connected':
                     self.connected = True
                     self._reconnect_attempt = 0
                     if self.prelogin_session:
-                        self.status_var.set('Connected — macOS login window')
-                        self.picture.grab_focus()
+                        self.status_var.set('Connected — macOS login window · waiting for first frame')
                     elif self.capture_input_var.get():
                         self.status_var.set('Connected — keyboard & mouse capture enabled')
                         self.picture.grab_focus()
@@ -1831,8 +1840,17 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             return None
         return ((x - x0) / w, (y - y0) / h)
 
+    def _remote_input_ready(self) -> bool:
+        if not self.connected or not self.capture_input_var.get():
+            return False
+        # Never let pointer/keyboard traffic tear down a pre-login session before
+        # the user has actually received the first loginwindow frame.
+        if self.prelogin_session and not self.prelogin_video_ready:
+            return False
+        return True
+
     def _gtk_motion(self, _controller, x, y):
-        if not self.capture_input_var.get():
+        if not self._remote_input_ready():
             return
         pos = self._norm_point(x, y)
         if pos:
@@ -1843,7 +1861,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         button = int(gesture.get_current_button())
         # Double-click is never a local gesture. Every click belongs to the remote
         # Mac; full-screen is entered only through the explicit Full Screen button.
-        if not self.capture_input_var.get():
+        if not self._remote_input_ready():
             return
         pos = self._norm_point(x, y)
         if pos and button in (1, 2, 3):
@@ -1853,7 +1871,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.picture.grab_focus()
 
     def _gtk_released(self, gesture, _n_press, x, y):
-        if not self.capture_input_var.get():
+        if not self._remote_input_ready():
             return
         button = int(gesture.get_current_button())
         pos = self._norm_point(x, y)
@@ -1863,7 +1881,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             self._enqueue(pack_packet(MOUSE_BUTTON, __import__('struct').pack('!BBff', button, 0, pos[0], pos[1])))
 
     def _gtk_scroll(self, _controller, dx, dy):
-        if self.capture_input_var.get():
+        if self._remote_input_ready():
             sx = int(round(-dx * 3))
             sy = int(round(-dy * 3))
             if sx or sy:
@@ -1913,7 +1931,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             return True
         if self._local_text_input_focused():
             return False
-        if not self.connected or not self.capture_input_var.get():
+        if not self._remote_input_ready():
             return False
 
         keysym = self._map_keysym(keysym)
@@ -1952,7 +1970,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
     def _gtk_key_released(self, _controller, keyval, _keycode, _state):
         if self._local_text_input_focused():
             return False
-        if not self.connected or not self.capture_input_var.get():
+        if not self._remote_input_ready():
             return False
         keysym = self._map_keysym(self._keysym_name(keyval))
         key_lower = keysym.lower() if len(keysym) == 1 else keysym

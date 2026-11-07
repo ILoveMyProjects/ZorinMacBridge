@@ -1,3 +1,11 @@
+## 0.15.2 — PreloginVisibleInputFix
+
+- Fixed a black pre-login viewer caused by discarding ScreenCaptureKit's `.started` first frame; the initial macOS login-window frame is now encoded and sent.
+- Pre-login keyboard/mouse traffic is held until the first H.264 frame is decoded, so input cannot tear down the session before the login screen becomes visible.
+- LoginWindow pointer/button/scroll failures are isolated per event instead of terminating the entire Desktop control channel.
+- Added a Quartz session-event fallback (`kCGSessionEventTap`) when deprecated `IOHIDPostEvent` is rejected with `kIOReturnNotPrivileged`.
+- Added regression coverage for first-frame handling, pre-login input gating, per-event isolation, and the IOHID privilege fallback.
+
 # Changelog
 
 ## 0.15.1 — SessionPasswordInputFix

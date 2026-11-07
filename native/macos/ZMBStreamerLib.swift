@@ -559,9 +559,15 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         if let attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
            let attachments = attachmentsArray.first,
            let raw = attachments[.status] as? Int,
-           let status = SCFrameStatus(rawValue: raw),
-           status != .complete {
-            return
+           let status = SCFrameStatus(rawValue: raw) {
+            // ScreenCaptureKit marks the first sample after startCapture() as
+            // .started.  Dropping everything except .complete means a static
+            // loginwindow can remain black forever: the first image is thrown
+            // away and no later .complete frame is required when nothing moves.
+            // Encode both the initial .started sample and normal .complete ones.
+            if status != .complete && status != .started {
+                return
+            }
         }
 
         guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }

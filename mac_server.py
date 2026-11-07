@@ -800,13 +800,22 @@ def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, log=print) -
             for kind, payload in reader.feed(data):
                 if kind == MOUSE_MOVE and len(payload) == 8:
                     nx, ny = struct.unpack('!ff', payload)
-                    inp.move(nx, ny)
+                    try:
+                        inp.move(nx, ny)
+                    except Exception as exc:
+                        log(f'[control] pointer move rejected: {type(exc).__name__}: {exc}')
                 elif kind == MOUSE_BUTTON and len(payload) == 10:
                     button, down, nx, ny = struct.unpack('!BBff', payload)
-                    inp.button(button, bool(down), nx, ny)
+                    try:
+                        inp.button(button, bool(down), nx, ny)
+                    except Exception as exc:
+                        log(f'[control] mouse button rejected: {type(exc).__name__}: {exc}')
                 elif kind == SCROLL and len(payload) == 8:
                     dx, dy = struct.unpack('!ii', payload)
-                    inp.scroll(dx, dy)
+                    try:
+                        inp.scroll(dx, dy)
+                    except Exception as exc:
+                        log(f'[control] scroll event rejected: {type(exc).__name__}: {exc}')
                 elif kind == KEY:
                     msg = unpack_json(payload)
                     try:
