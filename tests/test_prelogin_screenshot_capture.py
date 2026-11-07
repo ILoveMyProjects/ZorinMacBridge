@@ -4,7 +4,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SWIFT = (ROOT / 'native/macos/ZMBStreamerLib.swift').read_text(encoding='utf-8')
 SERVER = (ROOT / 'mac_server.py').read_text(encoding='utf-8')
 
-assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.4'
+assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.6'
 
 # LoginWindow on modern macOS must use one-shot SCScreenshotManager samples,
 # not depend solely on a continuous SCStream that can stay authenticated with

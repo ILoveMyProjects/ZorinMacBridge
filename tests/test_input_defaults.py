@@ -5,7 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 gtk = (ROOT / 'linux_client_gtk.py').read_text(encoding='utf-8')
 legacy = (ROOT / 'linux_client.py').read_text(encoding='utf-8')
 
-assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.4'
+assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.6'
 assert 'self.capture_input_var = ValueVar(True)' in gtk
 assert 'self.capture_input_var = tk.BooleanVar(value=True)' in legacy
 assert "self.enter_fullscreen_btn = Gtk.Button(label='Full Screen')" in gtk

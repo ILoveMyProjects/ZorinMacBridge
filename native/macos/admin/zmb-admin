@@ -388,10 +388,72 @@ prelogin_console_active() {
   [ "$owner" = "loginwindow" ] || [ "$owner" = "root" ]
 }
 
+prelogin_process_pids() {
+  /bin/ps -axo pid=,command= 2>/dev/null \
+    | /usr/bin/awk -v needle="$APP_BIN --prelogin-server" 'index($0, needle) {print $1}'
+}
+
 prelogin_process_running() {
-  /bin/ps -axo command= 2>/dev/null \
-    | /usr/bin/grep -F "$APP_BIN --prelogin-server" \
-    | /usr/bin/grep -v '/usr/bin/grep' >/dev/null 2>&1
+  [ -n "$(prelogin_process_pids)" ]
+}
+
+restart_prelogin_current_session() {
+  # Updates can replace the app while LoginWindow is already active.  A running
+  # LaunchAgent process keeps executing the old mapped executable until it is
+  # explicitly restarted, so merely copying the new .app is not enough.
+  prelogin_console_active || return 0
+  local old_pids pid attempt
+  old_pids="$(prelogin_process_pids)"
+  if [ -n "$old_pids" ]; then
+    for pid in $old_pids; do
+      /bin/kill -TERM "$pid" >/dev/null 2>&1 || true
+    done
+    attempt=1
+    while [ "$attempt" -le 20 ]; do
+      local alive=0
+      for pid in $old_pids; do
+        if /bin/kill -0 "$pid" >/dev/null 2>&1; then alive=1; break; fi
+      done
+      [ "$alive" -eq 0 ] && break
+      /bin/sleep 0.25
+      attempt=$((attempt + 1))
+    done
+    for pid in $old_pids; do
+      if /bin/kill -0 "$pid" >/dev/null 2>&1; then
+        /bin/kill -KILL "$pid" >/dev/null 2>&1 || true
+      fi
+    done
+    # Do not mistake a dying old process for the replacement.  The update may
+    # report success only after every PID captured before activation is gone.
+    attempt=1
+    while [ "$attempt" -le 20 ]; do
+      local old_alive=0
+      for pid in $old_pids; do
+        if /bin/kill -0 "$pid" >/dev/null 2>&1; then old_alive=1; break; fi
+      done
+      [ "$old_alive" -eq 0 ] && break
+      /bin/sleep 0.25
+      attempt=$((attempt + 1))
+    done
+    for pid in $old_pids; do
+      /bin/kill -0 "$pid" >/dev/null 2>&1 && return 1
+    done
+  fi
+
+  # KeepAlive normally launches the replacement immediately.  If the job was
+  # not loaded in this LoginWindow session, bootstrap it now.
+  attempt=1
+  while [ "$attempt" -le 40 ]; do
+    if prelogin_process_running; then return 0; fi
+    if [ "$attempt" -eq 4 ]; then
+      /bin/launchctl bootstrap loginwindow "$PRELOGIN_PLIST" >/dev/null 2>&1 \
+        || /bin/launchctl load -w -S LoginWindow "$PRELOGIN_PLIST" >/dev/null 2>&1 \
+        || true
+    fi
+    /bin/sleep 0.25
+    attempt=$((attempt + 1))
+  done
+  return 1
 }
 
 load_prelogin_current_session() {
@@ -1022,13 +1084,43 @@ update_now_cmd() {
     fail "new P0 helper installation failed; previous app restored" 70
   fi
   [ "$repair_out" = "/dev/null" ] || /bin/rm -f "$repair_out"
+
+  # Activate the newly installed runtime before reporting success.  In an Aqua
+  # session restart the normal Desktop LaunchAgent.  At LoginWindow the old
+  # pre-login process must be replaced explicitly; otherwise it keeps serving
+  # the previous executable from memory even though /Applications is updated.
+  if user_session_available "$uid"; then
+    if ! restart_zmb >/dev/null 2>&1; then
+      write_update_status "$latest" "$latest" 0 activation-failed "new app installed but Desktop restart failed"
+      /bin/rm -rf "$backup" "$work"
+      release_update_lock
+      fail "new app installed but Desktop service could not be restarted" 70
+    fi
+  elif prelogin_console_active; then
+    if ! restart_prelogin_current_session; then
+      write_update_status "$latest" "$latest" 0 activation-failed "new app installed but LoginWindow pre-login restart failed"
+      /bin/rm -rf "$backup" "$work"
+      release_update_lock
+      fail "new app installed but LoginWindow pre-login service could not be restarted" 70
+    fi
+    local port activation_attempt=1
+    port="$(settings_value "$home/.zorin-mac-bridge/server-settings.json" port "$DEFAULT_PORT")"
+    while [ "$activation_attempt" -le 30 ]; do
+      port_listening "$port" && break
+      /bin/sleep 0.25
+      activation_attempt=$((activation_attempt + 1))
+    done
+    if ! port_listening "$port"; then
+      write_update_status "$latest" "$latest" 0 activation-failed "new LoginWindow process did not reopen Desktop port $port"
+      /bin/rm -rf "$backup" "$work"
+      release_update_lock
+      fail "new LoginWindow pre-login service did not reopen Desktop port $port" 70
+    fi
+  fi
+
   /bin/rm -rf "$backup" "$work"
   write_update_status "$latest" "$latest" 0 installed ""
   release_update_lock
-
-  if user_session_available "$uid"; then
-    restart_zmb >/dev/null 2>&1 || true
-  fi
   printf 'ok=updated\nprevious=%s\ninstalled=%s\n' "$current" "$latest"
 }
 

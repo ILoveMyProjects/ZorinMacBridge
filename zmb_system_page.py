@@ -528,7 +528,18 @@ class SystemController:
                 self.summary.set_text(f"{action}: command accepted by Mac")
             elif action == "update-now":
                 self.window._dialog("Mac update", output or "Update command completed.")
-                GLib.timeout_add(1800, lambda: (self.refresh(), False)[1])
+
+                def refresh_after_update():
+                    self.refresh()
+                    # update-now can replace/restart the LoginWindow runtime.
+                    # Refresh Bonjour too so the list reflects the running
+                    # process/version instead of keeping the pre-update label.
+                    discover = getattr(self.window, "discover_macs", None)
+                    if callable(discover):
+                        discover()
+                    return False
+
+                GLib.timeout_add(1800, refresh_after_update)
             elif action in {"check-update", "set-auto-update"}:
                 GLib.timeout_add(500, lambda: (self.refresh(), False)[1])
             else:

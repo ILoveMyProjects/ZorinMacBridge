@@ -1,3 +1,20 @@
+## 0.15.6 — VideoSessionRecovery
+
+- Replaces the passive 20-second global video-lock wait with active stale-owner interruption: a replacement video connection shuts down the previous video TLS socket so its Python/native cleanup starts immediately.
+- Adds a 6-second deadline for the first H.264 access unit. A zero-frame native capture now fails with the latest native ScreenCaptureKit diagnostics instead of monopolising the video session indefinitely.
+- Cancels the native Swift capture task during `zmb_streamer_stop`, reducing leaked/hung capture generations during retries.
+- Keeps Desktop/control connected while the independent video channel recovers.
+- Adds a real concurrency regression test proving stale video ownership is interrupted and released within the bounded replacement grace.
+
+## 0.15.5 — PreloginCaptureActivationFix
+
+- Combines the 0.15.4 LoginWindow `SCScreenshotManager.captureSampleBuffer()` video fix with the pre-login update activation logic that had been accidentally dropped when 0.15.4 was based directly on 0.15.2.
+- `update-now` at LoginWindow now captures the old pre-login PID set, terminates it, waits until those exact PIDs are gone, starts the replacement process from the newly installed app, and waits for the Desktop port to reopen before reporting `ok=updated`.
+- If the replacement pre-login runtime cannot be activated, update status is `activation-failed` instead of a false success.
+- Adds regression coverage that activation happens before the installed/success status is emitted.
+- Refreshes Bonjour discovery after `update-now` so the client UI reports the version of the replacement runtime instead of retaining a stale pre-update label.
+- Keeps the 0.15.4 pre-login screenshot capture path and normal Aqua `SCStream` path unchanged.
+
 ## 0.15.4 — PreloginScreenshotCaptureFix
 
 - Corrects the previous diagnosis: after reboot the Mac was in fact running 0.15.2; the stale `v0.14.18` text observed before reboot was not proof that the update failed.

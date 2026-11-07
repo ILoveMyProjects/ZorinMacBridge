@@ -53,8 +53,59 @@ MAX_CLIPBOARD = 2 * 1024 * 1024
 
 # Exactly one ScreenCaptureKit/VideoToolbox streamer may own the native capture
 # pipeline at a time. Video reconnects are intentionally independent from the
-# control channel, so serialize only the video role.
+# control channel, so serialize only the video role.  Keep the active TLS socket
+# separately so a replacement can actively interrupt a stale owner instead of
+# waiting behind it for 20 seconds.
 _VIDEO_SESSION_LOCK = threading.Lock()
+_VIDEO_SESSION_STATE_LOCK = threading.Lock()
+_ACTIVE_VIDEO_SOCKET: ssl.SSLSocket | None = None
+VIDEO_REPLACEMENT_GRACE_SECONDS = 4.0
+VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS = 6.0
+
+
+def _set_active_video_socket(sock: ssl.SSLSocket | None) -> None:
+    global _ACTIVE_VIDEO_SOCKET
+    with _VIDEO_SESSION_STATE_LOCK:
+        _ACTIVE_VIDEO_SOCKET = sock
+
+
+def _clear_active_video_socket(sock: ssl.SSLSocket) -> None:
+    global _ACTIVE_VIDEO_SOCKET
+    with _VIDEO_SESSION_STATE_LOCK:
+        if _ACTIVE_VIDEO_SOCKET is sock:
+            _ACTIVE_VIDEO_SOCKET = None
+
+
+def _interrupt_active_video_session(*, log=print) -> bool:
+    with _VIDEO_SESSION_STATE_LOCK:
+        active = _ACTIVE_VIDEO_SOCKET
+    if active is None:
+        return False
+    try:
+        # TCP shutdown is intentional here.  It wakes the old video thread out of
+        # select()/recv immediately; that thread still owns close() and native cleanup.
+        active.shutdown(socket.SHUT_RDWR)
+        log('[video] forced stale video socket shutdown before replacement')
+    except OSError as exc:
+        log(f'[video] stale video socket shutdown warning: {type(exc).__name__}: {exc}')
+    return True
+
+
+def _acquire_video_session(sock: ssl.SSLSocket, *, log=print) -> None:
+    if not _VIDEO_SESSION_LOCK.acquire(blocking=False):
+        log('[video] previous video session still active; interrupting stale owner before replacement')
+        _interrupt_active_video_session(log=log)
+        if not _VIDEO_SESSION_LOCK.acquire(timeout=VIDEO_REPLACEMENT_GRACE_SECONDS):
+            raise TimeoutError(
+                f'previous video session did not stop within {VIDEO_REPLACEMENT_GRACE_SECONDS:g}s '
+                'after forced socket shutdown'
+            )
+    _set_active_video_socket(sock)
+
+
+def _release_video_session(sock: ssl.SSLSocket) -> None:
+    _clear_active_video_socket(sock)
+    _VIDEO_SESSION_LOCK.release()
 
 
 MAX_FILE_SIZE = 100 * 1024**3
@@ -943,18 +994,34 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
     try:
         with os.fdopen(data_r, 'rb', buffering=0) as stream:
             while True:
+                startup_timeout = VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS if frames == 0 else 15.0
                 try:
-                    header = _read_exact_file(stream, 4, disconnect_sock=sock)
+                    header = _read_exact_file(stream, 4, timeout=startup_timeout, disconnect_sock=sock)
                 except EOFError:
                     runner.join(timeout=0.25)
                     code = result.get('code', -999)
                     detail = next((m for m in reversed(native_messages) if m.startswith(('fatal=', 'stream-stopped', 'encode-error', 'pipe-write-error'))), '')
                     suffix = f': {detail}' if detail else ''
                     raise RuntimeError(f'native in-process H.264 streamer stopped (code={code}){suffix}')
+                except TimeoutError as exc:
+                    if frames == 0:
+                        detail = ' | '.join(native_messages[-6:]) or 'no native capture diagnostics'
+                        raise TimeoutError(
+                            f'no first H.264 access unit within {startup_timeout:g}s; native={detail}'
+                        ) from exc
+                    raise
                 size = struct.unpack('!I', header)[0]
                 if not (1 <= size <= 16 * 1024 * 1024):
                     raise RuntimeError(f'invalid native H.264 access-unit size: {size}')
-                payload = _read_exact_file(stream, size, disconnect_sock=sock)
+                try:
+                    payload = _read_exact_file(stream, size, timeout=startup_timeout, disconnect_sock=sock)
+                except TimeoutError as exc:
+                    if frames == 0:
+                        detail = ' | '.join(native_messages[-6:]) or 'no native capture diagnostics'
+                        raise TimeoutError(
+                            f'first H.264 access unit payload stalled for {startup_timeout:g}s; native={detail}'
+                        ) from exc
+                    raise
                 sock.sendall(pack_packet(VIDEO_H264, payload))
                 frames += 1
                 stat_frames += 1
@@ -1294,14 +1361,11 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
                 f'[video] client profile={quality!r} max_width={max_width} '
                 f'target={target_width}x{target_height} fps={fps:g} bitrate={bitrate} display_id={display_id}'
             )
-            if not _VIDEO_SESSION_LOCK.acquire(blocking=False):
-                log('[video] waiting for previous video session cleanup before starting replacement')
-                if not _VIDEO_SESSION_LOCK.acquire(timeout=20.0):
-                    raise TimeoutError('previous video session did not stop within 20s')
+            _acquire_video_session(sock, log=log)
             try:
                 video_session(sock, fps, max_width, bitrate, display_id, target_width, target_height, prelogin=prelogin, log=log)
             finally:
-                _VIDEO_SESSION_LOCK.release()
+                _release_video_session(sock)
         else:
             file_session(sock, share)
     except (ssl.SSLError, ConnectionError, OSError) as exc:

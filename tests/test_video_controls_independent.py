@@ -3,7 +3,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.4'
+assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.6'
 
 client = (ROOT / 'linux_client.py').read_text(encoding='utf-8')
 gtk = (ROOT / 'linux_client_gtk.py').read_text(encoding='utf-8')

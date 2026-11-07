@@ -347,6 +347,7 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     private var resultCode: Int32 = 0
     private var writePending = false
     private var writerDropped: UInt64 = 0
+    private var runTask: Task<Void, Never>?
 
     init(fps: Int32, maxWidth: Int, bitrate: Int, targetWidth: Int, targetHeight: Int, displayID: CGDirectDisplayID, prelogin: Bool, outputFD: Int32, logFD: Int32) {
         self.fps = max(1, min(fps, 60))
@@ -375,14 +376,28 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func runBlocking() -> Int32 {
-        Task {
+        let task = Task {
             do {
                 try await self.start()
+            } catch is CancellationError {
+                self.requestStop(code: 0, reason: nil)
             } catch {
                 self.requestStop(code: 2, reason: "fatal=\(error.localizedDescription)")
             }
         }
+        stateLock.lock()
+        if finished {
+            stateLock.unlock()
+            task.cancel()
+        } else {
+            runTask = task
+            stateLock.unlock()
+        }
         done.wait()
+        task.cancel()
+        stateLock.lock()
+        runTask = nil
+        stateLock.unlock()
         // Drain queued writes before closing the pipe ends so the Python side
         // receives complete access units and then observes EOF deterministically.
         writeQueue.sync {}
@@ -401,10 +416,13 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         resultCode = code
         let activeStream = stream
         let activeCompression = compression
+        let activeTask = runTask
         stream = nil
         compression = nil
+        runTask = nil
         stateLock.unlock()
 
+        activeTask?.cancel()
         if let reason { log(reason) }
         if let activeStream {
             activeStream.stopCapture(completionHandler: nil)

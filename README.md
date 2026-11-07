@@ -1,8 +1,12 @@
+## 0.15.6 video session recovery
+
+0.15.6 fixes the pre-login video lifecycle that could leave a stale native video owner holding the global session lock while the client waited for a first frame. A replacement video connection now actively shuts down the stale owner's TLS socket and waits only a bounded 4-second cleanup grace instead of passively blocking for 20 seconds. The first H.264 access unit also has a 6-second startup deadline; if native capture produces no frame, the server returns the latest native ScreenCaptureKit diagnostics instead of leaving the client on an indefinite `waiting for first frame` state. The native Swift runner now cancels its capture task during stop/cleanup.
+
 # ZorinMacBridge
 
-## 0.15.4 pre-login screenshot capture fix
+## 0.15.5 pre-login capture + activation fix
 
-0.15.4 corrects the actual black LoginWindow failure observed on a real Mac running 0.15.2. After reboot, discovery proved that the Mac server was already `v0.15.2`; the earlier `v0.14.18` label was stale state before the reboot, not a failed update.
+0.15.5 combines the 0.15.4 LoginWindow screenshot-capture path with the missing pre-login update activation step. After `update-now` at LoginWindow, the old pre-login PID must exit and a new process from the updated `/Applications` bundle must reopen the Desktop port before the update can report success. The screenshot-capture fix from 0.15.4 remains unchanged. After a successful Mac update, the System page also triggers a fresh Bonjour scan so the UI reflects the newly running version instead of retaining a stale pre-update label.
 
 For the macOS LoginWindow session on macOS 14+, pre-login video now uses `SCScreenshotManager.captureSampleBuffer()` and feeds those samples into the existing VideoToolbox H.264 encoder. The normal logged-in Aqua desktop keeps the existing continuous `SCStream` path. LoginWindow also performs the same Screen Recording preflight instead of silently entering a zero-frame capture when TCC is unavailable.
 

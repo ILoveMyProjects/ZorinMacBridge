@@ -3,7 +3,7 @@ import importlib.util
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "0.15.4"
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "0.15.6"
 
 sys.path.insert(0, str(ROOT))
 from discovery import desktop_connect_strategy
