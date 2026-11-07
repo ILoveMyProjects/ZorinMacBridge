@@ -10,6 +10,7 @@ case "$orig" in
   "zmb-admin stop-zmb") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin stop-zmb ;;
   "zmb-admin restart-zmb") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin restart-zmb ;;
   "zmb-admin recover-desktop") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin recover-desktop ;;
+  "zmb-admin recover-prelogin") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin recover-prelogin ;;
   "zmb-admin repair-launch-agent") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin repair-launch-agent ;;
   "zmb-admin pairing-list") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin pairing-list ;;
   "zmb-admin logs") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin logs ;;

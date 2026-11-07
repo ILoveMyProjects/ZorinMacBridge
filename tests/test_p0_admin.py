@@ -43,6 +43,7 @@ def main() -> None:
     assert backend._remote_command('update-now') == 'zmb-admin update-now'
     assert backend._remote_command('set-auto-update', 'install') == 'zmb-admin set-auto-update install'
     assert backend._remote_command('recover-desktop') == 'zmb-admin recover-desktop'
+    assert backend._remote_command('recover-prelogin') == 'zmb-admin recover-prelogin'
     assert backend._remote_command('set-wake-network', 'on') == 'zmb-admin set-wake-network on'
     assert backend._remote_command('xcode-overview') == 'zmb-admin xcode-overview'
     assert backend._remote_command('sim-boot', '01234567-89AB-CDEF-0123-456789ABCDEF') == 'zmb-admin sim-boot 01234567-89AB-CDEF-0123-456789ABCDEF'
@@ -64,6 +65,7 @@ def main() -> None:
     assert backend.machine_state(ready) == 'DESKTOP_READY'
     assert backend.machine_state({**ready, 'zmb_app_running': '0'}) == 'RECOVERY_NEEDED'
     assert backend.machine_state({**ready, 'user_session_available': '0'}) == 'SYSTEM_ONLINE'
+    assert backend.status_summary({**ready, 'user_session_available': '0', 'prelogin_ready': '1'}).startswith('LOGIN WINDOW READY')
     assert backend.machine_state({**ready, 'admin_heartbeat_age_seconds': '99'}) == 'DEGRADED'
     blocked, notes = backend.reboot_readiness({'filevault': 'on', 'filevault_ssh_unlock_eligible': '0'})
     assert blocked is False and notes
@@ -130,6 +132,7 @@ def main() -> None:
     assert 'zmb-admin update-now' in update_gateway
     assert 'zmb-admin set-auto-update install' in update_gateway
     assert 'zmb-admin recover-desktop' in update_gateway
+    assert 'zmb-admin recover-prelogin' in update_gateway
     assert 'zmb-admin xcode-overview' in update_gateway
     assert 'zmb-admin sim-boot' in update_gateway and 'zmb-admin sim-shutdown' in update_gateway
     assert 'prepare_macos_update_for_root' in updates_py
@@ -151,6 +154,7 @@ def main() -> None:
     assert '/bin/sleep 0.5' in installer
     assert 'Recent launchd messages for ZorinMacBridge:' in installer
     assert '/usr/local/sbin/zmb-admin recover-desktop' in installer
+    assert '/usr/local/sbin/zmb-admin recover-prelogin' in installer
     assert '/usr/local/sbin/zmb-admin xcode-overview' in installer
 
     discovery = (ROOT / 'discovery.py').read_text(encoding='utf-8')

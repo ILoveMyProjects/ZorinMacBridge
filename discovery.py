@@ -64,6 +64,22 @@ class DiscoveredServer:
         return f'{self.name} — {location}:{self.port}{suffix}'
 
 
+def desktop_connect_strategy(*, desktop_available: bool, system_available: bool, paired_only: bool = False) -> str:
+    """Choose the first recovery path for Desktop Connect.
+
+    A live P0/System advertisement proves that the Mac is already awake.  In
+    that state a missing Desktop advertisement means that the Aqua or
+    LoginWindow desktop endpoint needs recovery; sending Wake-on-LAN is both
+    misleading and ineffective.  Wake is reserved for a saved/offline Mac
+    where no live System service is visible.
+    """
+    if desktop_available and not paired_only:
+        return 'connect'
+    if system_available and not paired_only:
+        return 'recover-online'
+    return 'wake'
+
+
 class LanAdvertiser:
     """Advertise the desktop server over LAN mDNS only while this object is running."""
 

@@ -147,6 +147,7 @@ $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin start-zmb
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin stop-zmb
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin restart-zmb
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin recover-desktop
+$TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin recover-prelogin
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin repair-launch-agent
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin pairing-list
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin unpair *
@@ -185,14 +186,17 @@ SUDOERS
 /usr/bin/plutil -lint "$HERE/com.ilovemyprojects.zorinmacbridge.prelogin.plist" >/dev/null
 /usr/bin/install -o root -g wheel -m 0644 "$HERE/com.ilovemyprojects.zorinmacbridge.prelogin.plist" "$PRELOGIN_PLIST"
 /usr/bin/plutil -lint "$PRELOGIN_PLIST" >/dev/null
-# The job is session-scoped, not a system LaunchDaemon.  If loginwindow is
-# currently present, best-effort kick it now; otherwise launchd will load it
-# automatically on the next boot/logout when LoginWindow appears.
-/bin/launchctl enable "gui/0/${PRELOGIN_LABEL}" >/dev/null 2>&1 || true
-if /bin/launchctl print gui/0 >/dev/null 2>&1; then
-  /bin/launchctl bootout "gui/0/${PRELOGIN_LABEL}" >/dev/null 2>&1 || true
-  /bin/launchctl bootstrap gui/0 "$PRELOGIN_PLIST" >/dev/null 2>&1 || true
-  /bin/launchctl kickstart -k "gui/0/${PRELOGIN_LABEL}" >/dev/null 2>&1 || true
+# The LoginWindow agent is NOT a gui/0 job.  gui/<uid> is an Aqua-login
+# domain and does not exist for the pre-login root session.  When an update is
+# installed while LoginWindow is already active, load the new agent into that
+# existing session immediately; otherwise launchd will pick it up on the next
+# LoginWindow session.  Keep a legacy -S LoginWindow fallback for macOS builds
+# whose launchctl does not accept the session-name bootstrap spelling.
+CONSOLE_OWNER="$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || true)"
+if [ "$CONSOLE_OWNER" = "loginwindow" ] || [ "$CONSOLE_OWNER" = "root" ]; then
+  /bin/launchctl bootstrap loginwindow "$PRELOGIN_PLIST" >/dev/null 2>&1 \
+    || /bin/launchctl load -w -S LoginWindow "$PRELOGIN_PLIST" >/dev/null 2>&1 \
+    || true
 fi
 
 bootstrap_system_job   "$ADMIN_LABEL"   "$HERE/com.ilovemyprojects.zorinmacbridge.admin.plist"   "/Library/LaunchDaemons/${ADMIN_LABEL}.plist"

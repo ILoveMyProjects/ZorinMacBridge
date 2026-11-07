@@ -25,7 +25,7 @@ def main() -> None:
     test_shutdown_module_is_packaged_and_verified()
     test_release_smoke_imports_from_staged_package_tree()
     test_runtime_import_has_packaged_provider()
-    assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.18'
+    assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.19'
     print('linux package manifest regression tests: OK')
 
 

@@ -1,5 +1,10 @@
 # ZorinMacBridge
 
+## 0.14.19 pre-login connect fix
+
+When Bonjour/P0 reports **system online** but the normal Aqua Desktop is absent, the client now treats the Mac as awake and recovers the LoginWindow endpoint through the paired P0 channel. It no longer sends Wake-on-LAN merely because the Desktop role is missing. The macOS helper also removes the invalid `gui/0` assumption and can load the pre-login LaunchAgent into an already-existing LoginWindow session after an in-place update.
+
+
 ## v0.14.18 reboot/login-window recovery + stable video reconfiguration
 
 After a normal macOS reboot, ZorinMacBridge now installs a dedicated `LoginWindow` LaunchAgent that starts the same authenticated ZMB Desktop endpoint before the target user has an Aqua session. It reuses the existing TLS identity and password verifier, shows the physical macOS login window, and uses a native IOHIDSystem path for pre-login keyboard/mouse. After successful login, launchd tears down the LoginWindow context and the normal Aqua ZMB server takes over; the Linux client reconnects and restores the selected desktop mode. Files and 2K/4K virtual-display mode remain disabled while still at loginwindow.

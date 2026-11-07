@@ -21,7 +21,7 @@ REMOTE_PREFIX = "zmb-admin"
 PROTOCOL_VERSION = "2"
 
 ADMIN_ACTIONS = {
-    "status", "start-zmb", "stop-zmb", "restart-zmb", "recover-desktop", "repair-launch-agent",
+    "status", "start-zmb", "stop-zmb", "restart-zmb", "recover-desktop", "recover-prelogin", "repair-launch-agent",
     "pairing-list", "logs", "diagnose", "recover-all", "check-update", "update-now", "sleep", "reboot", "shutdown",
     "xcode-overview", "xcode-open", "sim-open", "wake-display",
 }
@@ -666,6 +666,8 @@ def status_summary(data: dict[str, str]) -> str:
     if age < 0 or age > 60:
         return "DEGRADED — system service heartbeat is stale"
     if data.get("user_session_available") != "1":
+        if data.get("prelogin_ready") == "1":
+            return "LOGIN WINDOW READY — remote login screen is available"
         return "SYSTEM ONLINE — no logged-in GUI session"
     if data.get("zmb_app_running") == "1" and data.get("zmb_port_listening") == "1":
         return "READY — system and remote desktop are online"

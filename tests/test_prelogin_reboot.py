@@ -4,7 +4,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.18'
+assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.19'
 
 server = (ROOT / 'mac_server.py').read_text(encoding='utf-8')
 gui = (ROOT / 'mac_server_gui.py').read_text(encoding='utf-8')
@@ -67,6 +67,13 @@ assert 'com.ilovemyprojects.zorinmacbridge.prelogin.plist' in install
 assert '/Library/LaunchAgents/com.ilovemyprojects.zorinmacbridge.prelogin.plist' in uninstall
 assert 'repair_prelogin_agent()' in admin
 assert 'PRELOGIN_AGENT_MISSING' in admin
+assert 'recover_prelogin_cmd()' in admin
+assert 'recover-prelogin) recover_prelogin_cmd' in admin
+assert 'prelogin_ready=%s' in admin
+assert 'prelogin_process_running()' in admin
+assert 'gui/0/${PRELOGIN_LABEL}' not in admin
+assert 'launchctl bootstrap loginwindow' in admin
+assert 'launchctl load -w -S LoginWindow' in admin
 
 # Linux client recognises loginwindow state and does not try the file role until
 # the normal Aqua server reconnects.
@@ -75,6 +82,9 @@ assert 'if not self.connected or self.prelogin_session:' in client
 assert "Connected — macOS login window" in gtk
 assert 'self.connected and not self.prelogin_session' in gtk
 assert 'if not self.prelogin_session:' in gtk
+assert 'Desktop Connect: System/P0 is online while Desktop is absent; using session recovery instead of Wake-on-LAN.' in gtk
+assert "action = 'recover-prelogin' if no_gui else 'recover-desktop'" in gtk
+assert 'self.selected_system_available = bool(server.admin_available and not server.paired_only)' in gtk
 
 # This feature must not weaken login/FileVault policy.
 affected = '\n'.join([gui, server, install, admin, native_c])

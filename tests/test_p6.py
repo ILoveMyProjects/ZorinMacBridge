@@ -54,6 +54,9 @@ def test_source_guards():
 
     assert 'diagnose_cmd()' in admin
     assert 'recover_all_cmd()' in admin
+    assert 'recover_prelogin_cmd()' in admin
+    assert 'PRELOGIN_NOT_RUNNING' in admin
+    assert 'PRELOGIN_PORT_DOWN' in admin
     assert 'APP_SIGNATURE_INVALID' in admin
     assert 'UPDATE_LOCK_STALE' in admin
     assert 'SYSTEM_MDNS_DOWN' in admin

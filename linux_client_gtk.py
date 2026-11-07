@@ -45,7 +45,7 @@ from linux_client import (
     remote_join,
 )
 from protocol import CLIPBOARD_GET, CLIPBOARD_SET, KEY, MOUSE_BUTTON, MOUSE_MOVE, SCROLL, TEXT, pack_json, pack_packet
-from discovery import DiscoveredServer, discover_servers
+from discovery import DiscoveredServer, desktop_connect_strategy, discover_servers
 from resources import resource_path
 from settings import client_record
 from zmb_pairing_state import DesktopTrustMismatch, ensure_desktop_trust, persist_desktop_trust, trusted_desktop_fingerprint
@@ -204,6 +204,8 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.selected_server_id = ''
         self.selected_server_name = ''
         self.selected_desktop_available = True
+        self.selected_system_available = False
+        self.selected_paired_only = False
         self.remember_credentials_active = True
         self._connect_snapshot = None
         self._desktop_display_snapshot = None
@@ -253,6 +255,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self._credential_serial = 0
         self._file_render_serial = 0
         self._desktop_trust_recovery_busy = False
+        self._online_desktop_recovery_busy = False
         self._wake_connect_busy = False
         self._display_wake_busy = False
         self._last_display_wake_at = 0.0
@@ -1136,6 +1139,8 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.selected_server_id = server.server_id or f'{server.ip}:{server.port}'
         self.selected_server_name = server.name
         self.selected_desktop_available = bool(server.desktop_available and not server.paired_only)
+        self.selected_system_available = bool(server.admin_available and not server.paired_only)
+        self.selected_paired_only = bool(server.paired_only)
         record = client_record(self.selected_server_id)
         saved_fp = str(record.get('fingerprint', '')).strip()
         if saved_fp:
@@ -1258,6 +1263,119 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             return False
 
         threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def _recover_online_mac_then_connect(self) -> bool:
+        """Recover Desktop through live P0 when the Mac is already online.
+
+        This is the reboot/loginwindow path.  A live System advertisement means
+        Wake-on-LAN must not run: query the pinned P0 channel, recover either the
+        LoginWindow endpoint or the normal Aqua endpoint, then connect to the
+        existing TLS identity.
+        """
+        if self._online_desktop_recovery_busy:
+            self.status_var.set('Mac is online — preparing remote login…')
+            return True
+        sid = str(self.selected_server_id or '').strip()
+        host = str(self.ip_var.get() or '').strip()
+        profile = get_profile(sid, host)
+        if not profile:
+            return False
+
+        self._online_desktop_recovery_busy = True
+        self.connect_btn.set_sensitive(False)
+        self.status_var.set('Mac is online — preparing remote login…')
+        self._log('INFO', 'Desktop Connect: System/P0 is online while Desktop is absent; using session recovery instead of Wake-on-LAN.')
+
+        def port_open(candidate_host: str, candidate_port: int) -> bool:
+            try:
+                import socket as _socket
+                with _socket.create_connection((candidate_host, candidate_port), timeout=1.2):
+                    return True
+            except Exception:
+                return False
+
+        def worker():
+            active_profile = dict(profile)
+            try:
+                status = get_status_for_profile(active_profile)
+            except Exception as exc:
+                GLib.idle_add(done, None, f'System service stopped responding: {exc}', True)
+                return
+
+            no_gui = status.get('user_session_available') != '1'
+            action = 'recover-prelogin' if no_gui else 'recover-desktop'
+            mode = 'macOS login window' if no_gui else 'Aqua Desktop'
+            self._log('INFO', f'Desktop Connect: Mac is awake; requesting {mode} recovery through P0 ({action}).')
+            action_error = ''
+            try:
+                result = run_action_for_profile(active_profile, action, timeout=25)
+                if result.returncode != 0:
+                    action_error = (result.stderr or result.stdout or f'{action} exited {result.returncode}').strip()
+            except Exception as exc:
+                action_error = str(exc)
+
+            deadline = time.monotonic() + 25.0
+            port = int(active_profile.get('desktop_port') or self.port_var.get() or 45950)
+            while time.monotonic() < deadline and not self._closing:
+                candidate_host = str(active_profile.get('host') or host)
+                if port_open(candidate_host, port):
+                    GLib.idle_add(done, active_profile, None, False)
+                    return
+                # DHCP may have changed across reboot.  Prefer the same stable
+                # server_id and update transport address only.
+                try:
+                    for item in discover_servers(1.2):
+                        if sid and item.server_id == sid:
+                            active_profile['host'] = item.ip
+                            if item.desktop_available and port_open(item.ip, int(item.port or port)):
+                                active_profile['desktop_port'] = int(item.port or port)
+                                GLib.idle_add(done, active_profile, None, False)
+                                return
+                            break
+                except Exception:
+                    pass
+                time.sleep(1.0)
+
+            detail = action_error or (
+                'LoginWindow pre-login Desktop did not become reachable.' if no_gui
+                else 'Desktop service did not become reachable after recovery.'
+            )
+            GLib.idle_add(done, None, detail, False)
+
+        def done(active_profile, error, system_unreachable):
+            self._online_desktop_recovery_busy = False
+            self.connect_btn.set_sensitive(True)
+            if system_unreachable:
+                # Bonjour can be stale for a machine that has just gone to sleep.
+                # Only after the pinned P0 channel itself fails do we permit WOL.
+                self.selected_system_available = False
+                self._log('WARNING', 'Desktop Connect: live System advertisement was stale; falling back to Wake-on-Connect.')
+                if self._wake_sleeping_mac_then_connect():
+                    return False
+            if error:
+                self.status_var.set('Mac online — remote login service unavailable.')
+                self._log('ERROR', 'Online Desktop recovery failed: ' + error)
+                self._dialog(
+                    'Remote login service unavailable',
+                    'The Mac is online, but ZorinMacBridge could not start the remote login/Desktop endpoint. '
+                    'Wake-on-LAN was not used because the System service is already reachable.\n\n' + error,
+                )
+                return False
+            if active_profile:
+                live_host = str(active_profile.get('host') or host)
+                live_port = int(active_profile.get('desktop_port') or self.port_var.get() or 45950)
+                self.ip_var.set(live_host)
+                self.port_var.set(str(live_port))
+                if sid and live_host:
+                    save_profile(sid, live_host, {**active_profile, 'host': live_host, 'desktop_port': live_port})
+            self.selected_desktop_available = True
+            self.status_var.set('Remote login service ready — connecting…')
+            self._log('INFO', 'Desktop Connect: recovered online Desktop/pre-login endpoint; starting normal TLS connection.')
+            GLib.timeout_add(100, lambda: (self.connect_remote(), GLib.SOURCE_REMOVE)[1])
+            return False
+
+        threading.Thread(target=worker, daemon=True, name='zmb-online-desktop-recovery').start()
         return True
 
     def _wake_sleeping_mac_then_connect(self) -> bool:
@@ -1394,7 +1512,18 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
     def connect_remote(self) -> None:
         if self.connected or (self.net_thread is not None and self.net_thread.is_alive()):
             return
-        if not self.selected_desktop_available:
+        strategy = desktop_connect_strategy(
+            desktop_available=self.selected_desktop_available,
+            system_available=self.selected_system_available,
+            paired_only=self.selected_paired_only,
+        )
+        if strategy == 'recover-online':
+            if self._recover_online_mac_then_connect():
+                return
+            self.status_var.set('Mac is online, but no paired System profile is available for Desktop recovery.')
+            self._log('WARNING', 'Online Desktop recovery skipped because no paired System profile exists for the selected Mac.')
+            return
+        if strategy == 'wake':
             if self._wake_sleeping_mac_then_connect():
                 return
             self.status_var.set('Saved Mac is offline and cannot be woken until it has been paired once in System.')

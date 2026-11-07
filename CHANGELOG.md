@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.14.19 — PreloginConnectFix
+
+- Fixed Desktop Connect misclassifying `system online + desktop absent` as a sleeping/offline Mac. Wake-on-LAN is now used only after the live P0/System channel is unavailable.
+- Added bounded P0 `recover-prelogin` for `GUI_SESSION=NO`, with remote LoginWindow helper recovery and readiness polling.
+- Removed invalid `gui/0` launchd handling for the LoginWindow agent. In-place updates performed while LoginWindow already exists now attempt to load the new agent into that session immediately, with a legacy `-S LoginWindow` fallback.
+- Added pre-login process/readiness status and pre-login stdout/stderr to P0 logs.
+- Added regression coverage for the exact `system online -> recover prelogin -> connect` decision so a green test suite can no longer silently accept the previous WOL behavior.
+
+
 ## 0.14.18 — PreloginRecovery + VideoRestartStability
 
 - Adds a root **LoginWindow LaunchAgent** in `/Library/LaunchAgents` so ZorinMacBridge can start a pre-login Desktop endpoint after a normal macOS reboot, before the target user's Aqua session exists.
