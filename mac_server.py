@@ -633,7 +633,7 @@ class NativeStreamerLibrary:
         self.lib = ctypes.CDLL(str(self.path))
         self.lib.zmb_streamer_create.argtypes = [
             ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32,
-            ctypes.c_uint32, ctypes.c_int32, ctypes.c_int32
+            ctypes.c_uint32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32
         ]
         self.lib.zmb_streamer_create.restype = ctypes.c_void_p
         self.lib.zmb_streamer_run.argtypes = [ctypes.c_void_p]
@@ -846,8 +846,14 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
     if this exact running build is not already authorized, fail before touching
     ScreenCaptureKit and tell the client what the operator must do locally.
     """
-    permission = None if prelogin else screen_capture_permission_status()
+    permission = screen_capture_permission_status()
     if permission is False:
+        if prelogin:
+            raise RuntimeError(
+                'Screen Recording is not granted to ZorinMacBridge Server in the LoginWindow session. '
+                'Grant Screen & System Audio Recording to ZorinMacBridge Server while logged in, then reboot. '
+                'Pre-login video cannot silently bypass macOS TCC.'
+            )
         raise RuntimeError(
             'Screen Recording is not granted to this exact ZorinMacBridge Server build. '
             'Open Privacy & Security > Screen Recording on the Mac, enable ZorinMacBridge Server, '
@@ -889,6 +895,7 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
         max(0, min(int(target_width), 3840)),
         max(0, min(int(target_height), 2160)),
         max(0, min(int(capture_display_id), 0xFFFFFFFF)),
+        1 if prelogin else 0,
         native_data_w,
         native_log_w,
     )

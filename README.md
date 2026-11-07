@@ -1,13 +1,14 @@
 # ZorinMacBridge
 
-## 0.15.2 pre-login visible/input fix
+## 0.15.4 pre-login screenshot capture fix
 
-The macOS LoginWindow stream now preserves ScreenCaptureKit's initial `.started` frame, so a static login screen is not discarded before the Linux client can render it. Remote input is held until that first frame is decoded. LoginWindow input keeps IOHID as the first path and falls back to Quartz session events when modern macOS rejects `IOHIDPostEvent` as not privileged; individual rejected pointer events no longer tear down the whole Desktop connection.
+0.15.4 corrects the actual black LoginWindow failure observed on a real Mac running 0.15.2. After reboot, discovery proved that the Mac server was already `v0.15.2`; the earlier `v0.14.18` label was stale state before the reboot, not a failed update.
 
-The 0.15.1 session-password fix remains included: local GTK fields such as **ZMB session password** keep keyboard focus before Desktop connection, and a bad session password does not auto-reconnect in a loop.
+For the macOS LoginWindow session on macOS 14+, pre-login video now uses `SCScreenshotManager.captureSampleBuffer()` and feeds those samples into the existing VideoToolbox H.264 encoder. The normal logged-in Aqua desktop keeps the existing continuous `SCStream` path. LoginWindow also performs the same Screen Recording preflight instead of silently entering a zero-frame capture when TCC is unavailable.
 
-**Important:** the black LoginWindow fix is primarily in the macOS server/native streamer. Updating only the Linux client is not sufficient; discovery must show the Mac server on 0.15.2 before validating reboot/login-window behavior.
+The 0.15.2 input hardening remains: remote input waits for the first decoded pre-login frame, individual rejected input events do not kill the Desktop session, and the IOHID-to-Quartz fallback is retained.
 
+**0.15.3 is withdrawn and should not be released.** It was based on the incorrect conclusion that 0.15.2 had not become active after the update.
 
 ## 0.15.0 pre-login connect fix
 

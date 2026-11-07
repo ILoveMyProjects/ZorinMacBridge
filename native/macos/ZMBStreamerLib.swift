@@ -333,6 +333,7 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     private let targetWidth: Int
     private let targetHeight: Int
     private let displayID: CGDirectDisplayID
+    private let prelogin: Bool
     private let output: FileHandle
     private let logOutput: FileHandle
     private let sampleQueue = DispatchQueue(label: "com.ilovemyprojects.zorinmacbridge.capture", qos: .userInteractive)
@@ -347,13 +348,14 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     private var writePending = false
     private var writerDropped: UInt64 = 0
 
-    init(fps: Int32, maxWidth: Int, bitrate: Int, targetWidth: Int, targetHeight: Int, displayID: CGDirectDisplayID, outputFD: Int32, logFD: Int32) {
+    init(fps: Int32, maxWidth: Int, bitrate: Int, targetWidth: Int, targetHeight: Int, displayID: CGDirectDisplayID, prelogin: Bool, outputFD: Int32, logFD: Int32) {
         self.fps = max(1, min(fps, 60))
         self.maxWidth = max(640, maxWidth)
         self.bitrate = max(1_000_000, bitrate)
         self.targetWidth = max(0, targetWidth)
         self.targetHeight = max(0, targetHeight)
         self.displayID = displayID
+        self.prelogin = prelogin
         self.output = FileHandle(fileDescriptor: outputFD, closeOnDealloc: true)
         self.logOutput = FileHandle(fileDescriptor: logFD, closeOnDealloc: true)
         super.init()
@@ -487,11 +489,65 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
             "target=\(width)x\(height) crop=\(sourceRect.map { NSStringFromRect($0) } ?? "full")"
         )
 
+        if prelogin {
+            if #available(macOS 14.0, *) {
+                log("prelogin-capture-mode=screenshot-manager width=\(width) height=\(height) fps=\(min(fps, 10)) bitrate=\(bitrate)")
+                try await runPreloginScreenshotLoop(filter: filter, configuration: config)
+                return
+            }
+            log("prelogin-capture-mode=stream-fallback macos<14")
+        }
+
         let newStream = SCStream(filter: filter, configuration: config, delegate: self)
         try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
         guard installStreamUnlessFinished(newStream) else { return }
         try await newStream.startCapture()
         log("stream-started width=\(width) height=\(height) fps=\(fps) bitrate=\(bitrate)")
+    }
+
+    @available(macOS 14.0, *)
+    private func runPreloginScreenshotLoop(filter: SCContentFilter, configuration: SCStreamConfiguration) async throws {
+        let pollFPS = max(1, min(Int(fps), 10))
+        let duration = CMTime(value: 1, timescale: CMTimeScale(pollFPS))
+        let sleepNS = UInt64(1_000_000_000 / pollFPS)
+        var frameIndex: Int64 = 0
+        var consecutiveFailures = 0
+
+        while true {
+            stateLock.lock()
+            let isFinished = finished
+            let activeCompression = compression
+            stateLock.unlock()
+            if isFinished { return }
+            guard let activeCompression else {
+                throw NSError(domain: "ZorinMacBridge", code: 41, userInfo: [NSLocalizedDescriptionKey: "VideoToolbox encoder disappeared during pre-login capture"])
+            }
+
+            do {
+                let sampleBuffer = try await SCScreenshotManager.captureSampleBuffer(
+                    contentFilter: filter,
+                    configuration: configuration
+                )
+                stateLock.lock()
+                let stoppedAfterCapture = finished
+                stateLock.unlock()
+                if stoppedAfterCapture { return }
+
+                guard sampleBuffer.isValid, let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+                    throw NSError(domain: "ZorinMacBridge", code: 42, userInfo: [NSLocalizedDescriptionKey: "ScreenCaptureKit screenshot contained no image buffer"])
+                }
+                consecutiveFailures = 0
+                let pts = CMTime(value: frameIndex, timescale: CMTimeScale(pollFPS))
+                frameIndex &+= 1
+                encodeImageBuffer(activeCompression, imageBuffer: imageBuffer, pts: pts, duration: duration)
+            } catch {
+                consecutiveFailures += 1
+                log("prelogin-screenshot-error count=\(consecutiveFailures) error=\(error.localizedDescription)")
+                if consecutiveFailures >= 3 { throw error }
+            }
+
+            try await Task.sleep(nanoseconds: sleepNS)
+        }
     }
 
     private func installStreamUnlessFinished(_ newStream: SCStream) -> Bool {
@@ -573,8 +629,12 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         let duration = CMTime(value: 1, timescale: CMTimeScale(fps))
+        encodeImageBuffer(activeCompression, imageBuffer: imageBuffer, pts: pts, duration: duration)
+    }
+
+    private func encodeImageBuffer(_ session: VTCompressionSession, imageBuffer: CVImageBuffer, pts: CMTime, duration: CMTime) {
         let status = VTCompressionSessionEncodeFrame(
-            activeCompression,
+            session,
             imageBuffer: imageBuffer,
             presentationTimeStamp: pts,
             duration: duration,
@@ -779,7 +839,7 @@ public func zmb_string_free(_ pointer: UnsafeMutablePointer<CChar>?) {
 }
 
 @_cdecl("zmb_streamer_create")
-public func zmb_streamer_create(_ fps: Int32, _ maxWidth: Int32, _ bitrate: Int32, _ targetWidth: Int32, _ targetHeight: Int32, _ displayID: UInt32, _ outputFD: Int32, _ logFD: Int32) -> UnsafeMutableRawPointer? {
+public func zmb_streamer_create(_ fps: Int32, _ maxWidth: Int32, _ bitrate: Int32, _ targetWidth: Int32, _ targetHeight: Int32, _ displayID: UInt32, _ prelogin: Int32, _ outputFD: Int32, _ logFD: Int32) -> UnsafeMutableRawPointer? {
     guard #available(macOS 13.0, *) else { return nil }
     let streamer = H264ScreenStreamer(
         fps: fps,
@@ -788,6 +848,7 @@ public func zmb_streamer_create(_ fps: Int32, _ maxWidth: Int32, _ bitrate: Int3
         targetWidth: Int(targetWidth),
         targetHeight: Int(targetHeight),
         displayID: CGDirectDisplayID(displayID),
+        prelogin: prelogin != 0,
         outputFD: outputFD,
         logFD: logFD
     )

@@ -31,5 +31,5 @@ assert 'def _remote_input_ready(self)' in gtk
 assert 'self.prelogin_session and not self.prelogin_video_ready' in gtk
 assert 'waiting for first frame' in gtk
 
-assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.2'
+assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.4'
 print('pre-login visible/input regression tests: OK')

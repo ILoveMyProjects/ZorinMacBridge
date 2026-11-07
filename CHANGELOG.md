@@ -1,3 +1,12 @@
+## 0.15.4 — PreloginScreenshotCaptureFix
+
+- Corrects the previous diagnosis: after reboot the Mac was in fact running 0.15.2; the stale `v0.14.18` text observed before reboot was not proof that the update failed.
+- Uses `SCScreenshotManager.captureSampleBuffer()` for macOS LoginWindow capture on macOS 14+ instead of relying on a continuous `SCStream` that can authenticate successfully yet deliver no frames in the pre-login session.
+- Keeps the normal logged-in Aqua desktop on the existing low-latency continuous `SCStream` path.
+- Checks Screen Recording authorization in the LoginWindow process too; a missing TCC grant now returns an explicit error instead of an authenticated black video channel with zero frames.
+- Keeps the 0.15.2 non-fatal pre-login input handling and IOHID/Quartz fallback unchanged.
+- 0.15.3 is withdrawn: it addressed an incorrect update-activation diagnosis and should not be released.
+
 ## 0.15.2 — PreloginVisibleInputFix
 
 - Fixed a black pre-login viewer caused by discarding ScreenCaptureKit's `.started` first frame; the initial macOS login-window frame is now encoded and sent.
