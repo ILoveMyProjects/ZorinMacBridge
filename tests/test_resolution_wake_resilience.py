@@ -1,7 +1,7 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "0.14.15"
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "0.14.17"
 
 client = (ROOT / "linux_client.py").read_text(encoding="utf-8")
 gtk = (ROOT / "linux_client_gtk.py").read_text(encoding="utf-8")
@@ -10,8 +10,8 @@ swift = (ROOT / "native/macos/ZMBStreamerLib.swift").read_text(encoding="utf-8")
 admin = (ROOT / "native/macos/admin/zmb-admin").read_text(encoding="utf-8")
 
 # Explicit resolution presets are actual 16:9 output rasters.
-assert "'2K': (2560, 1440)" in client
-assert "'4K': (3840, 2160)" in client
+assert "'2K': {'max_width': 2560, 'target_width': 2560, 'target_height': 1440, 'virtual': True}" in client
+assert "'4K': {'max_width': 3840, 'target_width': 3840, 'target_height': 2160, 'virtual': True}" in client
 assert "target_width" in server and "target_height" in server
 assert "zmb_virtual_display_ensure" in swift
 assert "CGVirtualDisplayDescriptor" in swift

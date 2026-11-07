@@ -1,5 +1,10 @@
 # ZorinMacBridge
 
+## v0.14.17 fullscreen during video retry
+
+A transient H.264/ScreenCaptureKit failure no longer disables the **Full Screen** control while the authenticated Desktop/control session remains connected. The client reports `Connected — video retrying: ...`, keeps keyboard/mouse available, and retries video independently.
+
+
 ## v0.14.10 repository layout cleanup
 
 0.14.10 is a source-layout cleanup only; runtime behavior is unchanged from 0.14.9. Regression tests now live in `tests/`, acceptance checklists in `docs/acceptance/`, developer notes in `docs/development/`, and CI/release use the single `scripts/run-tests.sh` entry point.
@@ -113,16 +118,15 @@ The video path uses:
 
 A completely static macOS desktop can legitimately produce no new ScreenCaptureKit/H.264 data for a while. The Linux client therefore treats video socket read timeouts as idle intervals rather than disconnects. TCP keepalive and the control channel are used to detect real peer loss.
 
-The Linux client exposes four per-connection quality presets:
+The Linux client exposes **three independent video controls** at the top of Desktop:
 
-| Quality | Max width | FPS | Target bitrate |
-|---|---:|---:|---:|
-| Low | 1280 px | 15 | 3 Mbit/s |
-| Balanced | 1920 px | 30 | 8 Mbit/s |
-| High | 2560 px | 30 | 20 Mbit/s |
-| Ultra | 3840 px | 60 | 40 Mbit/s |
+- **Resolution:** `1080p`, `2K`, `4K`
+- **FPS:** `24`, `30`, `60`
+- **Quality / bitrate:** `Adaptive`, `Low`, `Balanced`, `High`, `Ultra`
 
-In **Auto** resolution mode these widths remain capture/encode upper bounds. In explicit **1080p / 2K / 4K** resolution modes, v0.14.14 creates a real virtual macOS desktop at the selected size and captures it directly; the quality preset then controls FPS/bitrate rather than faking resolution by upscaling the MacBook panel. The server clamps all client requests to sane limits before starting VideoToolbox.
+Quality does **not** change resolution or frame rate. The fixed bitrate presets are Low = 3 Mbit/s, Balanced = 8 Mbit/s, High = 20 Mbit/s, Ultra = 40 Mbit/s. Adaptive changes bitrate only (roughly 3–12 Mbit/s); it never silently changes the chosen FPS or resolution.
+
+**1080p** is the safe/default physical MacBook display path (ScreenCaptureKit captures the physical display without upscaling it). **2K** and **4K** create real virtual macOS desktops at exactly 2560×1440 and 3840×2160. The server clamps all client requests to sane limits before starting VideoToolbox.
 
 ## Normal setup
 
@@ -525,19 +529,33 @@ See `SIGNING.md`.
 
 The MacBook still has only its own built-in panel; your 2K/4K monitors are on **Zorin**. In 0.14.14, selecting **2K** or **4K** no longer enlarges or crops the MacBook panel. ZorinMacBridge creates a real macOS virtual display at exactly **2560×1440** or **3840×2160**, makes that virtual desktop primary for the current login session, and asks ScreenCaptureKit to capture that display ID directly.
 
-The resolution selector is therefore a real remote-desktop mode: **Auto** captures the physical Mac display, while **1080p / 2K / 4K** create a virtual macOS desktop of the selected size. Switching back to Auto removes the virtual display and restores the pre-virtual physical display arrangement. This path uses the private `CGVirtualDisplay` CoreGraphics API resolved at runtime. If Apple removes or changes that API, ZMB reports that virtual display mode is unavailable instead of silently falling back to upscaling.
+The resolution selector is therefore a real remote-desktop mode: **1080p** uses the physical Mac display, while **2K / 4K** create a virtual macOS desktop. In 0.14.17, the built-in MacBook panel is detached from the active workspace while 2K/4K is in use, so windows/menu bar cannot remain stranded on the broken physical panel. The detach is session-scoped and the built-in display is restored before returning to 1080p or when the owning Desktop control session ends.
 
-Input follows the active capture display dynamically, so pointer coordinates map to the virtual desktop itself. High remains 20 Mbit/s and Ultra 40 Mbit/s.
+The virtual-display path uses the private `CGVirtualDisplay` API plus the private `SLS/CGSConfigureDisplayEnabled` symbol, both resolved at runtime. If Apple removes or changes them, ZMB reports the failure; it does not silently fall back to fake upscaling or to the physical panel for an explicit virtual-display request. ScreenCaptureKit waits for the exact virtual display ID before starting capture.
+
+Input follows the active capture display dynamically, so pointer coordinates map to the virtual desktop itself. Resolution, FPS and bitrate are independent controls.
 
 For the sleep problem, ZorinMacBridge Server now holds a runtime idle-sleep assertion while it is running. The built-in display may still turn off and macOS may still show its normal lock/login screen, but ordinary display-off no longer automatically sends the whole Mac into idle system sleep and makes the server unreachable. This does **not** change `pmset`, automatic login, FileVault, password or lock-screen policy. A deliberate/manual Sleep is still allowed; for that case the existing saved-Mac **Connect → Wake-on-Connect** path remains the recovery mechanism.
 
 If ScreenCaptureKit is interrupted anyway, the control/input connection stays alive and only the video channel is retried.
+
+### Desktop state + independent video controls (0.14.17)
+
+The Desktop toolbar now has separate **Resolution**, **FPS**, and **Quality** selectors. Changing Quality never changes FPS or resolution; changing FPS never changes resolution; changing Resolution never changes the chosen FPS/bitrate. A full Desktop reconnect reuses the current resolution selection instead of silently resetting the remote workspace to the physical display.
+
+Connect is control-first: TLS/authentication and input/control come up independently of the H.264 worker. When 2K/4K is selected, the server prepares the headless virtual display before video starts. If that preparation fails, the control session remains connected and video can retry or the user can switch back to 1080p. Video-only errors likewise leave Full Screen/input available while the H.264 channel retries.
+
+Older Ubuntu/Zorin `pystray` builds that still call Pillow's removed `Image.ANTIALIAS` are handled by a local compatibility shim, so a tray-icon failure does not produce the previous Pillow traceback.
 
 ### Wake-on-Connect and full-screen controls (0.14.11)
 
 For a saved paired Mac that is sleeping/offline, pressing **Connect** now sends Wake-on-LAN packets and actively probes the paired Mac until its Desktop service returns, then continues the normal connection. This does **not** change macOS login or lock-screen policy: if the Mac wakes to its login/lock screen, you continue to enter the password yourself through the remote Desktop as before.
 
 GTK full-screen state is synchronized with the real GTK4 window state. **Full Screen**, **Exit Full Screen**, **Esc**, and **Alt+Esc** are local controls and do not depend on the network reconnect state.
+
+## 0.14.16 Linux packaging hotfix
+
+Version 0.14.16 fixes the 0.14.15 Linux `.deb` packaging regression where `linux_client_gtk.py` imported `zmb_shutdown.py` but the release workflow did not install that module into `/usr/lib/zorinmacbridge`. The release workflow now stages the module, smoke-imports the GTK client from the exact package tree, and verifies the built `.deb` contains it.
 
 ## 0.14.15 shutdown hardening
 

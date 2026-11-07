@@ -4,6 +4,7 @@ import ScreenCaptureKit
 import VideoToolbox
 import CoreMedia
 import CoreVideo
+import Darwin
 
 // 2K/4K remote-desktop modes use a real macOS virtual display rather than
 // enlarging/cropping the MacBook panel. CGVirtualDisplay is a private API, so
@@ -17,7 +18,25 @@ private final class VirtualDisplayManager {
     private var height: Int = 0
     private var _displayID: CGDirectDisplayID = 0
     private var originalOrigins: [CGDirectDisplayID: CGPoint] = [:]
+    private var disabledBuiltInDisplayIDs: [CGDirectDisplayID] = []
     private var errorText: String = ""
+
+    private typealias ConfigureDisplayEnabledFn = @convention(c) (CGDisplayConfigRef?, CGDirectDisplayID, Bool) -> CGError
+    private lazy var configureDisplayEnabledFn: ConfigureDisplayEnabledFn? = {
+        let paths = [
+            "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight",
+            "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics",
+        ]
+        for path in paths {
+            guard let handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL) else { continue }
+            for name in ["SLSConfigureDisplayEnabled", "CGSConfigureDisplayEnabled"] {
+                if let symbol = dlsym(handle, name) {
+                    return unsafeBitCast(symbol, to: ConfigureDisplayEnabledFn.self)
+                }
+            }
+        }
+        return nil
+    }()
 
     var displayID: CGDirectDisplayID {
         stateLock.lock(); defer { stateLock.unlock() }
@@ -59,6 +78,52 @@ private final class VirtualDisplayManager {
         } else {
             DispatchQueue.main.sync(execute: action)
         }
+    }
+
+
+    private func setDisplayEnabled(_ id: CGDirectDisplayID, enabled: Bool) -> Bool {
+        guard let fn = configureDisplayEnabledFn else { return false }
+        var config: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&config) == .success, let config else { return false }
+        let result = fn(config, id, enabled)
+        if result == .success {
+            let complete = CGCompleteDisplayConfiguration(config, .forSession)
+            return complete == .success
+        }
+        CGCancelDisplayConfiguration(config)
+        return false
+    }
+
+    private func disableBuiltInDisplays(except virtualID: CGDirectDisplayID) throws {
+        // A remote 2K/4K workspace must not leave windows/menu bar stranded on
+        // the broken physical MacBook panel. Disable only built-in displays,
+        // session-scoped, after the virtual display is confirmed online.
+        if !disabledBuiltInDisplayIDs.isEmpty { return }
+        var count: UInt32 = 0
+        guard CGGetOnlineDisplayList(0, nil, &count) == .success else { return }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetOnlineDisplayList(count, &ids, &count) == .success else { return }
+        let builtIns = ids.prefix(Int(count)).filter { $0 != virtualID && CGDisplayIsBuiltin($0) != 0 }
+        guard !builtIns.isEmpty else { return }
+        guard configureDisplayEnabledFn != nil else {
+            throw NSError(domain: "ZorinMacBridge", code: 33, userInfo: [NSLocalizedDescriptionKey: "Headless virtual desktop requires CGS/SLSConfigureDisplayEnabled, which is unavailable on this macOS build"])
+        }
+        var disabled: [CGDirectDisplayID] = []
+        for id in builtIns {
+            if setDisplayEnabled(id, enabled: false) {
+                disabled.append(id)
+            } else {
+                for restored in disabled { _ = setDisplayEnabled(restored, enabled: true) }
+                throw NSError(domain: "ZorinMacBridge", code: 34, userInfo: [NSLocalizedDescriptionKey: "Could not detach the built-in MacBook display for the remote virtual desktop"])
+            }
+        }
+        disabledBuiltInDisplayIDs = disabled
+    }
+
+    private func restoreBuiltInDisplays() {
+        let ids = disabledBuiltInDisplayIDs
+        disabledBuiltInDisplayIDs = []
+        for id in ids { _ = setDisplayEnabled(id, enabled: true) }
     }
 
     private func onlineOrigins() -> [CGDirectDisplayID: CGPoint] {
@@ -126,12 +191,16 @@ private final class VirtualDisplayManager {
             let id = _displayID
             stateLock.unlock()
             makePrimary(id)
+            try disableBuiltInDisplays(except: id)
             return id
         }
+        // Keep the working virtual display alive while constructing a replacement.
+        // If 2K -> 4K creation fails, the old 2K desktop remains usable.
+        var previousDisplay = display
+        let previousOrigins = originalOrigins
         stateLock.unlock()
 
-        releaseOnMain()
-        let savedOrigins = onlineOrigins()
+        let savedOrigins = previousOrigins.isEmpty ? onlineOrigins() : previousOrigins
 
         guard let DescriptorClass = NSClassFromString("CGVirtualDisplayDescriptor") as? NSObject.Type,
               let DisplayClass = NSClassFromString("CGVirtualDisplay") as? NSObject.Type,
@@ -215,6 +284,10 @@ private final class VirtualDisplayManager {
             throw NSError(domain: "ZorinMacBridge", code: 27, userInfo: [NSLocalizedDescriptionKey: "Virtual display did not become online"])
         }
 
+        // Only after the replacement is genuinely online do we commit it.
+        makePrimary(newID)
+        try disableBuiltInDisplays(except: newID)
+
         stateLock.lock()
         display = created
         width = requestedWidth
@@ -223,14 +296,17 @@ private final class VirtualDisplayManager {
         originalOrigins = savedOrigins
         stateLock.unlock()
 
-        // Session-only: make the virtual desktop the primary workspace so new
-        // windows/menu bar appear in the remote 2K/4K desktop. The original
-        // physical arrangement is restored when virtual mode is disabled.
-        makePrimary(newID)
+        // Dropping the previous strong reference now removes the old virtual
+        // display. A failed replacement above leaves the previous display intact.
+        previousDisplay = nil
         return newID
     }
 
     private func releaseOnMain() {
+        // Re-enable the physical MacBook panel while the virtual display still
+        // exists, so there is never a moment with zero active displays.
+        restoreBuiltInDisplays()
+
         stateLock.lock()
         var oldDisplay = display
         let origins = originalOrigins
@@ -241,11 +317,9 @@ private final class VirtualDisplayManager {
         originalOrigins = [:]
         stateLock.unlock()
 
-        // Drop the final strong reference so WindowServer removes the virtual
-        // display, then restore the pre-virtual physical arrangement for session.
         oldDisplay = nil
         if !origins.isEmpty {
-            Thread.sleep(forTimeInterval: 0.05)
+            Thread.sleep(forTimeInterval: 0.10)
             restoreOrigins(origins)
         }
     }
@@ -341,16 +415,32 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func start() async throws {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        var content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         guard !content.displays.isEmpty else {
             throw NSError(domain: "ZorinMacBridge", code: 1, userInfo: [NSLocalizedDescriptionKey: "No display available for ScreenCaptureKit"])
         }
 
-        let requested = displayID == 0 ? nil : content.displays.first(where: { $0.displayID == displayID })
-        let mainDisplayID = CGMainDisplayID()
-        let automatic = content.displays.first(where: { $0.displayID == mainDisplayID }) ?? content.displays.first
-        guard let display = requested ?? automatic else {
-            throw NSError(domain: "ZorinMacBridge", code: 1, userInfo: [NSLocalizedDescriptionKey: "No display available for ScreenCaptureKit"])
+        let display: SCDisplay
+        if displayID != 0 {
+            // CoreGraphics can publish a newly-created virtual display before
+            // ScreenCaptureKit refreshes SCShareableContent. Never fall back to
+            // the MacBook panel for an explicit virtual-display request.
+            var requested = content.displays.first(where: { $0.displayID == displayID })
+            for _ in 0..<50 where requested == nil {
+                try await Task.sleep(nanoseconds: 100_000_000)
+                content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                requested = content.displays.first(where: { $0.displayID == displayID })
+            }
+            guard let exact = requested else {
+                throw NSError(domain: "ZorinMacBridge", code: 35, userInfo: [NSLocalizedDescriptionKey: "Requested display is not yet visible to ScreenCaptureKit"])
+            }
+            display = exact
+        } else {
+            let mainDisplayID = CGMainDisplayID()
+            guard let automatic = content.displays.first(where: { $0.displayID == mainDisplayID }) ?? content.displays.first else {
+                throw NSError(domain: "ZorinMacBridge", code: 1, userInfo: [NSLocalizedDescriptionKey: "No display available for ScreenCaptureKit"])
+            }
+            display = automatic
         }
 
         let filter = SCContentFilter(display: display, excludingWindows: [])

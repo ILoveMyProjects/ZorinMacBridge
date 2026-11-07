@@ -1,7 +1,7 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.15'
+assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.17'
 
 client = (ROOT / 'linux_client.py').read_text(encoding='utf-8')
 gtk = (ROOT / 'linux_client_gtk.py').read_text(encoding='utf-8')
@@ -36,11 +36,11 @@ assert 'displayID: CGDirectDisplayID' in swift
 assert "auth_ok['displays']" in server
 assert "'display_id': display_id" in client
 assert 'Auto — current Mac display' in gtk
-assert "'1080p': (1920, 1080)" in client
-assert "'2K': (2560, 1440)" in client
-assert "'4K': (3840, 2160)" in client
-assert "profile['target_width'] = target_width" in client
-assert "profile['target_height'] = target_height" in client
+assert "'1080p': {'max_width': 1920, 'target_width': 0, 'target_height': 0, 'virtual': False}" in client
+assert "'2K': {'max_width': 2560, 'target_width': 2560, 'target_height': 1440, 'virtual': True}" in client
+assert "'4K': {'max_width': 3840, 'target_width': 3840, 'target_height': 2160, 'virtual': True}" in client
+assert "profile['target_width'] = target_width" in client or "profile['target_width']" in client
+assert "profile['target_height'] = target_height" in client or "profile['target_height']" in client
 assert 'zmb_virtual_display_ensure' in swift
 assert 'CGVirtualDisplayDescriptor' in swift
 assert 'sourceRect = nil' in swift

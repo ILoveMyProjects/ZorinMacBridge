@@ -36,6 +36,7 @@ from linux_client import (
     MODIFIER_KEYS,
     SPECIAL_KEYS,
     VIDEO_QUALITY_PRESETS,
+    VIDEO_FPS_PRESETS,
     VIDEO_RESOLUTION_PRESETS,
     format_fp,
     human_size,
@@ -190,7 +191,8 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.capture_input_var = ValueVar(True)
         self.auto_reconnect_var = ValueVar(True)
         self.quality_var = ValueVar('Adaptive')
-        self.resolution_var = ValueVar('Auto')
+        self.fps_var = ValueVar('30')
+        self.resolution_var = ValueVar('1080p')
         self.display_id_var = ValueVar(0)
         self._display_choices = [('Auto — current Mac display', 0)]
         self._display_source_sizes = {}
@@ -204,6 +206,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.selected_desktop_available = True
         self.remember_credentials_active = True
         self._connect_snapshot = None
+        self._desktop_display_snapshot = None
         # Window state must be initialized once and must never be reset by a
         # network reconnect. GTK fullscreen requests are asynchronous, so the
         # notify::fullscreened signal below remains the source of truth.
@@ -402,8 +405,29 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
 
         video_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.connection_card.append(video_row)
-        quality_label = Gtk.Label(label='Video quality', xalign=0)
-        quality_label.set_width_chars(12)
+        video_label = Gtk.Label(label='Video', xalign=0)
+        video_label.set_width_chars(12)
+        video_row.append(video_label)
+
+        resolution_label = Gtk.Label(label='Resolution', xalign=0)
+        video_row.append(resolution_label)
+        self.resolution_model = Gtk.StringList.new(list(VIDEO_RESOLUTION_PRESETS))
+        self.resolution_dropdown = Gtk.DropDown(model=self.resolution_model)
+        self.resolution_dropdown.set_selected(list(VIDEO_RESOLUTION_PRESETS).index('1080p'))
+        self.resolution_dropdown.connect('notify::selected', self._resolution_dropdown_changed)
+        video_row.append(self.resolution_dropdown)
+
+        fps_label = Gtk.Label(label='FPS', xalign=0)
+        fps_label.set_margin_start(10)
+        video_row.append(fps_label)
+        self.fps_model = Gtk.StringList.new(list(VIDEO_FPS_PRESETS))
+        self.fps_dropdown = Gtk.DropDown(model=self.fps_model)
+        self.fps_dropdown.set_selected(list(VIDEO_FPS_PRESETS).index('30'))
+        self.fps_dropdown.connect('notify::selected', self._fps_dropdown_changed)
+        video_row.append(self.fps_dropdown)
+
+        quality_label = Gtk.Label(label='Quality', xalign=0)
+        quality_label.set_margin_start(10)
         video_row.append(quality_label)
         self.quality_model = Gtk.StringList.new(list(VIDEO_QUALITY_PRESETS))
         self.quality_dropdown = Gtk.DropDown(model=self.quality_model)
@@ -416,27 +440,22 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         video_row.append(self.quality_description)
         self.video_stats_label = Gtk.Label(label='Stream: waiting', xalign=1)
         self.video_stats_label.add_css_class('zmb-muted')
-        self.video_stats_label.set_tooltip_text('Decoded FPS · receive rate · local latest-frame drops · render queue delay')
+        self.video_stats_label.set_tooltip_text('Actual server FPS · receive rate · local latest-frame drops · render queue delay')
         video_row.append(self.video_stats_label)
 
         source_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.connection_card.append(source_row)
-        source_label = Gtk.Label(label='Display', xalign=0)
+        source_label = Gtk.Label(label='Display source', xalign=0)
         source_label.set_width_chars(12)
         source_row.append(source_label)
         self.display_model = Gtk.StringList.new([self._display_choices[0][0]])
         self.display_dropdown = Gtk.DropDown(model=self.display_model)
         self.display_dropdown.connect('notify::selected', self._display_dropdown_changed)
         source_row.append(self.display_dropdown)
-        resolution_label = Gtk.Label(label='Resolution', xalign=0)
-        resolution_label.set_margin_start(12)
-        source_row.append(resolution_label)
-        self.resolution_model = Gtk.StringList.new(list(VIDEO_RESOLUTION_PRESETS))
-        self.resolution_dropdown = Gtk.DropDown(model=self.resolution_model)
-        self.resolution_dropdown.set_selected(0)
-        self.resolution_dropdown.connect('notify::selected', self._resolution_dropdown_changed)
-        source_row.append(self.resolution_dropdown)
-        self.display_description = Gtk.Label(label='1080p / 2K / 4K create a true virtual macOS desktop; no MacBook-panel upscaling.', xalign=0)
+        self.display_description = Gtk.Label(
+            label='1080p uses the physical Mac display. 2K / 4K use the remote virtual desktop. Resolution, FPS and bitrate are independent.',
+            xalign=0,
+        )
         self.display_description.add_css_class('zmb-muted')
         self.display_description.set_hexpand(True)
         source_row.append(self.display_description)
@@ -681,7 +700,11 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
     def _status_changed(self, value) -> None:
         if hasattr(self, 'status_label'):
             self.status_label.set_text(str(value))
-            connected = str(value).startswith('Connected')
+            # The status text may temporarily report a video-only error while the
+            # authenticated Desktop/control session remains connected. Full-screen
+            # availability must follow the real control-session state, not the text
+            # prefix (otherwise an H.264 retry disables Full Screen).
+            connected = bool(getattr(self, 'connected', False))
             icon = 'network-transmit-receive-symbolic' if connected else 'network-offline-symbolic'
             self.status_icon.set_from_icon_name(icon)
             if hasattr(self, 'fs_status_icon'):
@@ -695,8 +718,11 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
     @staticmethod
     def _quality_description_text(name: str) -> str:
         profile = VIDEO_QUALITY_PRESETS.get(name, VIDEO_QUALITY_PRESETS['Adaptive'])
-        text = f"up to {profile['max_width']} px · {profile['fps']} FPS · {profile['bitrate'] // 1_000_000} Mbit/s"
-        return ('auto · ' + text) if name == 'Adaptive' else text
+        if name == 'Adaptive':
+            low = int(profile.get('min_bitrate', profile['bitrate'])) // 1_000_000
+            high = int(profile.get('max_bitrate', profile['bitrate'])) // 1_000_000
+            return f'adaptive bitrate · {low}–{high} Mbit/s'
+        return f"{profile['bitrate'] // 1_000_000} Mbit/s"
 
     def _quality_dropdown_changed(self, _widget, _pspec) -> None:
         idx = self.quality_dropdown.get_selected()
@@ -711,6 +737,19 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         if self.connected:
             self._request_video_reconfigure()
             self.status_var.set(f'Connected — applying {name} on the video channel')
+
+    def _fps_dropdown_changed(self, _widget, _pspec) -> None:
+        idx = self.fps_dropdown.get_selected()
+        names = list(VIDEO_FPS_PRESETS)
+        if idx == Gtk.INVALID_LIST_POSITION or idx >= len(names):
+            return
+        name = names[idx]
+        self.fps_var.set(name)
+        self._refresh_fullscreen_bar()
+        self._log('INFO', f'Video FPS selected: {VIDEO_FPS_PRESETS[name]} FPS.')
+        if self.connected:
+            self._request_video_reconfigure()
+            self.status_var.set(f'Connected — applying {VIDEO_FPS_PRESETS[name]} FPS on the video channel')
 
     def _display_dropdown_changed(self, _widget, _pspec) -> None:
         idx = self.display_dropdown.get_selected()
@@ -730,12 +769,13 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             return
         name = names[idx]
         self.resolution_var.set(name)
-        virtual_mode = name != 'Auto'
+        preset = VIDEO_RESOLUTION_PRESETS[name]
+        virtual_mode = bool(preset.get('virtual'))
         self.display_dropdown.set_sensitive(not virtual_mode)
         if virtual_mode:
-            self.display_description.set_text(f'{name} = true virtual macOS desktop; ScreenCaptureKit captures it directly.')
+            self.display_description.set_text(f'{name} = headless remote virtual desktop; the MacBook panel stays out of the remote workspace.')
         else:
-            self.display_description.set_text('Auto = capture the current physical Mac display at its native geometry.')
+            self.display_description.set_text('1080p = physical Mac display (safe/default mode). FPS and Quality remain independent.')
         self._log('INFO', f'Remote desktop resolution selected: {name}' + (' (virtual display).' if virtual_mode else ' (physical display).'))
         if self.connected:
             self._request_video_reconfigure()
@@ -778,7 +818,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
 
     def _refresh_fullscreen_bar(self) -> None:
         if hasattr(self, 'fs_quality_label'):
-            self.fs_quality_label.set_text(f'Quality: {self.quality_var.get()}')
+            self.fs_quality_label.set_text(f'{self.resolution_var.get()} · {self.fps_var.get()} FPS · Quality: {self.quality_var.get()}')
         if hasattr(self, 'fs_input_label'):
             self.fs_input_label.set_text(
                 'Input: keyboard & mouse' if self.capture_input_var.get() else 'Input: view only'
@@ -1377,6 +1417,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             self._dialog('Connection', str(exc))
             return
         self._connect_snapshot = (ip, port, _password, expected_fp)
+        self._desktop_display_snapshot = self._desktop_display_prepare_payload()
         self.disconnect_requested = False
         # Connection/reconnect state is independent from window full-screen state.
         # Never clear fullscreen_active here: an automatic reconnect can happen while
@@ -1498,6 +1539,12 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                     self._refresh_files_state()
                     if reason != 'Disconnected by user' and not self.disconnect_requested:
                         self._schedule_auto_reconnect(reason)
+                elif kind == 'video_error':
+                    # Video is an independent channel. Keep Desktop/control semantics
+                    # intact so keyboard/mouse and Full Screen remain available while
+                    # H.264 retries in the background.
+                    self.status_var.set(f'Connected — video retrying: {item[1]}')
+                    self._log('ERROR', item[1])
                 elif kind == 'error':
                     self.status_var.set(f'Error: {item[1]}')
                     self._log('ERROR', item[1])
@@ -1505,6 +1552,15 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                     self._wake_display_for_video_async()
                 elif kind == 'display_list':
                     self._apply_display_list(item[1])
+                elif kind == 'remote_display_prepare':
+                    info = item[1] if len(item) > 1 and isinstance(item[1], dict) else {}
+                    if not info.get('ready', False):
+                        detail = str(info.get('error') or 'remote display preparation failed')
+                        self.status_var.set(f'Connected — display preparing/retrying: {detail}')
+                        self._log('WARNING', 'Remote display prepare: ' + detail)
+                    else:
+                        mode = str(info.get('name') or self.resolution_var.get())
+                        self._log('INFO', f'Remote display prepared before video: {mode}.')
                 elif kind == 'video_stats':
                     stats = item[1]
                     server = stats.get('server') or {}

@@ -65,18 +65,27 @@ SPECIAL_KEYS = {
 }
 
 VIDEO_QUALITY_PRESETS = {
-    'Adaptive': {'fps': 30, 'max_width': 1920, 'bitrate': 8_000_000, 'adaptive': True},
-    'Low': {'fps': 15, 'max_width': 1280, 'bitrate': 3_000_000},
-    'Balanced': {'fps': 30, 'max_width': 1920, 'bitrate': 8_000_000},
-    'High': {'fps': 30, 'max_width': 2560, 'bitrate': 20_000_000},
-    'Ultra': {'fps': 60, 'max_width': 3840, 'bitrate': 40_000_000},
+    # Quality controls bitrate only. Resolution and frame rate are independent
+    # user choices and must never be silently changed by a quality preset.
+    'Adaptive': {'bitrate': 8_000_000, 'min_bitrate': 3_000_000, 'max_bitrate': 12_000_000, 'adaptive': True},
+    'Low': {'bitrate': 3_000_000},
+    'Balanced': {'bitrate': 8_000_000},
+    'High': {'bitrate': 20_000_000},
+    'Ultra': {'bitrate': 40_000_000},
+}
+
+VIDEO_FPS_PRESETS = {
+    '24': 24,
+    '30': 30,
+    '60': 60,
 }
 
 VIDEO_RESOLUTION_PRESETS = {
-    'Auto': (0, 0),
-    '1080p': (1920, 1080),
-    '2K': (2560, 1440),
-    '4K': (3840, 2160),
+    # 1080p is the safe/default physical-MacBook mode. The physical panel may
+    # itself be smaller than 1920 px; ScreenCaptureKit never upscales it.
+    '1080p': {'max_width': 1920, 'target_width': 0, 'target_height': 0, 'virtual': False},
+    '2K': {'max_width': 2560, 'target_width': 2560, 'target_height': 1440, 'virtual': True},
+    '4K': {'max_width': 3840, 'target_width': 3840, 'target_height': 2160, 'virtual': True},
 }
 
 
@@ -135,12 +144,14 @@ class ClientApp:
         self.selected_server_name = ''
         self.remember_credentials_var = tk.BooleanVar(value=True)
         self.quality_var = tk.StringVar(value='Adaptive')
-        self.resolution_var = tk.StringVar(value='Auto')
+        self.fps_var = tk.StringVar(value='30')
+        self.resolution_var = tk.StringVar(value='1080p')
         self.display_id_var = tk.IntVar(value=0)
         self._display_source_sizes: dict[int, tuple[int, int]] = {}
         self._auto_display_id = 0
         self.remember_credentials_active = True
         self._connect_snapshot = None
+        self._desktop_display_snapshot = None
         self._credential_serial = 0
         self._discovery_serial = 0
         self._discovery_busy = False
@@ -614,6 +625,9 @@ class ClientApp:
             displays = auth_info.get('displays')
             if isinstance(displays, list):
                 self.ui_queue.put(('display_list', displays))
+            remote_display = auth_info.get('remote_display')
+            if isinstance(remote_display, dict):
+                self.ui_queue.put(('remote_display_prepare', remote_display))
         self._log('INFO', f'Authentication successful for role={role!r}.')
         return sock
 
@@ -642,6 +656,7 @@ class ClientApp:
             messagebox.showerror('Connection', str(exc))
             return
         self._connect_snapshot = (ip, port, _password, expected_fp)
+        self._desktop_display_snapshot = self._desktop_display_prepare_payload()
         self.disconnect_requested = False
         # Reconnects must not desynchronise logical and actual full-screen state.
         self.mouse_buttons_down: set[int] = set()
@@ -670,7 +685,8 @@ class ClientApp:
         sock = None
         disconnect_reason = ''
         try:
-            sock = self._secure_connect('desktop')
+            desktop_extra = {'remote_display': dict(self._desktop_display_snapshot or {})}
+            sock = self._secure_connect('desktop', desktop_extra)
             if self.remember_credentials_active:
                 try:
                     if self._connect_snapshot is None:
@@ -767,22 +783,32 @@ class ClientApp:
             name = 'Adaptive'
         return name, dict(VIDEO_QUALITY_PRESETS[name])
 
-    def _selected_video_resolution(self) -> tuple[int, int]:
+    def _selected_resolution_profile(self) -> dict:
         var = getattr(self, 'resolution_var', None)
         try:
-            name = str(var.get()) if var is not None else 'Auto'
+            name = str(var.get()) if var is not None else '1080p'
         except Exception:
-            name = 'Auto'
-        value = VIDEO_RESOLUTION_PRESETS.get(name, (0, 0))
-        try:
-            width, height = value
-            return max(0, int(width)), max(0, int(height))
-        except Exception:
-            return 0, 0
+            name = '1080p'
+        if name not in VIDEO_RESOLUTION_PRESETS:
+            name = '1080p'
+        profile = dict(VIDEO_RESOLUTION_PRESETS[name])
+        profile['name'] = name
+        return profile
+
+    def _selected_video_resolution(self) -> tuple[int, int]:
+        profile = self._selected_resolution_profile()
+        return int(profile.get('target_width', 0)), int(profile.get('target_height', 0))
 
     def _selected_video_width(self) -> int:
-        # Backwards-compatible helper used by older tests/UI code.
-        return self._selected_video_resolution()[0]
+        return int(self._selected_resolution_profile().get('max_width', 1920))
+
+    def _selected_video_fps(self) -> int:
+        var = getattr(self, 'fps_var', None)
+        try:
+            name = str(var.get()) if var is not None else '30'
+        except Exception:
+            name = '30'
+        return int(VIDEO_FPS_PRESETS.get(name, 30))
 
     def _transform_stream_point(self, nx: float, ny: float) -> tuple[float, float]:
         """Return normalized coordinates for the active remote desktop.
@@ -799,6 +825,15 @@ class ClientApp:
             return max(0, int(var.get())) if var is not None else 0
         except Exception:
             return 0
+
+    def _desktop_display_prepare_payload(self) -> dict:
+        profile = self._selected_resolution_profile()
+        return {
+            'name': str(profile.get('name', '1080p')),
+            'target_width': int(profile.get('target_width', 0)),
+            'target_height': int(profile.get('target_height', 0)),
+            'headless': bool(profile.get('virtual')),
+        }
 
     def _request_video_reconfigure(self) -> None:
         event = getattr(self, '_video_reconfigure_event', None)
@@ -832,15 +867,23 @@ class ClientApp:
                 last_selected = profile_name
 
             if profile_name == 'Adaptive':
-                tier_name, profile = profile_for_tier(adaptive_tier)
+                tier_name, adaptive_profile = profile_for_tier(adaptive_tier)
+                bitrate = int(adaptive_profile['bitrate'])
                 effective_name = f'Adaptive/{tier_name}'
             else:
-                profile = {k: v for k, v in requested.items() if k != 'adaptive'}
+                bitrate = int(requested['bitrate'])
                 effective_name = profile_name
 
-            target_width, target_height = self._selected_video_resolution()
-            if target_width:
-                profile['max_width'] = target_width
+            resolution = self._selected_resolution_profile()
+            fps = self._selected_video_fps()
+            target_width = int(resolution.get('target_width', 0))
+            target_height = int(resolution.get('target_height', 0))
+            profile = {
+                'max_width': int(resolution.get('max_width', 1920)),
+                'fps': fps,
+                'bitrate': bitrate,
+            }
+            if bool(resolution.get('virtual')):
                 profile['target_width'] = target_width
                 profile['target_height'] = target_height
             display_id = self._selected_display_id()
@@ -848,8 +891,9 @@ class ClientApp:
             try:
                 self._log(
                     'INFO',
-                    f'Opening dedicated H.264 video connection ({effective_name}: '
-                    f'{profile["max_width"]}px, {profile["fps"]} FPS, {profile["bitrate"] // 1_000_000} Mbit/s).',
+                    f'Opening dedicated H.264 video connection ('
+                    f'resolution={resolution["name"]}, fps={profile["fps"]}, '
+                    f'quality={effective_name}, bitrate={profile["bitrate"] // 1_000_000} Mbit/s).',
                 )
                 sock = self._secure_connect('video', {
                     'video': profile,
@@ -985,7 +1029,7 @@ class ClientApp:
                     # Video is deliberately independent from the control session. A
                     # codec/capture failure may make the picture unavailable, but it
                     # must never disconnect keyboard/mouse or force a full reconnect.
-                    self.ui_queue.put(('error', f'Video stream failed: {exc}; control session remains connected'))
+                    self.ui_queue.put(('video_error', f'Video stream failed: {exc}; control session remains connected'))
                     deadline = time.monotonic() + 3.0
                     while time.monotonic() < deadline and not self.stop_event.is_set():
                         if self._video_reconfigure_event.is_set():
@@ -1031,6 +1075,9 @@ class ClientApp:
                     else:
                         self.status_var.set(f'Disconnected — {reason}')
                     self._log('INFO', f'Desktop session disconnected: {reason}')
+                elif item[0] == 'video_error':
+                    self.status_var.set(f'Connected — video retrying: {item[1]}')
+                    self._log('ERROR', item[1])
                 elif item[0] == 'error':
                     self.status_var.set(f'Error: {item[1]}')
                     self._log('ERROR', item[1])

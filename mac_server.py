@@ -928,7 +928,7 @@ def video_options_from_auth(auth: dict, defaults) -> tuple[float, int, int, str,
         target_height = int(request.get('target_height', 0) or 0)
     except (TypeError, ValueError):
         target_width = target_height = 0
-    allowed_targets = {(1920, 1080), (2560, 1440), (3840, 2160)}
+    allowed_targets = {(2560, 1440), (3840, 2160)}
     if (target_width, target_height) not in allowed_targets:
         target_width = target_height = 0
     quality = str(auth.get('quality', 'Custom')).strip()[:32] or 'Custom'
@@ -938,6 +938,44 @@ def video_options_from_auth(auth: dict, defaults) -> tuple[float, int, int, str,
         display_id = 0
     display_id = max(0, min(display_id, 0xFFFFFFFF))
     return fps, max_width, bitrate, quality, display_id, target_width, target_height
+
+
+def prepare_remote_display_from_auth(auth: dict, *, log=print) -> dict:
+    request = auth.get('remote_display', {})
+    if not isinstance(request, dict):
+        request = {}
+    name = str(request.get('name') or '1080p')[:16]
+    try:
+        target_width = int(request.get('target_width', 0) or 0)
+        target_height = int(request.get('target_height', 0) or 0)
+    except (TypeError, ValueError):
+        target_width = target_height = 0
+    if (target_width, target_height) not in {(2560, 1440), (3840, 2160)}:
+        target_width = target_height = 0
+        name = '1080p'
+    native = NativeStreamerLibrary()
+    try:
+        if target_width and target_height:
+            display_id = native.ensure_virtual_display(target_width, target_height)
+            set_active_input_display(display_id)
+            log(f'[desktop] prepared headless remote display {name}: {target_width}x{target_height} id={display_id}')
+            return {
+                'ready': True, 'name': name, 'virtual': True, 'display_id': display_id,
+                'width': target_width, 'height': target_height,
+            }
+        native.release_virtual_display()
+        set_active_input_display(0)
+        log('[desktop] prepared physical Mac display mode (1080p/default)')
+        return {'ready': True, 'name': '1080p', 'virtual': False, 'display_id': 0, 'width': 0, 'height': 0}
+    except Exception as exc:
+        # Control/TLS authentication must still succeed. Display preparation is a
+        # video concern and can retry without making Connect itself fail.
+        detail = f'{type(exc).__name__}: {exc}'
+        log(f'[desktop] remote display preparation failed: {detail}')
+        return {
+            'ready': False, 'name': name, 'virtual': bool(target_width and target_height),
+            'display_id': 0, 'width': target_width, 'height': target_height, 'error': detail,
+        }
 
 
 def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: str, share: Path, args, log=print) -> None:
@@ -976,11 +1014,22 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
             return
         auth_ok = {'role': role, 'server': 'ZorinMac-Bridge'}
         if role == 'desktop':
+            auth_ok['remote_display'] = prepare_remote_display_from_auth(auth, log=log)
             auth_ok['displays'] = available_displays(log=log)
         sock.sendall(pack_json(AUTH_OK, auth_ok))
         log(f'[client {peer_ip}] authenticated role={role}')
         if role == 'desktop':
-            control_session(sock, log=log)
+            try:
+                control_session(sock, log=log)
+            finally:
+                # The control channel owns the remote workspace. If it ends,
+                # restore the physical Mac display so a stale headless mode can
+                # never survive an abandoned client session.
+                try:
+                    NativeStreamerLibrary().release_virtual_display()
+                except Exception as exc:
+                    log(f'[desktop] physical display restore warning: {exc}')
+                set_active_input_display(0)
         elif role == 'video':
             fps, max_width, bitrate, quality, display_id, target_width, target_height = video_options_from_auth(auth, args)
             log(

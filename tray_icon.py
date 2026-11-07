@@ -22,6 +22,15 @@ class TrayController:
             import pystray
             from PIL import Image
 
+            # Debian/Ubuntu can pair an older pystray with Pillow >= 10. Older
+            # pystray still references Image.ANTIALIAS, which Pillow removed.
+            # Keep the compatibility shim local to ZMB instead of modifying the
+            # system package under /usr/lib/python3/dist-packages.
+            if not hasattr(Image, 'ANTIALIAS'):
+                resampling = getattr(Image, 'Resampling', None)
+                if resampling is not None:
+                    Image.ANTIALIAS = resampling.LANCZOS
+
             image = Image.open(self.icon_path).convert('RGBA')
 
             def invoke(callback):

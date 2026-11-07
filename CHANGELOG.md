@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.14.17 — DesktopStateVideoControls
+
+- Splits the top Desktop video controls into three independent settings: **Resolution**, **FPS**, and **Quality/bitrate**.
+- Quality presets no longer carry a hidden width or frame-rate choice. `Adaptive` adapts bitrate only; FPS remains exactly the user-selected 24/30/60 value.
+- **1080p** is the safe/default physical Mac display mode. **2K** and **4K** are real virtual macOS desktops at 2560×1440 and 3840×2160.
+- 2K/4K now detach the built-in MacBook panel from the active workspace for the current login session using runtime-resolved `SLS/CGSConfigureDisplayEnabled`; switching back to 1080p restores it.
+- Connect prepares the selected 2K/4K virtual display before starting video, but a virtual-display preparation failure no longer makes the authenticated Desktop/control connection fail.
+- ScreenCaptureKit no longer falls back to the physical MacBook panel when a requested virtual display is not yet visible; it waits for the exact display ID.
+- 2K→4K replacement is transactional: the working virtual display remains alive until the replacement is online, so a failed 4K transition does not intentionally destroy a working 2K session.
+- Video-only errors such as `native streamer pipe stalled for 15s` keep the Desktop/control session and **Full Screen** controls active while H.264 retries.
+- Adds a Pillow 10+ compatibility shim for older `pystray` builds that still reference `Image.ANTIALIAS`.
+- No automatic login, FileVault, password, permanent display configuration, or lock-screen policy changes.
+
+## 0.14.16 — PackagingHotfix
+
+- Fixes the Linux release package so `zmb_shutdown.py` is installed alongside `linux_client_gtk.py`.
+- Adds a staged-package import smoke test to the Linux release job, catching missing local Python modules before the `.deb` is built.
+- Verifies that the generated `.deb` contains `usr/lib/zorinmacbridge/zmb_shutdown.py`.
+- No runtime behavior changes outside packaging/release validation.
+
 ## 0.14.15 — ShutdownHardening
 
 - Fixes the remaining GTK close hang: `close-request` no longer vetoes normal window destruction.
