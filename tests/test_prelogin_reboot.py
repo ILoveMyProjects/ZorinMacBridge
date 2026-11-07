@@ -4,7 +4,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.0'
+assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.1'
 
 server = (ROOT / 'mac_server.py').read_text(encoding='utf-8')
 gui = (ROOT / 'mac_server_gui.py').read_text(encoding='utf-8')

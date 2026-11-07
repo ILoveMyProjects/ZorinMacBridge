@@ -1,5 +1,10 @@
 # ZorinMacBridge
 
+## 0.15.1 session-password input fix
+
+The GTK client now keeps local text fields local even though remote keyboard/mouse capture is enabled by default. In particular, **ZMB session password** accepts typing before Desktop connection. Remote keyboard forwarding starts only after the Desktop/control session is connected. A rejected session password also stops automatic reconnect instead of retrying the same bad credential repeatedly.
+
+
 ## 0.15.0 pre-login connect fix
 
 When Bonjour/P0 reports **system online** but the normal Aqua Desktop is absent, the client now treats the Mac as awake and recovers the LoginWindow endpoint through the paired P0 channel. It no longer sends Wake-on-LAN merely because the Desktop role is missing. The macOS helper also removes the invalid `gui/0` assumption and can load the pre-login LaunchAgent into an already-existing LoginWindow session after an in-place update.

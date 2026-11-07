@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.15.1 — SessionPasswordInputFix
+
+- Fixed GTK keyboard capture stealing keystrokes from local text fields, including **ZMB session password**, while remote input capture is enabled by default.
+- Remote keyboard forwarding now requires an active Desktop/control session; before connection, normal GTK fields always receive local typing.
+- A Desktop `bad password` authentication failure no longer triggers repeated automatic reconnects with the same rejected password. The client returns focus to the session-password field and waits for the user to correct it.
+- Empty ZMB session passwords are rejected locally with a clear prompt instead of opening a connection that is guaranteed to fail authentication.
+- Added regression coverage for local password-field precedence and authentication-failure reconnect suppression.
+
+
 ## 0.15.0 — PreloginConnectFix
 
 - Fixed Desktop Connect misclassifying `system online + desktop absent` as a sleeping/offline Mac. Wake-on-LAN is now used only after the live P0/System channel is unavailable.

@@ -1198,7 +1198,9 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         port = int(str(self.port_var.get() or '').strip())
         if not (1 <= port <= 65535):
             raise ValueError('Invalid port')
-        password = self.password_var.get()
+        password = str(self.password_var.get() or '')
+        if not password:
+            raise ValueError('Enter the ZMB session password.')
         sid = str(self.selected_server_id or '').strip()
         expected_fp = normalize_fp(trusted_desktop_fingerprint(sid))
         if len(expected_fp) != 64:
@@ -1674,10 +1676,22 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                 elif kind == 'disconnected':
                     self.connected = False
                     reason = item[1] if len(item) > 1 else 'Session ended'
-                    self.status_var.set('Disconnected' if reason == 'Disconnected by user' else f'Disconnected — {reason}')
+                    auth_failed = 'bad password' in str(reason).casefold()
+                    if auth_failed:
+                        self.status_var.set('Authentication failed — check ZMB session password')
+                    else:
+                        self.status_var.set('Disconnected' if reason == 'Disconnected by user' else f'Disconnected — {reason}')
                     self._log('INFO', f'Desktop session disconnected: {reason}')
                     self._refresh_files_state()
-                    if reason != 'Disconnected by user' and not self.disconnect_requested:
+                    if auth_failed:
+                        self._reconnect_attempt = 0
+                        self._log('WARNING', 'Desktop authentication failed; auto reconnect suppressed until the session password is corrected and Connect is pressed again.')
+                        try:
+                            self.password_entry.grab_focus()
+                            self.password_entry.select_region(0, -1)
+                        except Exception:
+                            pass
+                    elif reason != 'Disconnected by user' and not self.disconnect_requested:
                         self._schedule_auto_reconnect(reason)
                 elif kind == 'video_error':
                     # Video is an independent channel. Keep Desktop/control semantics
@@ -1865,13 +1879,41 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         }
         return aliases.get(name, name)
 
+    def _local_text_input_focused(self) -> bool:
+        """Return True when keyboard input belongs to a local GTK editor.
+
+        The window-wide key controller runs in CAPTURE phase so full-screen Escape
+        remains reliable.  That controller must never steal keystrokes from local
+        entries (especially the ZMB session password field) before GTK can deliver
+        them to the focused editor.
+        """
+        widget = self.get_focus()
+        while widget is not None:
+            # Gtk.Entry is the concrete widget used by ZMB session password.
+            # Keep the explicit concrete checks even if a PyGObject build does not
+            # allow Gtk.Editable (a GInterface) in isinstance().
+            if isinstance(widget, (Gtk.Entry, Gtk.TextView)):
+                return True
+            try:
+                if isinstance(widget, Gtk.Editable):
+                    return True
+            except TypeError:
+                pass
+            try:
+                widget = widget.get_parent()
+            except Exception:
+                break
+        return False
+
     def _gtk_key_pressed(self, _controller, keyval, _keycode, state):
         keysym = self._keysym_name(keyval)
         if keysym == 'Escape' and (self._window_is_fullscreen() or self.fullscreen_active):
             # Both Esc and Alt+Esc are reserved locally while fullscreen.
             self._exit_fullscreen()
             return True
-        if not self.capture_input_var.get():
+        if self._local_text_input_focused():
+            return False
+        if not self.connected or not self.capture_input_var.get():
             return False
 
         keysym = self._map_keysym(keysym)
@@ -1908,7 +1950,9 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         return True
 
     def _gtk_key_released(self, _controller, keyval, _keycode, _state):
-        if not self.capture_input_var.get():
+        if self._local_text_input_focused():
+            return False
+        if not self.connected or not self.capture_input_var.get():
             return False
         keysym = self._map_keysym(self._keysym_name(keyval))
         key_lower = keysym.lower() if len(keysym) == 1 else keysym
