@@ -1,5 +1,12 @@
 # ZorinMacBridge
 
+## v0.14.18 reboot/login-window recovery + stable video reconfiguration
+
+After a normal macOS reboot, ZorinMacBridge now installs a dedicated `LoginWindow` LaunchAgent that starts the same authenticated ZMB Desktop endpoint before the target user has an Aqua session. It reuses the existing TLS identity and password verifier, shows the physical macOS login window, and uses a native IOHIDSystem path for pre-login keyboard/mouse. After successful login, launchd tears down the LoginWindow context and the normal Aqua ZMB server takes over; the Linux client reconnects and restores the selected desktop mode. Files and 2K/4K virtual-display mode remain disabled while still at loginwindow.
+
+0.14.18 also hardens FPS/Quality/Resolution changes: rapid UI changes are coalesced into one video restart, the old native streamer is cleaned up before a replacement owns ScreenCaptureKit, and the Mac notices a closed replacement socket immediately instead of leaving the old capture alive until its pipe timeout.
+
+**Important real-device boundary:** the LoginWindow LaunchAgent and native IOHID code are compiled/tested by the macOS release workflow, but actual login-window capture and password typing must still be accepted on the target M1/macOS build. FileVault preboot is not a macOS loginwindow session and is not covered.
 ## v0.14.17 fullscreen during video retry
 
 A transient H.264/ScreenCaptureKit failure no longer disables the **Full Screen** control while the authenticated Desktop/control session remains connected. The client reports `Connected — video retrying: ...`, keeps keyboard/mouse available, and retries video independently.

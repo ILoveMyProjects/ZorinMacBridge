@@ -36,8 +36,25 @@ APP_DIR = Path.home() / '.zorin-mac-bridge'
 CERT_PATH = APP_DIR / 'server-cert.pem'
 KEY_PATH = APP_DIR / 'server-key.pem'
 DEFAULT_SHARE = Path.home() / 'ZorinMac-Share'
+
+
+def configure_runtime_home(home: Path | str) -> None:
+    """Reuse one user's server identity from the root LoginWindow helper."""
+    global APP_DIR, CERT_PATH, KEY_PATH, DEFAULT_SHARE
+    base = Path(home).expanduser()
+    APP_DIR = base / '.zorin-mac-bridge'
+    CERT_PATH = APP_DIR / 'server-cert.pem'
+    KEY_PATH = APP_DIR / 'server-key.pem'
+    DEFAULT_SHARE = base / 'ZorinMac-Share'
+
+
 CHUNK = 256 * 1024
 MAX_CLIPBOARD = 2 * 1024 * 1024
+
+# Exactly one ScreenCaptureKit/VideoToolbox streamer may own the native capture
+# pipeline at a time. Video reconnects are intentionally independent from the
+# control channel, so serialize only the video role.
+_VIDEO_SESSION_LOCK = threading.Lock()
 
 
 MAX_FILE_SIZE = 100 * 1024**3
@@ -413,6 +430,165 @@ class MacInput:
         self.held_buttons.clear()
 
 
+class LoginWindowInput(MacInput):
+    """Inject input into the macOS LoginWindow session through IOHIDSystem.
+
+    CGEvent mouse movement can appear to work at loginwindow while clicks and
+    keyboard events are silently discarded.  Keep a cached display rectangle
+    from session startup and avoid further WindowServer queries during input.
+    """
+
+    _SHIFTED_ASCII = {
+        '!': '1', '@': '2', '#': '3', '$': '4', '%': '5', '^': '6',
+        '&': '7', '*': '8', '(': '9', ')': '0', '_': 'minus', '+': 'equal',
+        '{': 'bracketleft', '}': 'bracketright', '|': 'backslash',
+        ':': 'semicolon', '"': 'apostrophe', '<': 'comma', '>': 'period',
+        '?': 'slash', '~': 'grave',
+    }
+    _PLAIN_ASCII = {
+        '-': 'minus', '=': 'equal', '[': 'bracketleft', ']': 'bracketright',
+        '\\': 'backslash', ';': 'semicolon', "'": 'apostrophe',
+        ',': 'comma', '.': 'period', '/': 'slash', '`': 'grave', ' ': 'space',
+        '\t': 'Tab', '\n': 'Return', '\r': 'Return',
+    }
+
+    def __init__(self) -> None:
+        self.native = NativeStreamerLibrary()
+        rc = int(self.native.lib.zmb_login_input_open())
+        if rc != 0:
+            raise RuntimeError(f'IOHIDSystem login-window input unavailable (IOReturn=0x{rc & 0xffffffff:08x})')
+        # Cache geometry before ScreenCaptureKit starts.  Some macOS releases are
+        # hostile to extra WindowServer calls from a loginwindow helper once the
+        # capture connection exists.
+        cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+        cg.CGMainDisplayID.restype = ctypes.c_uint32
+        cg.CGDisplayBounds.argtypes = [ctypes.c_uint32]
+        cg.CGDisplayBounds.restype = CGRect
+        main = int(cg.CGMainDisplayID())
+        bounds = cg.CGDisplayBounds(ctypes.c_uint32(main))
+        if bounds.size.width <= 0 or bounds.size.height <= 0:
+            raise RuntimeError('LoginWindow display bounds are unavailable')
+        self.origin_x = float(bounds.origin.x)
+        self.origin_y = float(bounds.origin.y)
+        self.width = float(bounds.size.width)
+        self.height = float(bounds.size.height)
+        self.held_buttons: set[int] = set()
+        self.held_modifiers: set[str] = set()
+        self.last_nx = 0.5
+        self.last_ny = 0.5
+
+    def _flags(self) -> int:
+        flags = 0
+        for key in self.held_modifiers:
+            flags |= self.MOD_FLAGS.get(key, 0)
+        return flags
+
+    @staticmethod
+    def _check(rc: int, operation: str) -> None:
+        if int(rc) != 0:
+            raise RuntimeError(f'{operation} failed through IOHIDSystem (IOReturn=0x{int(rc) & 0xffffffff:08x})')
+
+    def _point(self, nx: float, ny: float) -> tuple[int, int]:
+        self.last_nx = min(1.0, max(0.0, float(nx)))
+        self.last_ny = min(1.0, max(0.0, float(ny)))
+        x = int(round(self.origin_x + self.last_nx * max(0.0, self.width - 1.0)))
+        y = int(round(self.origin_y + self.last_ny * max(0.0, self.height - 1.0)))
+        return x, y
+
+    def move(self, nx: float, ny: float) -> None:
+        x, y = self._point(nx, ny)
+        if 1 in self.held_buttons:
+            etype, button = self.LEFT_DRAGGED, 0
+        elif 3 in self.held_buttons:
+            etype, button = self.RIGHT_DRAGGED, 1
+        elif 2 in self.held_buttons:
+            etype, button = self.OTHER_DRAGGED, 2
+        else:
+            etype, button = self.MOUSE_MOVED, 0
+        rc = self.native.lib.zmb_login_input_pointer(etype, x, y, button, self._flags())
+        self._check(rc, 'login-window pointer move')
+
+    def button(self, button_num: int, down: bool, nx: float, ny: float) -> None:
+        x, y = self._point(nx, ny)
+        cg_button = self.BUTTONS.get(int(button_num))
+        if cg_button is None:
+            return
+        if button_num == 1:
+            etype = self.LEFT_DOWN if down else self.LEFT_UP
+        elif button_num == 3:
+            etype = self.RIGHT_DOWN if down else self.RIGHT_UP
+        else:
+            etype = self.OTHER_DOWN if down else self.OTHER_UP
+        rc = self.native.lib.zmb_login_input_pointer(etype, x, y, cg_button, self._flags())
+        self._check(rc, 'login-window mouse button')
+        if down:
+            self.held_buttons.add(int(button_num))
+        else:
+            self.held_buttons.discard(int(button_num))
+
+    def scroll(self, dx: int, dy: int) -> None:
+        rc = self.native.lib.zmb_login_input_scroll(int(dx), int(dy), self._flags())
+        self._check(rc, 'login-window scroll')
+
+    def key(self, keysym: str, down: bool) -> None:
+        code = self.KEYCODES.get(keysym)
+        if code is None and len(keysym) == 1:
+            code = self.KEYCODES.get(keysym.lower())
+        if code is None:
+            return
+        is_mod = keysym in self.MOD_FLAGS
+        if is_mod and down:
+            self.held_modifiers.add(keysym)
+        elif is_mod and not down:
+            self.held_modifiers.discard(keysym)
+        rc = self.native.lib.zmb_login_input_key(int(code), 1 if down else 0, self._flags(), 1 if is_mod else 0)
+        self._check(rc, 'login-window keyboard event')
+
+    def text(self, text: str) -> None:
+        # Normal printable keys arrive through KEY. TEXT is the Unicode fallback.
+        # Support the complete printable ASCII password set here without using
+        # clipboard/CGEvent at loginwindow; reject non-ASCII rather than silently
+        # typing the wrong password.
+        for char in text:
+            shift = False
+            if 'a' <= char <= 'z' or '0' <= char <= '9':
+                key = char
+            elif 'A' <= char <= 'Z':
+                key, shift = char.lower(), True
+            elif char in self._SHIFTED_ASCII:
+                key, shift = self._SHIFTED_ASCII[char], True
+            else:
+                key = self._PLAIN_ASCII.get(char)
+            if not key:
+                raise RuntimeError('LoginWindow TEXT supports printable ASCII only; use physical key events for this character')
+            if shift:
+                self.key('Shift_L', True)
+            try:
+                self.key(key, True)
+                self.key(key, False)
+            finally:
+                if shift:
+                    self.key('Shift_L', False)
+
+    def release_all(self) -> None:
+        for key in list(self.held_modifiers):
+            try:
+                self.key(key, False)
+            except Exception:
+                pass
+        for button in list(self.held_buttons):
+            try:
+                self.button(button, False, self.last_nx, self.last_ny)
+            except Exception:
+                pass
+        self.held_modifiers.clear()
+        self.held_buttons.clear()
+        try:
+            self.native.lib.zmb_login_input_close()
+        except Exception:
+            pass
+
+
 class MacClipboard:
     def __init__(self) -> None:
         self.pbcopy = shutil.which('pbcopy') or '/usr/bin/pbcopy'
@@ -478,6 +654,19 @@ class NativeStreamerLibrary:
         self.lib.zmb_display_list_json.restype = ctypes.c_void_p
         self.lib.zmb_string_free.argtypes = [ctypes.c_void_p]
         self.lib.zmb_string_free.restype = None
+        # LoginWindow input uses IOHIDSystem rather than CGEvent.  These C
+        # shims are compiled into the same dylib as the streamer so the frozen
+        # app has one native payload to sign and validate.
+        self.lib.zmb_login_input_open.argtypes = []
+        self.lib.zmb_login_input_open.restype = ctypes.c_int32
+        self.lib.zmb_login_input_close.argtypes = []
+        self.lib.zmb_login_input_close.restype = None
+        self.lib.zmb_login_input_key.argtypes = [ctypes.c_uint16, ctypes.c_int32, ctypes.c_uint32, ctypes.c_int32]
+        self.lib.zmb_login_input_key.restype = ctypes.c_int32
+        self.lib.zmb_login_input_pointer.argtypes = [ctypes.c_uint32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, ctypes.c_uint32]
+        self.lib.zmb_login_input_pointer.restype = ctypes.c_int32
+        self.lib.zmb_login_input_scroll.argtypes = [ctypes.c_int32, ctypes.c_int32, ctypes.c_uint32]
+        self.lib.zmb_login_input_scroll.restype = ctypes.c_int32
 
     def _owned_string(self, fn) -> str:
         pointer = fn()
@@ -543,12 +732,14 @@ def available_displays(*, log=print) -> list[dict]:
         return []
 
 
-def _read_exact_file(stream, size: int, *, timeout: float = 15.0) -> bytes:
-    """Read exactly *size* bytes from the native pipe with a hard deadline.
+def _read_exact_file(stream, size: int, *, timeout: float = 15.0, disconnect_sock: ssl.SSLSocket | None = None) -> bytes:
+    """Read native pipe bytes while also noticing a closed video client.
 
-    A native ScreenCaptureKit encoder can theoretically remain alive while no
-    longer producing pipe output. A plain ``stream.read`` would then block the
-    video-session thread forever and delay disconnect/recovery.
+    Reconfiguration closes the old TLS video socket before opening the next one.
+    The native encoder can be quiet for many seconds on an unchanged screen, so
+    waiting only on its pipe used to keep the old streamer alive until the 15 s
+    deadline. Monitor the TLS socket in the same select loop so cleanup starts as
+    soon as the old client disconnects.
     """
     out = bytearray()
     deadline = time.monotonic() + max(0.5, float(timeout))
@@ -557,8 +748,24 @@ def _read_exact_file(stream, size: int, *, timeout: float = 15.0) -> bytes:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError(f'native streamer pipe stalled for {timeout:g}s')
-        readable, _, _ = select.select([fd], [], [], min(1.0, remaining))
+        watchers = [fd]
+        if disconnect_sock is not None:
+            watchers.append(disconnect_sock)
+        readable, _, _ = select.select(watchers, [], [], min(0.5, remaining))
         if not readable:
+            continue
+        if disconnect_sock is not None and disconnect_sock in readable:
+            try:
+                probe = disconnect_sock.recv(1)
+            except (ssl.SSLWantReadError, BlockingIOError, socket.timeout):
+                probe = None
+            except (ssl.SSLError, OSError) as exc:
+                raise ConnectionError(f'video client disconnected during native capture: {exc}') from exc
+            if probe == b'':
+                raise ConnectionError('video client disconnected during native capture')
+            if probe:
+                raise ConnectionError('unexpected client data on one-way video stream')
+        if fd not in readable:
             continue
         chunk = os.read(fd, size - len(out))
         if not chunk:
@@ -567,13 +774,19 @@ def _read_exact_file(stream, size: int, *, timeout: float = 15.0) -> bytes:
     return bytes(out)
 
 
-def control_session(sock: ssl.SSLSocket, *, log=print) -> None:
+def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, log=print) -> None:
     """Low-latency input/clipboard channel. Video is deliberately separate."""
     log('[control] connected')
-    log('[control] initializing CoreGraphics input')
-    inp = MacInput()
-    log('[control] CoreGraphics input initialized')
-    clipboard = MacClipboard()
+    if prelogin:
+        log('[control] initializing LoginWindow IOHID input')
+        inp = LoginWindowInput()
+        log('[control] LoginWindow IOHID input initialized')
+        clipboard = None
+    else:
+        log('[control] initializing CoreGraphics input')
+        inp = MacInput()
+        log('[control] CoreGraphics input initialized')
+        clipboard = MacClipboard()
     reader = PacketReader()
     sock.settimeout(0.25)
     try:
@@ -605,9 +818,9 @@ def control_session(sock: ssl.SSLSocket, *, log=print) -> None:
                         inp.text(payload.decode('utf-8', 'replace'))
                     except Exception as exc:
                         log(f'[control] text event rejected: {type(exc).__name__}: {exc}')
-                elif kind == CLIPBOARD_SET:
+                elif kind == CLIPBOARD_SET and clipboard is not None:
                     clipboard.set_text(payload.decode('utf-8', 'replace'))
-                elif kind == CLIPBOARD_GET:
+                elif kind == CLIPBOARD_GET and clipboard is not None:
                     text = clipboard.get_text()
                     sock.sendall(pack_packet(CLIPBOARD_DATA, text.encode('utf-8')))
     finally:
@@ -615,7 +828,7 @@ def control_session(sock: ssl.SSLSocket, *, log=print) -> None:
         log('[control] disconnected')
 
 
-def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int, display_id: int = 0, target_width: int = 0, target_height: int = 0, *, log=print) -> None:
+def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int, display_id: int = 0, target_width: int = 0, target_height: int = 0, *, prelogin: bool = False, log=print) -> None:
     """Stream H.264 from ScreenCaptureKit running inside the main app process.
 
     The native Swift code is a dylib loaded with ctypes, not a child executable.
@@ -624,7 +837,7 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
     if this exact running build is not already authorized, fail before touching
     ScreenCaptureKit and tell the client what the operator must do locally.
     """
-    permission = screen_capture_permission_status()
+    permission = None if prelogin else screen_capture_permission_status()
     if permission is False:
         raise RuntimeError(
             'Screen Recording is not granted to this exact ZorinMacBridge Server build. '
@@ -632,6 +845,15 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
             'then fully quit and reopen the app. The server will not request permission from a remote Connect.'
         )
     native = NativeStreamerLibrary()
+    if prelogin:
+        # LoginWindow always exposes the physical macOS login screen.  A user's
+        # saved 2K/4K preference is intentionally deferred until Aqua takes over.
+        display_id = 0
+        target_width = 0
+        target_height = 0
+        max_width = min(max(640, int(max_width)), 1920)
+        fps = min(max(1.0, float(fps)), 30.0)
+        bitrate = min(max(1_000_000, int(bitrate)), 8_000_000)
     capture_display_id = max(0, int(display_id))
     virtual_mode = int(target_width) > 0 and int(target_height) > 0
     if virtual_mode:
@@ -706,7 +928,7 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
         with os.fdopen(data_r, 'rb', buffering=0) as stream:
             while True:
                 try:
-                    header = _read_exact_file(stream, 4)
+                    header = _read_exact_file(stream, 4, disconnect_sock=sock)
                 except EOFError:
                     runner.join(timeout=0.25)
                     code = result.get('code', -999)
@@ -716,7 +938,7 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
                 size = struct.unpack('!I', header)[0]
                 if not (1 <= size <= 16 * 1024 * 1024):
                     raise RuntimeError(f'invalid native H.264 access-unit size: {size}')
-                payload = _read_exact_file(stream, size)
+                payload = _read_exact_file(stream, size, disconnect_sock=sock)
                 sock.sendall(pack_packet(VIDEO_H264, payload))
                 frames += 1
                 stat_frames += 1
@@ -978,7 +1200,7 @@ def prepare_remote_display_from_auth(auth: dict, *, log=print) -> dict:
         }
 
 
-def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: str, share: Path, args, log=print) -> None:
+def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: str, share: Path, args, *, prelogin: bool = False, log=print) -> None:
     peer_ip = addr[0]
     if not is_lan_ip(peer_ip):
         log(f'[reject] non-LAN peer {peer_ip}')
@@ -1012,31 +1234,58 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
             sock.sendall(pack_packet(AUTH_FAIL, b'bad role'))
             log(f'[client {peer_ip}] rejected: bad role {role!r}')
             return
-        auth_ok = {'role': role, 'server': 'ZorinMac-Bridge'}
+        if prelogin and role == 'file':
+            sock.sendall(pack_packet(AUTH_FAIL, b'file role unavailable at macOS login window'))
+            log(f'[client {peer_ip}] pre-login file role rejected')
+            return
+        auth_ok = {'role': role, 'server': 'ZorinMac-Bridge', 'prelogin': bool(prelogin)}
         if role == 'desktop':
-            auth_ok['remote_display'] = prepare_remote_display_from_auth(auth, log=log)
-            auth_ok['displays'] = available_displays(log=log)
+            if prelogin:
+                auth_ok['remote_display'] = {
+                    'ready': True, 'name': '1080p', 'virtual': False, 'display_id': 0,
+                    'width': 0, 'height': 0, 'prelogin': True,
+                }
+                auth_ok['displays'] = available_displays(log=log)
+                log('[desktop] pre-login mode: physical macOS LoginWindow display prepared')
+            else:
+                auth_ok['remote_display'] = prepare_remote_display_from_auth(auth, log=log)
+                auth_ok['displays'] = available_displays(log=log)
         sock.sendall(pack_json(AUTH_OK, auth_ok))
         log(f'[client {peer_ip}] authenticated role={role}')
         if role == 'desktop':
             try:
-                control_session(sock, log=log)
+                control_session(sock, prelogin=prelogin, log=log)
             finally:
-                # The control channel owns the remote workspace. If it ends,
-                # restore the physical Mac display so a stale headless mode can
-                # never survive an abandoned client session.
-                try:
-                    NativeStreamerLibrary().release_virtual_display()
-                except Exception as exc:
-                    log(f'[desktop] physical display restore warning: {exc}')
-                set_active_input_display(0)
+                if not prelogin:
+                    # The Aqua control channel owns the remote workspace. If it
+                    # ends, restore the physical Mac display so a stale headless
+                    # mode cannot survive an abandoned client session.
+                    try:
+                        NativeStreamerLibrary().release_virtual_display()
+                    except Exception as exc:
+                        log(f'[desktop] physical display restore warning: {exc}')
+                    set_active_input_display(0)
         elif role == 'video':
             fps, max_width, bitrate, quality, display_id, target_width, target_height = video_options_from_auth(auth, args)
+            if prelogin:
+                display_id = 0
+                target_width = target_height = 0
+                max_width = min(max_width, 1920)
+                fps = min(fps, 30.0)
+                bitrate = min(bitrate, 8_000_000)
+                quality = f'{quality}/prelogin'
             log(
                 f'[video] client profile={quality!r} max_width={max_width} '
                 f'target={target_width}x{target_height} fps={fps:g} bitrate={bitrate} display_id={display_id}'
             )
-            video_session(sock, fps, max_width, bitrate, display_id, target_width, target_height, log=log)
+            if not _VIDEO_SESSION_LOCK.acquire(blocking=False):
+                log('[video] waiting for previous video session cleanup before starting replacement')
+                if not _VIDEO_SESSION_LOCK.acquire(timeout=20.0):
+                    raise TimeoutError('previous video session did not stop within 20s')
+            try:
+                video_session(sock, fps, max_width, bitrate, display_id, target_width, target_height, prelogin=prelogin, log=log)
+            finally:
+                _VIDEO_SESSION_LOCK.release()
         else:
             file_session(sock, share)
     except (ssl.SSLError, ConnectionError, OSError) as exc:
@@ -1099,7 +1348,7 @@ class IdleSleepInhibitor:
                 pass
 
 
-def serve(bind: str, port: int, share: Path, fps: float, max_width: int, bitrate: int, password: str, *, stop_event=None, log=print, ready_callback=None) -> None:
+def serve(bind: str, port: int, share: Path, fps: float, max_width: int, bitrate: int, password: str, *, stop_event=None, log=print, ready_callback=None, prelogin: bool = False) -> None:
     if platform.system() != 'Darwin':
         raise RuntimeError('This server is intended for macOS only.')
     if not is_lan_ip(bind):
@@ -1108,7 +1357,8 @@ def serve(bind: str, port: int, share: Path, fps: float, max_width: int, bitrate
         raise ValueError('Invalid port.')
     bitrate = max(1_000_000, min(50_000_000, int(bitrate)))
     share = Path(share).expanduser().resolve()
-    share.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not prelogin:
+        share.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     fingerprint = ensure_certificate()
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -1125,7 +1375,9 @@ def serve(bind: str, port: int, share: Path, fps: float, max_width: int, bitrate
     listener.settimeout(0.5)
 
     log(f'Listening on {bind}:{port}')
-    log(f'Share directory: {share}')
+    log(f'Session type: {"LoginWindow/pre-login" if prelogin else "Aqua/user"}')
+    if not prelogin:
+        log(f'Share directory: {share}')
     log(f'TLS SHA-256: {fingerprint}')
     log('Core server: no DNS, cloud, relay, telemetry, or Internet connections')
     log('Clients: RFC1918/ULA/link-local/loopback only')
@@ -1142,7 +1394,7 @@ def serve(bind: str, port: int, share: Path, fps: float, max_width: int, bitrate
 
     def client_worker(raw_sock, peer_addr) -> None:
         try:
-            handle_client(raw_sock, peer_addr, context, password, share, args, log)
+            handle_client(raw_sock, peer_addr, context, password, share, args, prelogin=prelogin, log=log)
         finally:
             client_slots.release()
 
@@ -1167,11 +1419,12 @@ def serve(bind: str, port: int, share: Path, fps: float, max_width: int, bitrate
     finally:
         listener.close()
         idle_sleep.stop()
-        try:
-            NativeStreamerLibrary().release_virtual_display()
-        except Exception:
-            pass
-        set_active_input_display(0)
+        if not prelogin:
+            try:
+                NativeStreamerLibrary().release_virtual_display()
+            except Exception:
+                pass
+            set_active_input_display(0)
         log('Server stopped.')
 
 

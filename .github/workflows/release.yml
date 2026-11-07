@@ -147,13 +147,19 @@ jobs:
       - name: Build macOS Apple Silicon server
         run: |
           mkdir -p build
+          MACOSX_DEPLOYMENT_TARGET=13.0 clang -O2 -fPIC -Wno-deprecated-declarations -c \
+            native/macos/ZMBLoginInput.c \
+            -o build/ZMBLoginInput.o
           MACOSX_DEPLOYMENT_TARGET=13.0 swiftc -O -emit-library \
             -framework ScreenCaptureKit \
             -framework VideoToolbox \
             -framework CoreMedia \
             -framework CoreVideo \
+            -framework CoreGraphics \
+            -framework IOKit \
             -framework AppKit \
             native/macos/ZMBStreamerLib.swift \
+            build/ZMBLoginInput.o \
             -o build/libzmb_streamer.dylib
           test -f build/libzmb_streamer.dylib
 

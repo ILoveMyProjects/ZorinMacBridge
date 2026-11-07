@@ -221,9 +221,11 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.video_thread = None
         self.video_frames = queue.Queue(maxsize=1)
         self._video_reconfigure_event = threading.Event()
+        self._video_reconfigure_not_before = 0.0
         self._video_viewport_width = 1600
         self._last_render_delay_ms = 0.0
         self.connected = False
+        self.prelogin_session = False
         self.remote_image_size = (1, 1)
         self.display_rect = (0, 0, 1, 1)
         self.modifiers_down = set()
@@ -1054,14 +1056,16 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         except Exception:
             paired = False
         if hasattr(self, 'files_state_label'):
-            if self.connected:
+            if self.connected and self.prelogin_session:
+                self.files_state_label.set_text('macOS login window connected · Files unlock automatically after user login.')
+            elif self.connected:
                 self.files_state_label.set_text('Desktop connected ✓ · Files are available through the authenticated desktop session.')
             elif paired:
                 self.files_state_label.set_text('Mac paired ✓ · Desktop is not connected. Connect Desktop to use Files.')
             else:
                 self.files_state_label.set_text('Pair this Mac in System, then connect Desktop to use Files.')
         for button in getattr(self, 'file_action_buttons', []):
-            button.set_sensitive(bool(self.connected))
+            button.set_sensitive(bool(self.connected and not self.prelogin_session))
 
     def pairing_state_changed(self, profile: dict | None = None, *, status: dict | None = None, include_system: bool = True) -> None:
         """Propagate one successful pairing to every feature surface.
@@ -1519,18 +1523,25 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                 kind = item[0]
                 if kind == 'log':
                     self._append_log(item[1])
+                elif kind == 'prelogin_state':
+                    self.prelogin_session = bool(item[1])
+                    self._refresh_files_state()
                 elif kind == 'connected':
                     self.connected = True
                     self._reconnect_attempt = 0
-                    if self.capture_input_var.get():
+                    if self.prelogin_session:
+                        self.status_var.set('Connected — macOS login window')
+                        self.picture.grab_focus()
+                    elif self.capture_input_var.get():
                         self.status_var.set('Connected — keyboard & mouse capture enabled')
                         self.picture.grab_focus()
                     else:
                         self.status_var.set('Connected — view only')
-                    self._log('INFO', 'Desktop session connected.')
+                    self._log('INFO', 'Desktop session connected' + (' (macOS login window).' if self.prelogin_session else '.'))
                     self._refresh_fullscreen_bar()
                     self._refresh_files_state()
-                    self.refresh_files()
+                    if not self.prelogin_session:
+                        self.refresh_files()
                 elif kind == 'disconnected':
                     self.connected = False
                     reason = item[1] if len(item) > 1 else 'Session ended'

@@ -189,7 +189,7 @@ def main() -> None:
     assert '50_000 <= iterations <= 2_000_000' in settings_py
     assert "('credential', credential_token, selected_id, saved_password)" in legacy_client
     assert 'processed < 120' in legacy_client and 'time.monotonic() - started' in legacy_client
-    assert 'select.select([fd]' in mac_server and 'native streamer pipe stalled' in mac_server
+    assert 'select.select(watchers' in mac_server and 'native streamer pipe stalled' in mac_server and 'watchers.append(disconnect_sock)' in mac_server
     assert 'Thread(target=worker, daemon=True).start()' in mac_gui
     assert 'Could not save logs' in gtk
 

@@ -46,6 +46,8 @@ from protocol import (
 
 CHUNK = 256 * 1024
 MAX_CLIPBOARD = 2 * 1024 * 1024
+VIDEO_RECONFIGURE_DEBOUNCE_SECONDS = 0.85
+VIDEO_RESTART_GRACE_SECONDS = 0.35
 V4_ALLOWED = tuple(ipaddress.ip_network(n) for n in (
     '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16',
     '127.0.0.0/8', '169.254.0.0/16',
@@ -167,9 +169,11 @@ class ClientApp:
         self.video_thread: threading.Thread | None = None
         self.video_frames: queue.Queue[Image.Image] = queue.Queue(maxsize=1)
         self._video_reconfigure_event = threading.Event()
+        self._video_reconfigure_not_before = 0.0
         self._video_viewport_width = 1600
         self._last_render_delay_ms = 0.0
         self.connected = False
+        self.prelogin_session = False
         self.last_photo = None
         self.remote_image_size = (1, 1)
         self.display_rect = (0, 0, 1, 1)
@@ -622,6 +626,8 @@ class ClientApp:
         except Exception:
             auth_info = {}
         if role == 'desktop' and isinstance(auth_info, dict):
+            self.prelogin_session = bool(auth_info.get('prelogin'))
+            self.ui_queue.put(('prelogin_state', self.prelogin_session))
             displays = auth_info.get('displays')
             if isinstance(displays, list):
                 self.ui_queue.put(('display_list', displays))
@@ -836,9 +842,24 @@ class ClientApp:
         }
 
     def _request_video_reconfigure(self) -> None:
+        """Coalesce rapid FPS/quality/resolution changes into one video restart."""
+        self._video_reconfigure_not_before = time.monotonic() + VIDEO_RECONFIGURE_DEBOUNCE_SECONDS
         event = getattr(self, '_video_reconfigure_event', None)
         if event is not None:
             event.set()
+
+    def _video_reconfigure_ready(self) -> bool:
+        event = getattr(self, '_video_reconfigure_event', None)
+        if event is None or not event.is_set():
+            return False
+        return time.monotonic() >= float(getattr(self, '_video_reconfigure_not_before', 0.0))
+
+    def _consume_video_reconfigure(self) -> bool:
+        if not self._video_reconfigure_ready():
+            return False
+        self._video_reconfigure_event.clear()
+        self._video_reconfigure_not_before = 0.0
+        return True
 
     def _video_loop(self) -> None:
         """Run a low-latency video-only connection with optional adaptive reconnects.
@@ -856,9 +877,12 @@ class ClientApp:
             sock = None
             decoder = None
             intentional_reconnect = False
-            # Clear a previous request before reading the latest UI selection so
-            # an event cannot be lost between snapshot and socket creation.
-            self._video_reconfigure_event.clear()
+            # Snapshot the latest settings for this video generation. If a change
+            # arrived while the previous socket was being torn down, this generation
+            # already uses it; clear that consumed request before opening the socket.
+            if self._video_reconfigure_event.is_set():
+                self._video_reconfigure_event.clear()
+                self._video_reconfigure_not_before = 0.0
             profile_name, requested = self._video_preferences()
             if profile_name != last_selected:
                 stable_windows = 0
@@ -915,7 +939,7 @@ class ClientApp:
                 server_stats = {}
 
                 while not self.stop_event.is_set():
-                    if self._video_reconfigure_event.is_set():
+                    if self._consume_video_reconfigure():
                         intentional_reconnect = True
                         break
                     timed_out = False
@@ -953,7 +977,7 @@ class ClientApp:
                             elif kind == ERROR:
                                 message = payload.decode('utf-8', 'replace')
                                 raise RuntimeError('Video server error: ' + message)
-                    elif not data and self._video_reconfigure_event.is_set():
+                    elif not data and self._consume_video_reconfigure():
                         intentional_reconnect = True
                         break
 
@@ -1002,6 +1026,9 @@ class ClientApp:
                         adapt_decoded = adapt_dropped = 0
 
                 if intentional_reconnect and not self.stop_event.is_set():
+                    deadline = time.monotonic() + VIDEO_RESTART_GRACE_SECONDS
+                    while time.monotonic() < deadline and not self.stop_event.is_set():
+                        time.sleep(0.05)
                     continue
             except Exception as exc:
                 if not self.stop_event.is_set():
@@ -1021,7 +1048,7 @@ class ClientApp:
                         retry_delay = min(5.0, 1.0 + stable_windows)
                         deadline = time.monotonic() + retry_delay
                         while time.monotonic() < deadline and not self.stop_event.is_set():
-                            if self._video_reconfigure_event.is_set():
+                            if self._consume_video_reconfigure():
                                 break
                             time.sleep(0.1)
                         stable_windows = min(stable_windows + 1, 4)
@@ -1032,7 +1059,7 @@ class ClientApp:
                     self.ui_queue.put(('video_error', f'Video stream failed: {exc}; control session remains connected'))
                     deadline = time.monotonic() + 3.0
                     while time.monotonic() < deadline and not self.stop_event.is_set():
-                        if self._video_reconfigure_event.is_set():
+                        if self._consume_video_reconfigure():
                             break
                         time.sleep(0.1)
                     continue
@@ -1058,15 +1085,20 @@ class ClientApp:
                 processed += 1
                 if item[0] == 'log':
                     self._append_log(item[1])
+                elif item[0] == 'prelogin_state':
+                    self.prelogin_session = bool(item[1])
                 elif item[0] == 'connected':
                     self.connected = True
-                    if self.capture_input_var.get():
+                    if self.prelogin_session:
+                        self.status_var.set('Connected — macOS login window')
+                    elif self.capture_input_var.get():
                         self.status_var.set('Connected — keyboard & mouse capture enabled')
                         self.canvas.focus_set()
                     else:
                         self.status_var.set('Connected — view only')
-                    self._log('INFO', 'Desktop session connected.')
-                    self.refresh_files()
+                    self._log('INFO', 'Desktop session connected' + (' (macOS login window).' if self.prelogin_session else '.'))
+                    if not self.prelogin_session:
+                        self.refresh_files()
                 elif item[0] == 'disconnected':
                     self.connected = False
                     reason = item[1] if len(item) > 1 else 'Session ended'
@@ -1483,7 +1515,7 @@ class ClientApp:
     # ---------- Remote file browser ----------
 
     def refresh_files(self) -> None:
-        if not self.connected:
+        if not self.connected or self.prelogin_session:
             return
         threading.Thread(target=self._refresh_files_worker, args=(self.remote_path,), daemon=True).start()
 

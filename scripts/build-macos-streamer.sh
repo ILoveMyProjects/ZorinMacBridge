@@ -12,14 +12,19 @@ fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$ROOT/build"
+MACOSX_DEPLOYMENT_TARGET=13.0 clang -O2 -fPIC -Wno-deprecated-declarations -c \
+  "$ROOT/native/macos/ZMBLoginInput.c" \
+  -o "$ROOT/build/ZMBLoginInput.o"
 MACOSX_DEPLOYMENT_TARGET=13.0 swiftc -O -emit-library \
   -framework ScreenCaptureKit \
   -framework VideoToolbox \
   -framework CoreMedia \
   -framework CoreVideo \
   -framework CoreGraphics \
+  -framework IOKit \
   -framework AppKit \
   "$ROOT/native/macos/ZMBStreamerLib.swift" \
+  "$ROOT/build/ZMBLoginInput.o" \
   -o "$ROOT/build/libzmb_streamer.dylib"
 chmod 0755 "$ROOT/build/libzmb_streamer.dylib"
 echo "Built $ROOT/build/libzmb_streamer.dylib"

@@ -4,6 +4,8 @@ set -u
 LABEL="com.ilovemyprojects.zorinmacbridge.server"
 ADMIN_LABEL="com.ilovemyprojects.zorinmacbridge.admin"
 UPDATE_LABEL="com.ilovemyprojects.zorinmacbridge.update"
+PRELOGIN_LABEL="com.ilovemyprojects.zorinmacbridge.prelogin"
+PRELOGIN_PLIST="/Library/LaunchAgents/${PRELOGIN_LABEL}.plist"
 APP_NAME="ZorinMacBridge Server"
 APP_PATH="/Applications/ZorinMacBridge Server.app"
 DEFAULT_PORT="45950"
@@ -298,7 +300,11 @@ diagnose_cmd() {
       zmb_process_running "$uid" && app_running=1 || true
       port_listening "$port" && listening=1 || true
       if [ "$session" != "1" ]; then
-        diag_add "$tmp" info GUI_SESSION_ABSENT 0 "No logged-in Aqua session is available; ScreenCaptureKit desktop streaming cannot run until the user logs in."
+        if [ -f "$PRELOGIN_PLIST" ]; then
+          diag_add "$tmp" info GUI_SESSION_ABSENT 0 "No Aqua session is logged in; the LoginWindow pre-login Desktop helper is installed and should provide the remote login screen."
+        else
+          diag_add "$tmp" warning PRELOGIN_AGENT_MISSING 1 "No Aqua session is logged in and the LoginWindow pre-login Desktop helper is missing."
+        fi
       else
         [ "$agent_exists" = "1" ] || diag_add "$tmp" warning LAUNCH_AGENT_MISSING 1 "The desktop LaunchAgent file is missing."
         [ "$agent_loaded" = "1" ] || diag_add "$tmp" warning LAUNCH_AGENT_NOT_LOADED 1 "The desktop LaunchAgent is not loaded in the GUI session."
@@ -372,6 +378,25 @@ repair_update_daemon() {
   }
 }
 
+repair_prelogin_agent() {
+  require_root
+  local payload source
+  payload="$(find_admin_payload || true)"
+  [ -n "$payload" ] || return 1
+  source="$(/usr/bin/dirname "$payload")/${PRELOGIN_LABEL}.plist"
+  [ -f "$source" ] || return 1
+  /usr/bin/plutil -lint "$source" >/dev/null 2>&1 || return 1
+  /usr/bin/install -o root -g wheel -m 0644 "$source" "$PRELOGIN_PLIST" || return 1
+  /usr/bin/plutil -lint "$PRELOGIN_PLIST" >/dev/null 2>&1 || return 1
+  /bin/launchctl enable "gui/0/${PRELOGIN_LABEL}" >/dev/null 2>&1 || true
+  if /bin/launchctl print gui/0 >/dev/null 2>&1; then
+    /bin/launchctl bootout "gui/0/${PRELOGIN_LABEL}" >/dev/null 2>&1 || true
+    /bin/launchctl bootstrap gui/0 "$PRELOGIN_PLIST" >/dev/null 2>&1 || true
+    /bin/launchctl kickstart -k "gui/0/${PRELOGIN_LABEL}" >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
 restore_verified_backup_if_needed() {
   if app_signature_ok; then return 0; fi
   backup_signature_ok || return 1
@@ -406,6 +431,9 @@ recover_all_cmd() {
   done
 
   if app_signature_ok; then
+    if [ ! -f "$PRELOGIN_PLIST" ]; then
+      repair_prelogin_agent || { recovery_log ERROR PRELOGIN_AGENT_REPAIR_FAILED "Could not restore the LoginWindow pre-login Desktop helper."; ok=0; }
+    fi
     user="$(target_user || true)"
     if [ -n "$user" ]; then
       uid="$(user_uid "$user" || true)"
@@ -517,7 +545,7 @@ desktop_tls_fingerprint() {
 
 status_cmd() {
   require_root
-  local host server_id osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired desktop_tls_fp ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg auto_update_mode update_current update_latest update_available update_checked update_result update_error power_lines developer_dir wake_mac
+  local host server_id osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening prelogin_agent_exists prelogin_agent_loaded auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired desktop_tls_fp ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg auto_update_mode update_current update_latest update_available update_checked update_result update_error power_lines developer_dir wake_mac
   host="$(/bin/hostname 2>/dev/null || echo unknown)"
   server_id="$(config_value SERVER_ID unknown)"
   osver="$(/usr/bin/sw_vers -productVersion 2>/dev/null || echo unknown)"
@@ -527,9 +555,11 @@ status_cmd() {
   user="$(target_user || true)"
   [ -n "$user" ] || user="$(console_user || true)"
   uid=""; home=""; settings=""; plist=""; port="$DEFAULT_PORT"; bind="unknown"
-  app_installed=0; app_running=0; agent_exists=0; agent_loaded=0; listening=0; session=0
+  app_installed=0; app_running=0; agent_exists=0; agent_loaded=0; listening=0; session=0; prelogin_agent_exists=0; prelogin_agent_loaded=0
   auto_start="unknown"; launch_at_login="unknown"
   [ -d "$APP_PATH" ] && app_installed=1
+  [ -f "$PRELOGIN_PLIST" ] && prelogin_agent_exists=1 || true
+  /bin/launchctl print "gui/0/${PRELOGIN_LABEL}" >/dev/null 2>&1 && prelogin_agent_loaded=1 || true
 
   if [ -n "$user" ]; then
     uid="$(user_uid "$user" || true)"
@@ -606,6 +636,8 @@ status_cmd() {
   printf 'zmb_app_running=%s\n' "$app_running"
   printf 'launch_agent_exists=%s\n' "$agent_exists"
   printf 'launch_agent_loaded=%s\n' "$agent_loaded"
+  printf 'prelogin_agent_exists=%s\n' "$prelogin_agent_exists"
+  printf 'prelogin_agent_loaded=%s\n' "$prelogin_agent_loaded"
   printf 'auto_start_server=%s\n' "$auto_start"
   printf 'launch_at_login=%s\n' "$launch_at_login"
   printf 'zmb_bind=%s\n' "$bind"

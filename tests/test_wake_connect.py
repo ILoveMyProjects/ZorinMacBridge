@@ -2,7 +2,7 @@ from pathlib import Path
 import importlib.util
 
 ROOT = Path(__file__).resolve().parents[1]
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "0.14.17"
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "0.14.18"
 
 backend_path = ROOT / "zmb_admin_backend.py"
 spec = importlib.util.spec_from_file_location("zmb_admin_backend_wake_test", backend_path)

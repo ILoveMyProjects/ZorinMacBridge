@@ -45,6 +45,8 @@ ADMIN_DIR="/Library/Application Support/ZorinMacBridge/Admin"
 LABEL="com.ilovemyprojects.zorinmacbridge.server"
 ADMIN_LABEL="com.ilovemyprojects.zorinmacbridge.admin"
 UPDATE_LABEL="com.ilovemyprojects.zorinmacbridge.update"
+PRELOGIN_LABEL="com.ilovemyprojects.zorinmacbridge.prelogin"
+PRELOGIN_PLIST="/Library/LaunchAgents/${PRELOGIN_LABEL}.plist"
 
 # launchd processes bootout asynchronously on current macOS releases.  A
 # bootstrap issued immediately afterwards can fail with EIO (5) even when the
@@ -176,6 +178,22 @@ SUDOERS
 # The target path is user-writable, so never create/overwrite it with root file
 # semantics. The installed helper performs the atomic write as TARGET_USER.
 /usr/local/sbin/zmb-admin repair-launch-agent >/dev/null
+
+# Pre-login Desktop is a root LoginWindow LaunchAgent.  /Library/LaunchAgents
+# jobs with LimitLoadToSessionType=LoginWindow are loaded by launchd in the
+# pre-login GUI session, before the target user has an Aqua session.
+/usr/bin/plutil -lint "$HERE/com.ilovemyprojects.zorinmacbridge.prelogin.plist" >/dev/null
+/usr/bin/install -o root -g wheel -m 0644 "$HERE/com.ilovemyprojects.zorinmacbridge.prelogin.plist" "$PRELOGIN_PLIST"
+/usr/bin/plutil -lint "$PRELOGIN_PLIST" >/dev/null
+# The job is session-scoped, not a system LaunchDaemon.  If loginwindow is
+# currently present, best-effort kick it now; otherwise launchd will load it
+# automatically on the next boot/logout when LoginWindow appears.
+/bin/launchctl enable "gui/0/${PRELOGIN_LABEL}" >/dev/null 2>&1 || true
+if /bin/launchctl print gui/0 >/dev/null 2>&1; then
+  /bin/launchctl bootout "gui/0/${PRELOGIN_LABEL}" >/dev/null 2>&1 || true
+  /bin/launchctl bootstrap gui/0 "$PRELOGIN_PLIST" >/dev/null 2>&1 || true
+  /bin/launchctl kickstart -k "gui/0/${PRELOGIN_LABEL}" >/dev/null 2>&1 || true
+fi
 
 bootstrap_system_job   "$ADMIN_LABEL"   "$HERE/com.ilovemyprojects.zorinmacbridge.admin.plist"   "/Library/LaunchDaemons/${ADMIN_LABEL}.plist"
 /bin/launchctl kickstart -k "system/${ADMIN_LABEL}" >/dev/null 2>&1 || true

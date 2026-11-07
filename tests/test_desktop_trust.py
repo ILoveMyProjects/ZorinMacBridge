@@ -81,7 +81,7 @@ def main() -> None:
     assert 'class DesktopTrustMismatch' in pairing_src
     assert 'scripts/run-tests.sh' in ci
     assert 'scripts/run-tests.sh' in release
-    assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.17'
+    assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.18'
 
     print('desktop trust tests: OK')
 

@@ -14,6 +14,20 @@ from pathlib import Path
 APP_DIR = Path.home() / '.zorin-mac-bridge'
 SERVER_CONFIG = APP_DIR / 'server-settings.json'
 CLIENT_CONFIG = Path.home() / '.config' / 'zorinmacbridge' / 'clients.json'
+
+
+def configure_server_home(home: Path | str) -> None:
+    """Point server-side state at a specific macOS user's home directory.
+
+    The normal Aqua server uses ``Path.home()``.  The pre-login LoginWindow
+    helper runs as root, but it must reuse the paired user's existing TLS
+    certificate and password verifier so Connect keeps the same trust identity
+    across reboot/login handoff.
+    """
+    global APP_DIR, SERVER_CONFIG
+    base = Path(home).expanduser()
+    APP_DIR = base / '.zorin-mac-bridge'
+    SERVER_CONFIG = APP_DIR / 'server-settings.json'
 PBKDF2_ITERATIONS = 350_000
 
 

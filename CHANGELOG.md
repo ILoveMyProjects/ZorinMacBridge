@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.14.18 — PreloginRecovery + VideoRestartStability
+
+- Adds a root **LoginWindow LaunchAgent** in `/Library/LaunchAgents` so ZorinMacBridge can start a pre-login Desktop endpoint after a normal macOS reboot, before the target user's Aqua session exists.
+- The pre-login endpoint reuses the target user's existing ZMB TLS certificate, password verifier, server id, port and LAN discovery identity; no second pairing ceremony is introduced.
+- Pre-login Desktop exposes only the physical macOS login-window display plus keyboard/mouse. Files and virtual 2K/4K remain disabled until the normal user session starts.
+- Adds a native IOHIDSystem input shim for loginwindow (`IOHIDPostEvent`) bundled into the existing streamer dylib. This path is experimental and requires real-Mac verification because Secure Event Input behavior varies by macOS release.
+- After login, the LoginWindow launchd session ends and the existing Aqua LaunchAgent takes over; the Zorin client auto-reconnects and restores the saved 1080p/2K/4K selection.
+- Coalesces rapid FPS/Quality/Resolution changes before restarting video, adds a short cleanup grace, and serializes native video ownership on the Mac so multiple replacement streamers cannot overlap.
+- Native video pipe reads monitor the TLS socket as well as the encoder pipe, so closing an old video channel for reconfiguration starts cleanup immediately instead of waiting up to 15 seconds.
+- The Zorin client reports `Connected — macOS login window` and keeps Files disabled until Aqua handoff.
+- No automatic login, FileVault disablement, lock-policy change, VNC/Screen Sharing dependency, or port 5900 requirement is added.
+- FileVault preboot/EFI unlock remains outside this transport because macOS, launchd and ZMB are not running there.
 ## 0.14.17 — DesktopStateVideoControls
 
 - Splits the top Desktop video controls into three independent settings: **Resolution**, **FPS**, and **Quality/bitrate**.

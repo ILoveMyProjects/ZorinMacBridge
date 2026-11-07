@@ -14,7 +14,7 @@ from mac_server import (
     NativeStreamerLibrary,
     DEFAULT_SHARE, accessibility_permission_status, ensure_certificate, is_lan_ip,
     permission_api_self_test, request_accessibility_permission, request_screen_capture_permission,
-    screen_capture_permission_status, serve,
+    screen_capture_permission_status, serve, configure_runtime_home,
 )
 from discovery import LanAdvertiser
 from resources import resource_path, set_tk_icon
@@ -23,10 +23,91 @@ from mac_admin_setup import (admin_component_state, install_unattended_access,
 from mac_requirements import evaluate_setup_requirements, missing_setup_requirements
 from tray_icon import TrayController
 from updates import check_for_updates, current_version, install_update, updater_tls_self_test
-from settings import (PasswordVerifier, load_server_password_verifier, load_server_settings,
+from settings import (PasswordVerifier, configure_server_home, load_server_password_verifier, load_server_settings,
                       persistent_server_id, save_server_password, update_server_settings)
 
 
+
+
+_PRELOGIN_ADMIN_CONFIG = Path('/Library/Application Support/ZorinMacBridge/Admin/config')
+
+
+def _prelogin_config_value(key: str) -> str:
+    try:
+        for raw in _PRELOGIN_ADMIN_CONFIG.read_text(encoding='utf-8').splitlines():
+            name, sep, value = raw.partition('=')
+            if sep and name == key:
+                return value.strip()
+    except OSError:
+        pass
+    return ''
+
+
+def _prelogin_target_home() -> tuple[str, Path]:
+    user = _prelogin_config_value('TARGET_USER')
+    if not re.fullmatch(r'[A-Za-z0-9._-]+', user or '') or user in {'root', 'loginwindow', '_mbsetupuser'}:
+        raise RuntimeError('P0 target user is missing or invalid')
+    output = subprocess.check_output(
+        ['/usr/bin/dscl', '.', '-read', f'/Users/{user}', 'NFSHomeDirectory'],
+        text=True, stderr=subprocess.STDOUT, timeout=5,
+    ).strip()
+    parts = output.split(None, 1)
+    if len(parts) != 2 or not parts[1].startswith('/'):
+        raise RuntimeError(f'Could not resolve home directory for {user}')
+    return user, Path(parts[1]).resolve()
+
+
+def _prelogin_server_cli() -> int:
+    if os.geteuid() != 0:
+        raise RuntimeError('pre-login server must run as root in the LoginWindow session')
+    user, home = _prelogin_target_home()
+    configure_server_home(home)
+    configure_runtime_home(home)
+    saved = load_server_settings()
+    verifier = load_server_password_verifier()
+    if verifier is None:
+        raise RuntimeError('No saved ZorinMacBridge password verifier is available for pre-login authentication')
+    ips = private_ipv4_addresses()
+    bind = str(saved.get('bind') or '')
+    if bind not in ips:
+        bind = ips[0] if ips else ''
+    if not bind:
+        raise RuntimeError('No private IPv4 address is available for pre-login Desktop')
+    try:
+        port = int(saved.get('port', 45950))
+    except (TypeError, ValueError):
+        port = 45950
+    server_id = str(saved.get('server_id') or _prelogin_config_value('SERVER_ID')).strip()
+    if not re.fullmatch(r'[A-Za-z0-9._:-]{8,128}', server_id):
+        raise RuntimeError('Existing ZorinMacBridge server id is unavailable for pre-login reuse')
+    identity_dir = home / '.zorin-mac-bridge'
+    cert = identity_dir / 'server-cert.pem'
+    key = identity_dir / 'server-key.pem'
+    if not cert.is_file() or not key.is_file():
+        raise RuntimeError('Existing ZorinMacBridge TLS identity is unavailable for pre-login reuse')
+    share = Path(saved.get('share') or (home / 'ZorinMac-Share'))
+
+    def log(message: str) -> None:
+        print(str(message), flush=True)
+
+    log(f'[prelogin] target_user={user} home={home}')
+    log(f'[prelogin] starting LoginWindow Desktop on {bind}:{port}')
+    advertiser = LanAdvertiser(bind, port, current_version(), server_id)
+    try:
+        try:
+            advertiser.start()
+        except Exception as exc:
+            log(f'[prelogin] WARNING: Bonjour advertisement failed: {type(exc).__name__}: {exc}')
+        serve(
+            bind, port, share, 30.0, 1920, 8_000_000, verifier,
+            prelogin=True, log=log,
+        )
+    finally:
+        try:
+            advertiser.stop()
+        except Exception:
+            pass
+    return 0
 
 
 def private_ipv4_addresses() -> list[str]:
@@ -934,6 +1015,14 @@ def _p0_update_stage_cli(stage_root: Path) -> int:
 
 
 def main() -> None:
+    if '--prelogin-server' in sys.argv:
+        try:
+            raise SystemExit(_prelogin_server_cli())
+        except SystemExit:
+            raise
+        except Exception as exc:
+            print(f'PRELOGIN SERVER FAILED: {type(exc).__name__}: {exc}', file=sys.stderr, flush=True)
+            raise SystemExit(1)
     if '--p0-update-check' in sys.argv:
         try:
             raise SystemExit(_p0_update_check_cli())
