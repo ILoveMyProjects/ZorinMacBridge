@@ -22,6 +22,7 @@ case "$orig" in
   "zmb-admin set-auto-update install") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin set-auto-update install ;;
   "zmb-admin set-wake-network on") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin set-wake-network on ;;
   "zmb-admin set-wake-network off") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin set-wake-network off ;;
+  "zmb-admin wake-display") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin wake-display ;;
   "zmb-admin xcode-overview") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin xcode-overview ;;
   "zmb-admin xcode-open") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin xcode-open ;;
   "zmb-admin sim-open") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin sim-open ;;

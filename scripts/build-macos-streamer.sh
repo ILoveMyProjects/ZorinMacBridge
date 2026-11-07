@@ -17,6 +17,7 @@ MACOSX_DEPLOYMENT_TARGET=13.0 swiftc -O -emit-library \
   -framework VideoToolbox \
   -framework CoreMedia \
   -framework CoreVideo \
+  -framework CoreGraphics \
   -framework AppKit \
   "$ROOT/native/macos/ZMBStreamerLib.swift" \
   -o "$ROOT/build/libzmb_streamer.dylib"

@@ -119,10 +119,10 @@ The Linux client exposes four per-connection quality presets:
 |---|---:|---:|---:|
 | Low | 1280 px | 15 | 3 Mbit/s |
 | Balanced | 1920 px | 30 | 8 Mbit/s |
-| High | 2560 px | 30 | 14 Mbit/s |
-| Ultra | 3840 px | 60 | 25 Mbit/s |
+| High | 2560 px | 30 | 20 Mbit/s |
+| Ultra | 3840 px | 60 | 40 Mbit/s |
 
-The Mac never upscales the captured display; these are upper bounds. The server clamps client requests to sane limits before starting VideoToolbox.
+In **Auto** resolution mode these widths remain capture/encode upper bounds. In explicit **1080p / 2K / 4K** resolution modes, v0.14.14 creates a real virtual macOS desktop at the selected size and captures it directly; the quality preset then controls FPS/bitrate rather than faking resolution by upscaling the MacBook panel. The server clamps all client requests to sane limits before starting VideoToolbox.
 
 ## Normal setup
 
@@ -520,8 +520,25 @@ The release workflow produces an ad-hoc transport artifact with an explicit tran
 After the one-time migration from an older build, Screen Recording and mouse/keyboard privacy grants are intended to remain associated with the same installed app identity across normal v0.6+ updates.
 See `SIGNING.md`.
 
+
+### True 2K/4K virtual desktop and sleep resilience (0.14.14)
+
+The MacBook still has only its own built-in panel; your 2K/4K monitors are on **Zorin**. In 0.14.14, selecting **2K** or **4K** no longer enlarges or crops the MacBook panel. ZorinMacBridge creates a real macOS virtual display at exactly **2560×1440** or **3840×2160**, makes that virtual desktop primary for the current login session, and asks ScreenCaptureKit to capture that display ID directly.
+
+The resolution selector is therefore a real remote-desktop mode: **Auto** captures the physical Mac display, while **1080p / 2K / 4K** create a virtual macOS desktop of the selected size. Switching back to Auto removes the virtual display and restores the pre-virtual physical display arrangement. This path uses the private `CGVirtualDisplay` CoreGraphics API resolved at runtime. If Apple removes or changes that API, ZMB reports that virtual display mode is unavailable instead of silently falling back to upscaling.
+
+Input follows the active capture display dynamically, so pointer coordinates map to the virtual desktop itself. High remains 20 Mbit/s and Ultra 40 Mbit/s.
+
+For the sleep problem, ZorinMacBridge Server now holds a runtime idle-sleep assertion while it is running. The built-in display may still turn off and macOS may still show its normal lock/login screen, but ordinary display-off no longer automatically sends the whole Mac into idle system sleep and makes the server unreachable. This does **not** change `pmset`, automatic login, FileVault, password or lock-screen policy. A deliberate/manual Sleep is still allowed; for that case the existing saved-Mac **Connect → Wake-on-Connect** path remains the recovery mechanism.
+
+If ScreenCaptureKit is interrupted anyway, the control/input connection stays alive and only the video channel is retried.
+
 ### Wake-on-Connect and full-screen controls (0.14.11)
 
 For a saved paired Mac that is sleeping/offline, pressing **Connect** now sends Wake-on-LAN packets and actively probes the paired Mac until its Desktop service returns, then continues the normal connection. This does **not** change macOS login or lock-screen policy: if the Mac wakes to its login/lock screen, you continue to enter the password yourself through the remote Desktop as before.
 
 GTK full-screen state is synchronized with the real GTK4 window state. **Full Screen**, **Exit Full Screen**, **Esc**, and **Alt+Esc** are local controls and do not depend on the network reconnect state.
+
+## 0.14.15 shutdown hardening
+
+Explicit **Close/Quit** is bounded: the GTK window is hidden immediately, GTK is allowed to destroy it normally, SSH/VTE/tray cleanup is best-effort and non-blocking, and a short hard-exit watchdog prevents a stuck native backend from leaving the client process alive. This watchdog is armed only for explicit application shutdown; it is not used for ordinary Desktop disconnect/reconnect.

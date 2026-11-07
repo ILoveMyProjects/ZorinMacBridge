@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.14.15 — ShutdownHardening
+
+- Fixes the remaining GTK close hang: `close-request` no longer vetoes normal window destruction.
+- Hides the window before any optional cleanup so the UI disappears immediately on explicit Quit.
+- Removes the interactive `disconnect_remote()` path from application shutdown.
+- Adds a shutdown-only Terminal SIGTERM path that does not call VTE reset/widget updates.
+- Keeps Project/SSH and tray cleanup non-blocking.
+- Adds a 1.25 s hard-exit watchdog for explicit Quit so a wedged native backend cannot leave the client process alive indefinitely.
+- Adds shutdown regression coverage and a real-machine acceptance checklist.
+
+## 0.14.14 — VirtualDisplayWake
+
+- **2K** and **4K** are no longer crop/upscale modes. They create a real macOS virtual desktop at exactly **2560×1440** or **3840×2160** using the runtime-resolved private `CGVirtualDisplay` API.
+- the virtual desktop is made primary only for the current login session so the menu bar and newly opened windows appear on the remote desktop; switching back to **Auto** removes it and restores the physical display arrangement
+- ScreenCaptureKit captures the virtual display directly by display ID; if the private API is missing or changed, the video channel fails with an explicit error instead of silently falling back to fake upscaling
+- mouse coordinates follow the active captured display dynamically, including the virtual display, instead of using cached MacBook-panel bounds
+- ZorinMacBridge Server holds a runtime `caffeinate -i -w <server-pid>` assertion so ordinary display-off does not automatically put the whole Mac into idle system sleep; display sleep, lock screen and password policy are unchanged
+- explicit/manual Sleep is still allowed and Wake-on-Connect remains the recovery path for a genuinely sleeping Mac
+- fixed a Swift string-interpolation syntax defect in the native streamer source and added Swift parse validation to this release audit
+- no automatic login, FileVault, password or lock-screen policy changes
+
+## 0.14.13 — ResolutionWake
+
+- explicit **2K** now means a real 2560×1440 H.264 output raster; **4K** means a real 3840×2160 output raster
+- explicit 1080p/2K/4K uses a centered 16:9 ScreenCaptureKit source crop instead of preserving the MacBook panel aspect ratio
+- mouse coordinates are inverse-mapped through the crop so pointer/click positions stay aligned with the Mac desktop
+- video-only ScreenCaptureKit/H.264 failures no longer terminate the Desktop control/input session
+- display sleep enters a video-waking retry state: the client repeatedly requests the restricted P0 `wake-display` action and reconnects only H.264
+- `wake-display` now runs its short `caffeinate -u` assertion in the active GUI user's launchd context when available, with a system fallback for loginwindow
+- Auto capture follows the Mac's current/main display; Zorin-side 2K/4K monitors are output targets, not assumed Mac-side displays
+- no automatic-login, FileVault, password, or lock-screen policy changes
+
+## 0.14.12 — DisplayWake
+
+- keep Desktop control/input alive when ScreenCaptureKit temporarily reports no display; only the H.264 channel retries
+- add restricted P0 `wake-display`, using a one-shot `caffeinate -u` user-activity assertion to turn an off display back on without changing login policy
+- enumerate real macOS displays and expose them to the Zorin client
+- Auto capture now prefers the largest external display instead of blindly taking `content.displays.first`
+- add explicit display selection plus Auto / 1080p / 1440p / 4K stream resolution controls
+- raise High to 20 Mbit/s and Ultra to 40 Mbit/s for sharper 2K/4K desktop text
+- no automatic-login, FileVault or lock-screen policy changes
+- Files: single-click now selects folders, double-click opens them, so **Download selected** can download an entire remote folder recursively
+
 ## 0.14.11 — WakeFullscreen
 
 - Fixed GTK full-screen controls by restoring initialization of the full-screen state and synchronizing UI state with GTK4 `notify::fullscreened`.

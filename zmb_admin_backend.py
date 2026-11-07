@@ -23,7 +23,7 @@ PROTOCOL_VERSION = "2"
 ADMIN_ACTIONS = {
     "status", "start-zmb", "stop-zmb", "restart-zmb", "recover-desktop", "repair-launch-agent",
     "pairing-list", "logs", "diagnose", "recover-all", "check-update", "update-now", "sleep", "reboot", "shutdown",
-    "xcode-overview", "xcode-open", "sim-open",
+    "xcode-overview", "xcode-open", "sim-open", "wake-display",
 }
 AUTO_UPDATE_MODES = {"off", "notify", "install"}
 WAKE_NETWORK_MODES = {"on", "off"}

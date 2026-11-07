@@ -1013,6 +1013,23 @@ set_wake_network_cmd() {
   printf 'ok=wake-network-set\nwake_on_network_setting=%s\n' "$(wake_on_network_setting)"
 }
 
+wake_display_cmd() {
+  require_root
+  # A short user-activity assertion turns an off display back on without
+  # changing the normal lock/login/sleep policy. When a GUI session exists,
+  # issue it inside that user's launchd context so the wake reaches the active
+  # login/desktop session; fall back to a system assertion at loginwindow.
+  local user uid
+  user="$(target_user || true)"
+  uid="$(user_uid "$user" || true)"
+  if [ -n "$user" ] && [ -n "$uid" ] && user_session_available "$uid"; then
+    /bin/launchctl asuser "$uid" /usr/bin/sudo -u "$user" /usr/bin/caffeinate -u -t 8 >/dev/null 2>&1 &
+  else
+    /usr/bin/caffeinate -u -t 8 >/dev/null 2>&1 &
+  fi
+  printf 'ok=display-wake-requested\n'
+}
+
 run_user_tool() {
   require_root
   local user uid home
@@ -1166,6 +1183,7 @@ case "${1:-}" in
   update-now) update_now_cmd ;;
   set-auto-update) [ "$#" -eq 2 ] || fail "usage: zmb-admin set-auto-update off|notify|install" 64; set_auto_update_cmd "$2" ;;
   set-wake-network) [ "$#" -eq 2 ] || fail "usage: zmb-admin set-wake-network on|off" 64; set_wake_network_cmd "$2" ;;
+  wake-display) [ "$#" -eq 1 ] || fail "usage: zmb-admin wake-display" 64; wake_display_cmd ;;
   xcode-overview) xcode_overview_cmd ;;
   xcode-open) xcode_open_cmd ;;
   sim-open) sim_open_cmd ;;
@@ -1208,6 +1226,7 @@ Usage: zmb-admin COMMAND
   update-now
   set-auto-update off|notify|install
   set-wake-network on|off
+  wake-display
   xcode-overview
   xcode-open
   sim-open

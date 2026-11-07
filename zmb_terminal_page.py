@@ -209,6 +209,19 @@ class TerminalController:
                 pass
         self._set_controls()
 
+    def disconnect_for_shutdown(self):
+        """Terminate the terminal child without touching VTE/GTK widgets."""
+        self.spawn_serial += 1
+        pid = self.child_pid
+        self.child_pid = -1
+        if pid > 0:
+            try:
+                os.kill(pid, 15)
+            except ProcessLookupError:
+                pass
+            except Exception:
+                pass
+
     def _child_exited(self, _terminal, status):
         self.child_pid = -1
         self.summary.set_text(f"Terminal disconnected (status {status}).")

@@ -7,6 +7,7 @@ import getpass
 import hashlib
 import hmac
 import ipaddress
+import json
 import os
 import platform
 import shutil
@@ -228,6 +229,21 @@ class CGRect(ctypes.Structure):
     _fields_ = [('origin', CGPoint), ('size', CGSize)]
 
 
+_ACTIVE_INPUT_DISPLAY_LOCK = threading.Lock()
+_ACTIVE_INPUT_DISPLAY_ID = 0
+
+
+def set_active_input_display(display_id: int) -> None:
+    global _ACTIVE_INPUT_DISPLAY_ID
+    with _ACTIVE_INPUT_DISPLAY_LOCK:
+        _ACTIVE_INPUT_DISPLAY_ID = max(0, int(display_id))
+
+
+def active_input_display() -> int:
+    with _ACTIVE_INPUT_DISPLAY_LOCK:
+        return int(_ACTIVE_INPUT_DISPLAY_ID)
+
+
 class MacInput:
     LEFT_DOWN = 1
     LEFT_UP = 2
@@ -291,8 +307,13 @@ class MacInput:
         self.cg.CGEventCreateScrollWheelEvent.restype = ctypes.c_void_p
         self.held_buttons: set[int] = set()
         self.held_modifiers: set[str] = set()
-        display = self.cg.CGMainDisplayID()
-        self.bounds = self.cg.CGDisplayBounds(display)
+
+    def _bounds(self) -> CGRect:
+        display = active_input_display() or int(self.cg.CGMainDisplayID())
+        bounds = self.cg.CGDisplayBounds(ctypes.c_uint32(display))
+        if bounds.size.width <= 0 or bounds.size.height <= 0:
+            bounds = self.cg.CGDisplayBounds(self.cg.CGMainDisplayID())
+        return bounds
 
     def _flags(self) -> int:
         flags = 0
@@ -311,8 +332,9 @@ class MacInput:
     def move(self, nx: float, ny: float) -> None:
         nx = min(1.0, max(0.0, float(nx)))
         ny = min(1.0, max(0.0, float(ny)))
-        x = self.bounds.origin.x + nx * self.bounds.size.width
-        y = self.bounds.origin.y + ny * self.bounds.size.height
+        bounds = self._bounds()
+        x = bounds.origin.x + nx * bounds.size.width
+        y = bounds.origin.y + ny * bounds.size.height
         if 1 in self.held_buttons:
             etype, button = self.LEFT_DRAGGED, 0
         elif 3 in self.held_buttons:
@@ -334,8 +356,9 @@ class MacInput:
             etype = self.RIGHT_DOWN if down else self.RIGHT_UP
         else:
             etype = self.OTHER_DOWN if down else self.OTHER_UP
-        x = self.bounds.origin.x + min(1.0, max(0.0, nx)) * self.bounds.size.width
-        y = self.bounds.origin.y + min(1.0, max(0.0, ny)) * self.bounds.size.height
+        bounds = self._bounds()
+        x = bounds.origin.x + min(1.0, max(0.0, nx)) * bounds.size.width
+        y = bounds.origin.y + min(1.0, max(0.0, ny)) * bounds.size.height
         self._post(self.cg.CGEventCreateMouseEvent(None, etype, CGPoint(x, y), cg_button))
         if down:
             self.held_buttons.add(button_num)
@@ -433,7 +456,8 @@ class NativeStreamerLibrary:
         self.path = streamer_library()
         self.lib = ctypes.CDLL(str(self.path))
         self.lib.zmb_streamer_create.argtypes = [
-            ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32
+            ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32,
+            ctypes.c_uint32, ctypes.c_int32, ctypes.c_int32
         ]
         self.lib.zmb_streamer_create.restype = ctypes.c_void_p
         self.lib.zmb_streamer_run.argtypes = [ctypes.c_void_p]
@@ -442,6 +466,81 @@ class NativeStreamerLibrary:
         self.lib.zmb_streamer_stop.restype = None
         self.lib.zmb_streamer_destroy.argtypes = [ctypes.c_void_p]
         self.lib.zmb_streamer_destroy.restype = None
+        self.lib.zmb_virtual_display_ensure.argtypes = [ctypes.c_int32, ctypes.c_int32]
+        self.lib.zmb_virtual_display_ensure.restype = ctypes.c_uint32
+        self.lib.zmb_virtual_display_release.argtypes = []
+        self.lib.zmb_virtual_display_release.restype = None
+        self.lib.zmb_virtual_display_current_id.argtypes = []
+        self.lib.zmb_virtual_display_current_id.restype = ctypes.c_uint32
+        self.lib.zmb_virtual_display_last_error.argtypes = []
+        self.lib.zmb_virtual_display_last_error.restype = ctypes.c_void_p
+        self.lib.zmb_display_list_json.argtypes = []
+        self.lib.zmb_display_list_json.restype = ctypes.c_void_p
+        self.lib.zmb_string_free.argtypes = [ctypes.c_void_p]
+        self.lib.zmb_string_free.restype = None
+
+    def _owned_string(self, fn) -> str:
+        pointer = fn()
+        if not pointer:
+            return ''
+        try:
+            return ctypes.string_at(pointer).decode('utf-8', 'replace')
+        finally:
+            self.lib.zmb_string_free(pointer)
+
+    def ensure_virtual_display(self, width: int, height: int) -> int:
+        display_id = int(self.lib.zmb_virtual_display_ensure(int(width), int(height)))
+        if display_id <= 0:
+            detail = self._owned_string(self.lib.zmb_virtual_display_last_error)
+            raise RuntimeError('virtual display unavailable' + (f': {detail}' if detail else ''))
+        return display_id
+
+    def release_virtual_display(self) -> None:
+        self.lib.zmb_virtual_display_release()
+
+    def current_virtual_display_id(self) -> int:
+        return int(self.lib.zmb_virtual_display_current_id())
+
+    def displays(self) -> list[dict]:
+        pointer = self.lib.zmb_display_list_json()
+        if not pointer:
+            return []
+        try:
+            raw = ctypes.string_at(pointer).decode('utf-8', 'replace')
+            data = json.loads(raw)
+            if not isinstance(data, list):
+                return []
+            rows = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    display_id = int(item.get('id', 0))
+                    width = int(item.get('width', 0))
+                    height = int(item.get('height', 0))
+                except (TypeError, ValueError):
+                    continue
+                if display_id <= 0 or width <= 0 or height <= 0:
+                    continue
+                rows.append({
+                    'id': display_id,
+                    'width': width,
+                    'height': height,
+                    'builtin': bool(item.get('builtin')),
+                    'main': bool(item.get('main')),
+                    'virtual': bool(item.get('virtual')),
+                })
+            return rows
+        finally:
+            self.lib.zmb_string_free(pointer)
+
+
+def available_displays(*, log=print) -> list[dict]:
+    try:
+        return [item for item in NativeStreamerLibrary().displays() if not item.get('virtual')]
+    except Exception as exc:
+        log(f'[video] display enumeration unavailable: {type(exc).__name__}: {exc}')
+        return []
 
 
 def _read_exact_file(stream, size: int, *, timeout: float = 15.0) -> bytes:
@@ -516,7 +615,7 @@ def control_session(sock: ssl.SSLSocket, *, log=print) -> None:
         log('[control] disconnected')
 
 
-def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int, *, log=print) -> None:
+def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int, display_id: int = 0, target_width: int = 0, target_height: int = 0, *, log=print) -> None:
     """Stream H.264 from ScreenCaptureKit running inside the main app process.
 
     The native Swift code is a dylib loaded with ctypes, not a child executable.
@@ -533,6 +632,17 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
             'then fully quit and reopen the app. The server will not request permission from a remote Connect.'
         )
     native = NativeStreamerLibrary()
+    capture_display_id = max(0, int(display_id))
+    virtual_mode = int(target_width) > 0 and int(target_height) > 0
+    if virtual_mode:
+        capture_display_id = native.ensure_virtual_display(int(target_width), int(target_height))
+        log(f'[video] virtual remote desktop ready: {target_width}x{target_height} display_id={capture_display_id}')
+    else:
+        # Auto/native mode returns to the physical Mac display arrangement.
+        native.release_virtual_display()
+        log(f'[video] physical display mode selected: display_id={capture_display_id or "auto"}')
+    set_active_input_display(capture_display_id)
+
     data_r, data_w = os.pipe()
     log_r, log_w = os.pipe()
     # Give Swift its own descriptors so Python can close its local write ends.
@@ -545,6 +655,9 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
         max(1, min(int(round(fps)), 60)),
         max(640, int(max_width)),
         max(1_000_000, int(bitrate)),
+        max(0, min(int(target_width), 3840)),
+        max(0, min(int(target_height), 2160)),
+        max(0, min(int(capture_display_id), 0xFFFFFFFF)),
         native_data_w,
         native_log_w,
     )
@@ -786,7 +899,7 @@ def verify_session_password(expected, supplied: str) -> bool:
             return False
     return hmac.compare_digest(str(supplied), str(expected))
 
-def video_options_from_auth(auth: dict, defaults) -> tuple[float, int, int, str]:
+def video_options_from_auth(auth: dict, defaults) -> tuple[float, int, int, str, int, int, int]:
     """Return clamped per-client video preferences from the authenticated request.
 
     The client may request a preset, but the server always clamps untrusted values
@@ -810,8 +923,21 @@ def video_options_from_auth(auth: dict, defaults) -> tuple[float, int, int, str]
     fps = max(5.0, min(60.0, fps))
     max_width = max(960, min(3840, max_width))
     bitrate = max(1_000_000, min(40_000_000, bitrate))
+    try:
+        target_width = int(request.get('target_width', 0) or 0)
+        target_height = int(request.get('target_height', 0) or 0)
+    except (TypeError, ValueError):
+        target_width = target_height = 0
+    allowed_targets = {(1920, 1080), (2560, 1440), (3840, 2160)}
+    if (target_width, target_height) not in allowed_targets:
+        target_width = target_height = 0
     quality = str(auth.get('quality', 'Custom')).strip()[:32] or 'Custom'
-    return fps, max_width, bitrate, quality
+    try:
+        display_id = int(auth.get('display_id', 0) or 0)
+    except (TypeError, ValueError):
+        display_id = 0
+    display_id = max(0, min(display_id, 0xFFFFFFFF))
+    return fps, max_width, bitrate, quality, display_id, target_width, target_height
 
 
 def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: str, share: Path, args, log=print) -> None:
@@ -848,17 +974,20 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
             sock.sendall(pack_packet(AUTH_FAIL, b'bad role'))
             log(f'[client {peer_ip}] rejected: bad role {role!r}')
             return
-        sock.sendall(pack_json(AUTH_OK, {'role': role, 'server': 'ZorinMac-Bridge'}))
+        auth_ok = {'role': role, 'server': 'ZorinMac-Bridge'}
+        if role == 'desktop':
+            auth_ok['displays'] = available_displays(log=log)
+        sock.sendall(pack_json(AUTH_OK, auth_ok))
         log(f'[client {peer_ip}] authenticated role={role}')
         if role == 'desktop':
             control_session(sock, log=log)
         elif role == 'video':
-            fps, max_width, bitrate, quality = video_options_from_auth(auth, args)
+            fps, max_width, bitrate, quality, display_id, target_width, target_height = video_options_from_auth(auth, args)
             log(
                 f'[video] client profile={quality!r} max_width={max_width} '
-                f'fps={fps:g} bitrate={bitrate}'
+                f'target={target_width}x{target_height} fps={fps:g} bitrate={bitrate} display_id={display_id}'
             )
-            video_session(sock, fps, max_width, bitrate, log=log)
+            video_session(sock, fps, max_width, bitrate, display_id, target_width, target_height, log=log)
         else:
             file_session(sock, share)
     except (ssl.SSLError, ConnectionError, OSError) as exc:
@@ -877,6 +1006,48 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
                 raw.close()
         except Exception:
             pass
+
+
+class IdleSleepInhibitor:
+    """Prevent automatic system idle sleep while the remote server is alive.
+
+    The display may still turn off and the normal lock/login policy remains in
+    force. Explicit user-requested sleep is not disabled. This avoids the common
+    MacBook failure mode where display-off immediately makes the LAN server
+    unreachable before Wake-on-Connect can help.
+    """
+    def __init__(self, *, log=print) -> None:
+        self.log = log
+        self.proc: subprocess.Popen | None = None
+
+    def start(self) -> None:
+        if self.proc is not None:
+            return
+        try:
+            self.proc = subprocess.Popen(
+                ['/usr/bin/caffeinate', '-i', '-w', str(os.getpid())],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            self.log('[power] Remote Ready: automatic idle system sleep inhibited; display sleep/login policy unchanged.')
+        except Exception as exc:
+            self.proc = None
+            self.log(f'[power] WARNING: could not start idle-sleep inhibitor: {type(exc).__name__}: {exc}')
+
+    def stop(self) -> None:
+        proc, self.proc = self.proc, None
+        if proc is None:
+            return
+        try:
+            proc.terminate()
+            proc.wait(timeout=1.0)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
 
 def serve(bind: str, port: int, share: Path, fps: float, max_width: int, bitrate: int, password: str, *, stop_event=None, log=print, ready_callback=None) -> None:
@@ -912,6 +1083,9 @@ def serve(bind: str, port: int, share: Path, fps: float, max_width: int, bitrate
     if ready_callback is not None:
         ready_callback(fingerprint)
 
+    idle_sleep = IdleSleepInhibitor(log=log)
+    idle_sleep.start()
+
     # Bound concurrent pre-auth/TLS client threads. A LAN peer should not be able
     # to exhaust the server merely by opening many sockets and waiting for the
     # handshake/auth timeout. One normal ZMB client uses only a few connections.
@@ -943,6 +1117,12 @@ def serve(bind: str, port: int, share: Path, fps: float, max_width: int, bitrate
             ).start()
     finally:
         listener.close()
+        idle_sleep.stop()
+        try:
+            NativeStreamerLibrary().release_virtual_display()
+        except Exception:
+            pass
+        set_active_input_display(0)
         log('Server stopped.')
 
 

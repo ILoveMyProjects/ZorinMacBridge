@@ -25,11 +25,13 @@ def main() -> None:
     assert verifier.verify('correct horse battery staple')
     assert not verifier.verify('wrong')
     defaults = SimpleNamespace(fps=30.0, max_width=1920, bitrate=8_000_000)
-    fps, width, bitrate, quality = video_options_from_auth(
-        {'quality': 'Ultra', 'video': {'fps': 999, 'max_width': 99999, 'bitrate': 999_000_000}},
+    fps, width, bitrate, quality, display_id, target_width, target_height = video_options_from_auth(
+        {'quality': 'Ultra', 'display_id': 1234, 'video': {'fps': 999, 'max_width': 99999, 'bitrate': 999_000_000, 'target_width': 3840, 'target_height': 2160}},
         defaults,
     )
-    assert (fps, width, bitrate, quality) == (60.0, 3840, 40_000_000, 'Ultra')
+    assert (fps, width, bitrate, quality, display_id, target_width, target_height) == (60.0, 3840, 40_000_000, 'Ultra', 1234, 3840, 2160)
+    rejected = video_options_from_auth({'video': {'target_width': 3000, 'target_height': 2000}}, defaults)
+    assert rejected[-2:] == (0, 0)
     server_source = Path('mac_server.py').read_text(encoding='utf-8')
     assert 'The server will not request permission from a remote Connect.' in server_source
     assert 'native_messages' in server_source

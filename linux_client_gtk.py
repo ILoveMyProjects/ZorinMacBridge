@@ -36,6 +36,7 @@ from linux_client import (
     MODIFIER_KEYS,
     SPECIAL_KEYS,
     VIDEO_QUALITY_PRESETS,
+    VIDEO_RESOLUTION_PRESETS,
     format_fp,
     human_size,
     is_lan_ip,
@@ -64,6 +65,7 @@ from zmb_system_page import SystemController
 from zmb_xcode_page import XcodeController
 from zmb_terminal_page import TerminalController
 from zmb_projects_page import ProjectsController
+from zmb_shutdown import arm_hard_exit_watchdog
 
 # GTK4 and the GTK3 AppIndicator backend cannot live in the same process.
 # Prefer pystray's Xorg backend as a best-effort tray icon under X11/XWayland.
@@ -188,6 +190,11 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.capture_input_var = ValueVar(True)
         self.auto_reconnect_var = ValueVar(True)
         self.quality_var = ValueVar('Adaptive')
+        self.resolution_var = ValueVar('Auto')
+        self.display_id_var = ValueVar(0)
+        self._display_choices = [('Auto — current Mac display', 0)]
+        self._display_source_sizes = {}
+        self._auto_display_id = 0
         self.machine_var = ValueVar('')
         self.remember_credentials_var = ValueVar(True)
 
@@ -242,6 +249,8 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self._file_render_serial = 0
         self._desktop_trust_recovery_busy = False
         self._wake_connect_busy = False
+        self._display_wake_busy = False
+        self._last_display_wake_at = 0.0
         self._closing = False
 
         self._build_native_ui()
@@ -410,6 +419,28 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.video_stats_label.set_tooltip_text('Decoded FPS · receive rate · local latest-frame drops · render queue delay')
         video_row.append(self.video_stats_label)
 
+        source_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.connection_card.append(source_row)
+        source_label = Gtk.Label(label='Display', xalign=0)
+        source_label.set_width_chars(12)
+        source_row.append(source_label)
+        self.display_model = Gtk.StringList.new([self._display_choices[0][0]])
+        self.display_dropdown = Gtk.DropDown(model=self.display_model)
+        self.display_dropdown.connect('notify::selected', self._display_dropdown_changed)
+        source_row.append(self.display_dropdown)
+        resolution_label = Gtk.Label(label='Resolution', xalign=0)
+        resolution_label.set_margin_start(12)
+        source_row.append(resolution_label)
+        self.resolution_model = Gtk.StringList.new(list(VIDEO_RESOLUTION_PRESETS))
+        self.resolution_dropdown = Gtk.DropDown(model=self.resolution_model)
+        self.resolution_dropdown.set_selected(0)
+        self.resolution_dropdown.connect('notify::selected', self._resolution_dropdown_changed)
+        source_row.append(self.resolution_dropdown)
+        self.display_description = Gtk.Label(label='1080p / 2K / 4K create a true virtual macOS desktop; no MacBook-panel upscaling.', xalign=0)
+        self.display_description.add_css_class('zmb-muted')
+        self.display_description.set_hexpand(True)
+        source_row.append(self.display_description)
+
         self.status_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         page.append(self.status_box)
         self.status_icon = Gtk.Image.new_from_icon_name('network-offline-symbolic')
@@ -559,7 +590,8 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         upload_folder.connect('clicked', lambda *_: self.upload_folder())
         toolbar.append(upload_folder)
         self.file_action_buttons.append(upload_folder)
-        download = Gtk.Button(label='Download')
+        download = Gtk.Button(label='Download selected')
+        download.set_tooltip_text('Single-click a file or folder to select it; double-click a folder to open it.')
         download.add_css_class('suggested-action')
         download.connect('clicked', lambda *_: self.download_selected())
         toolbar.append(download)
@@ -575,13 +607,16 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.file_scroller = scrolled
         self.file_list = Gtk.ListBox()
         self.file_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        # Single-click must only select an entry so folders can be downloaded.
+        # Folder navigation is deliberately a double-click/activation action.
+        self.file_list.set_activate_on_single_click(False)
         self.file_list.add_css_class('boxed-list')
         self.file_list.connect('row-activated', self._file_row_activated)
         scrolled.set_child(self.file_list)
         root.append(scrolled)
 
         note = Gtk.Label(
-            label='Mac folder: ~/ZorinMac-Share · File access is restricted to this folder; symlinks are skipped.',
+            label='Mac folder: ~/ZorinMac-Share · Single-click selects; double-click opens folders; Download selected downloads files or whole folders recursively. Symlinks are skipped.',
             xalign=0,
         )
         note.add_css_class('zmb-muted')
@@ -676,6 +711,70 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         if self.connected:
             self._request_video_reconfigure()
             self.status_var.set(f'Connected — applying {name} on the video channel')
+
+    def _display_dropdown_changed(self, _widget, _pspec) -> None:
+        idx = self.display_dropdown.get_selected()
+        if idx == Gtk.INVALID_LIST_POSITION or idx >= len(self._display_choices):
+            return
+        label, display_id = self._display_choices[idx]
+        self.display_id_var.set(int(display_id))
+        self._log('INFO', f'Capture display selected: {label} (id={display_id}).')
+        if self.connected:
+            self._request_video_reconfigure()
+            self.status_var.set(f'Connected — switching capture to {label}')
+
+    def _resolution_dropdown_changed(self, _widget, _pspec) -> None:
+        idx = self.resolution_dropdown.get_selected()
+        names = list(VIDEO_RESOLUTION_PRESETS)
+        if idx == Gtk.INVALID_LIST_POSITION or idx >= len(names):
+            return
+        name = names[idx]
+        self.resolution_var.set(name)
+        virtual_mode = name != 'Auto'
+        self.display_dropdown.set_sensitive(not virtual_mode)
+        if virtual_mode:
+            self.display_description.set_text(f'{name} = true virtual macOS desktop; ScreenCaptureKit captures it directly.')
+        else:
+            self.display_description.set_text('Auto = capture the current physical Mac display at its native geometry.')
+        self._log('INFO', f'Remote desktop resolution selected: {name}' + (' (virtual display).' if virtual_mode else ' (physical display).'))
+        if self.connected:
+            self._request_video_reconfigure()
+            self.status_var.set(f'Connected — switching remote desktop to {name}')
+
+    def _apply_display_list(self, displays) -> None:
+        rows = []
+        for item in displays if isinstance(displays, list) else []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                display_id = int(item.get('id', 0))
+                width = int(item.get('width', 0))
+                height = int(item.get('height', 0))
+            except (TypeError, ValueError):
+                continue
+            if display_id <= 0 or width <= 0 or height <= 0:
+                continue
+            built_in = bool(item.get('builtin'))
+            main = bool(item.get('main'))
+            kind = 'MacBook built-in' if built_in else 'External'
+            suffix = ' · main' if main else ''
+            label = f'{kind} — {width}×{height}{suffix}'
+            rows.append((label, display_id, built_in, width * height, main, width, height))
+        rows.sort(key=lambda row: (not row[4], -row[3], row[1]))
+        # Auto follows the Mac's main display first. This project often runs on a
+        # MacBook with no external Mac-side monitor; Zorin-side 2K/4K monitors are
+        # unrelated to ScreenCaptureKit source selection.
+        automatic = next((row for row in rows if row[4]), rows[0] if rows else None)
+        self._auto_display_id = int(automatic[1]) if automatic else 0
+        self._display_source_sizes = {int(row[1]): (int(row[5]), int(row[6])) for row in rows}
+        choices = [('Auto — current Mac display', 0)] + [(row[0], row[1]) for row in rows]
+        current_id = int(self.display_id_var.get() or 0)
+        self._display_choices = choices
+        self.display_model = Gtk.StringList.new([label for label, _ in choices])
+        self.display_dropdown.set_model(self.display_model)
+        selected = next((i for i, (_, did) in enumerate(choices) if did == current_id), 0)
+        self.display_dropdown.set_selected(selected)
+        self._log('INFO', 'Capture displays: ' + ', '.join(label for label, _ in choices))
 
     def _refresh_fullscreen_bar(self) -> None:
         if hasattr(self, 'fs_quality_label'):
@@ -1166,6 +1265,10 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                     found_mac = normalize_mac_address(last_status.get('wake_mac_address'))
                     if found_mac and found_mac != active_profile.get('wake_mac_address'):
                         active_profile['wake_mac_address'] = found_mac
+                    try:
+                        run_action_for_profile(active_profile, 'wake-display', timeout=8)
+                    except Exception as exc:
+                        self._log('DEBUG', f'Wake-on-Connect: wake-display probe returned {exc}.')
                     if last_status.get('zmb_port_listening') == '1':
                         GLib.idle_add(done, active_profile, None)
                         return
@@ -1209,6 +1312,40 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
 
         threading.Thread(target=worker, daemon=True, name='zmb-wake-connect').start()
         return True
+
+    def _wake_display_for_video_async(self) -> None:
+        now = time.monotonic()
+        if self._display_wake_busy or (now - self._last_display_wake_at) < 2.0:
+            return
+        sid = str(self.selected_server_id or '').strip()
+        host = str(self.ip_var.get() or '').strip()
+        profile = get_profile(sid, host)
+        if not profile:
+            self._log('WARNING', 'Display wake requested but no paired System profile is available.')
+            return
+        self._display_wake_busy = True
+        self._last_display_wake_at = now
+        self.status_var.set('Mac display is asleep — waking screen…')
+        self._log('INFO', 'ScreenCaptureKit reported no display; requesting one-shot display wake through paired P0.')
+
+        def worker():
+            try:
+                run_action_for_profile(profile, 'wake-display', timeout=8)
+                error = ''
+            except Exception as exc:
+                error = str(exc)
+            GLib.idle_add(done, error)
+
+        def done(error: str):
+            self._display_wake_busy = False
+            if error:
+                self._log('WARNING', 'Display wake action failed: ' + error)
+            else:
+                self.status_var.set('Mac display wake requested — waiting for video…')
+                self._log('INFO', 'Display wake action accepted; video channel will retry without disconnecting control.')
+            return False
+
+        threading.Thread(target=worker, daemon=True, name='zmb-display-wake').start()
 
     def connect_remote(self) -> None:
         if self.connected or (self.net_thread is not None and self.net_thread.is_alive()):
@@ -1364,6 +1501,10 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                 elif kind == 'error':
                     self.status_var.set(f'Error: {item[1]}')
                     self._log('ERROR', item[1])
+                elif kind == 'display_sleeping':
+                    self._wake_display_for_video_async()
+                elif kind == 'display_list':
+                    self._apply_display_list(item[1])
                 elif kind == 'video_stats':
                     stats = item[1]
                     server = stats.get('server') or {}
@@ -1485,6 +1626,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             return
         pos = self._norm_point(x, y)
         if pos:
+            pos = self._transform_stream_point(*pos)
             self._enqueue(pack_packet(MOUSE_MOVE, __import__('struct').pack('!ff', pos[0], pos[1])))
 
     def _gtk_pressed(self, gesture, n_press, x, y):
@@ -1496,6 +1638,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         pos = self._norm_point(x, y)
         if pos and button in (1, 2, 3):
             self.mouse_buttons_down.add(button)
+            pos = self._transform_stream_point(*pos)
             self._enqueue(pack_packet(MOUSE_BUTTON, __import__('struct').pack('!BBff', button, 1, pos[0], pos[1])))
         self.picture.grab_focus()
 
@@ -1506,6 +1649,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         pos = self._norm_point(x, y)
         if pos and button in (1, 2, 3):
             self.mouse_buttons_down.discard(button)
+            pos = self._transform_stream_point(*pos)
             self._enqueue(pack_packet(MOUSE_BUTTON, __import__('struct').pack('!BBff', button, 0, pos[0], pos[1])))
 
     def _gtk_scroll(self, _controller, dx, dy):
@@ -1985,34 +2129,55 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
 
     def _on_close_request(self, *_args):
         self.on_close(reason='window-close')
-        # We own shutdown. Returning True prevents GTK from starting a second
-        # close sequence while asynchronous cleanup is still in progress.
-        return True
+        # Let GTK complete its normal window destruction.  Returning True here
+        # used to veto the compositor/window-manager close and left a visible
+        # "not responding" window whenever GApplication cleanup stalled.
+        return False
 
     def on_close(self, reason: str = 'user-quit') -> None:
         if self._closing:
             return
         self._closing = True
-        self._log('INFO', f'Application shutdown requested explicitly: {reason}.')
+
+        # Visual shutdown comes first.  The user must never be left staring at a
+        # hung window while optional native/SSH/tray cleanup is winding down.
+        try:
+            self.set_visible(False)
+        except Exception:
+            pass
+
+        # Explicit Quit gets a hard upper bound.  Normal exit terminates this
+        # daemon watchdog automatically; a wedged GI/VTE/pystray backend cannot
+        # keep the client process alive indefinitely.
+        arm_hard_exit_watchdog(1.25)
+
         app_for_reason = self.get_application()
         if app_for_reason is not None:
             app_for_reason._zmb_shutdown_reason = str(reason)
+        try:
+            self._log('INFO', f'Application shutdown requested explicitly: {reason}.')
+        except Exception:
+            pass
 
-        # Invalidate late callbacks immediately. No network/update worker is
-        # allowed to keep the GTK window alive during explicit application exit.
+        # Invalidate late callbacks immediately.  Do not call disconnect_remote()
+        # here: that is an interactive UI path which touches fullscreen/input
+        # widgets.  Process exit will close sockets; only cheap stop flags/queues
+        # are needed during application shutdown.
         self._update_check_busy = False
         self._update_check_serial += 1
         self._discovery_busy = False
         self._discovery_serial += 1
         self.disconnect_requested = True
         self.stop_event.set()
-
+        self.connected = False
         try:
-            self.disconnect_remote()
+            self._clear_session_queues()
         except Exception:
             pass
+
         try:
-            self.terminal_controller.disconnect()
+            # Shutdown variant deliberately avoids VTE.reset()/widget updates.
+            self.terminal_controller.disconnect_for_shutdown()
         except Exception:
             pass
         try:
@@ -2021,8 +2186,6 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         except Exception:
             pass
 
-        # pystray backends can block while their native loop is shutting down.
-        # Stop the tray asynchronously and quit GTK immediately.
         if self.tray is not None:
             try:
                 self.tray.stop_async()

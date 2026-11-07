@@ -68,8 +68,15 @@ VIDEO_QUALITY_PRESETS = {
     'Adaptive': {'fps': 30, 'max_width': 1920, 'bitrate': 8_000_000, 'adaptive': True},
     'Low': {'fps': 15, 'max_width': 1280, 'bitrate': 3_000_000},
     'Balanced': {'fps': 30, 'max_width': 1920, 'bitrate': 8_000_000},
-    'High': {'fps': 30, 'max_width': 2560, 'bitrate': 14_000_000},
-    'Ultra': {'fps': 60, 'max_width': 3840, 'bitrate': 25_000_000},
+    'High': {'fps': 30, 'max_width': 2560, 'bitrate': 20_000_000},
+    'Ultra': {'fps': 60, 'max_width': 3840, 'bitrate': 40_000_000},
+}
+
+VIDEO_RESOLUTION_PRESETS = {
+    'Auto': (0, 0),
+    '1080p': (1920, 1080),
+    '2K': (2560, 1440),
+    '4K': (3840, 2160),
 }
 
 
@@ -128,6 +135,10 @@ class ClientApp:
         self.selected_server_name = ''
         self.remember_credentials_var = tk.BooleanVar(value=True)
         self.quality_var = tk.StringVar(value='Adaptive')
+        self.resolution_var = tk.StringVar(value='Auto')
+        self.display_id_var = tk.IntVar(value=0)
+        self._display_source_sizes: dict[int, tuple[int, int]] = {}
+        self._auto_display_id = 0
         self.remember_credentials_active = True
         self._connect_snapshot = None
         self._credential_serial = 0
@@ -595,6 +606,14 @@ class ClientApp:
             sock.close()
             self._log('ERROR', f'Unexpected authentication response packet type: {kind}')
             raise ConnectionError('Invalid server response during authentication')
+        try:
+            auth_info = unpack_json(payload)
+        except Exception:
+            auth_info = {}
+        if role == 'desktop' and isinstance(auth_info, dict):
+            displays = auth_info.get('displays')
+            if isinstance(displays, list):
+                self.ui_queue.put(('display_list', displays))
         self._log('INFO', f'Authentication successful for role={role!r}.')
         return sock
 
@@ -748,6 +767,39 @@ class ClientApp:
             name = 'Adaptive'
         return name, dict(VIDEO_QUALITY_PRESETS[name])
 
+    def _selected_video_resolution(self) -> tuple[int, int]:
+        var = getattr(self, 'resolution_var', None)
+        try:
+            name = str(var.get()) if var is not None else 'Auto'
+        except Exception:
+            name = 'Auto'
+        value = VIDEO_RESOLUTION_PRESETS.get(name, (0, 0))
+        try:
+            width, height = value
+            return max(0, int(width)), max(0, int(height))
+        except Exception:
+            return 0, 0
+
+    def _selected_video_width(self) -> int:
+        # Backwards-compatible helper used by older tests/UI code.
+        return self._selected_video_resolution()[0]
+
+    def _transform_stream_point(self, nx: float, ny: float) -> tuple[float, float]:
+        """Return normalized coordinates for the active remote desktop.
+
+        In 0.14.14 explicit 1080p/2K/4K modes are real macOS virtual
+        displays of the selected size. There is no source crop/upscale, so
+        pointer coordinates map 1:1 in normalized virtual-display space.
+        """
+        return min(1.0, max(0.0, float(nx))), min(1.0, max(0.0, float(ny)))
+
+    def _selected_display_id(self) -> int:
+        var = getattr(self, 'display_id_var', None)
+        try:
+            return max(0, int(var.get())) if var is not None else 0
+        except Exception:
+            return 0
+
     def _request_video_reconfigure(self) -> None:
         event = getattr(self, '_video_reconfigure_event', None)
         if event is not None:
@@ -786,6 +838,13 @@ class ClientApp:
                 profile = {k: v for k, v in requested.items() if k != 'adaptive'}
                 effective_name = profile_name
 
+            target_width, target_height = self._selected_video_resolution()
+            if target_width:
+                profile['max_width'] = target_width
+                profile['target_width'] = target_width
+                profile['target_height'] = target_height
+            display_id = self._selected_display_id()
+
             try:
                 self._log(
                     'INFO',
@@ -795,6 +854,7 @@ class ClientApp:
                 sock = self._secure_connect('video', {
                     'video': profile,
                     'quality': effective_name,
+                    'display_id': display_id,
                 })
                 # ScreenCaptureKit may legitimately emit no frames while the display is
                 # completely unchanged. A read timeout is therefore an idle tick, NOT a
@@ -903,8 +963,35 @@ class ClientApp:
                 if not self.stop_event.is_set():
                     reason = f'{type(exc).__name__}: {exc}'
                     self._log('ERROR', f'Video stream failed: {reason}')
-                    self.ui_queue.put(('error', f'Video stream failed: {exc}'))
-                    self.stop_event.set()
+                    lower_reason = str(exc).lower()
+                    sleeping = (
+                        'no display available for screencapturekit' in lower_reason
+                        or 'scstreamerrordomain' in lower_reason
+                        or 'stream-stopped' in lower_reason
+                    )
+                    if sleeping:
+                        # Display sleep / ScreenCaptureKit interruption is a video-only
+                        # state. Never tear down control/input/file channels. Keep
+                        # requesting a user-activity wake and reconnect only H.264.
+                        self.ui_queue.put(('display_sleeping', str(exc)))
+                        retry_delay = min(5.0, 1.0 + stable_windows)
+                        deadline = time.monotonic() + retry_delay
+                        while time.monotonic() < deadline and not self.stop_event.is_set():
+                            if self._video_reconfigure_event.is_set():
+                                break
+                            time.sleep(0.1)
+                        stable_windows = min(stable_windows + 1, 4)
+                        continue
+                    # Video is deliberately independent from the control session. A
+                    # codec/capture failure may make the picture unavailable, but it
+                    # must never disconnect keyboard/mouse or force a full reconnect.
+                    self.ui_queue.put(('error', f'Video stream failed: {exc}; control session remains connected'))
+                    deadline = time.monotonic() + 3.0
+                    while time.monotonic() < deadline and not self.stop_event.is_set():
+                        if self._video_reconfigure_event.is_set():
+                            break
+                        time.sleep(0.1)
+                    continue
             finally:
                 try:
                     if sock is not None:
@@ -1165,6 +1252,7 @@ class ClientApp:
             return
         pos = self._norm_xy(event)
         if pos:
+            pos = self._transform_stream_point(*pos)
             self._enqueue(pack_packet(MOUSE_MOVE, struct.pack('!ff', *pos)))
 
     def _mouse_button(self, button: int, down: bool, event) -> None:
@@ -1177,6 +1265,7 @@ class ClientApp:
                 self.mouse_buttons_down.add(button)
             else:
                 self.mouse_buttons_down.discard(button)
+            pos = self._transform_stream_point(*pos)
             self._enqueue(pack_packet(MOUSE_BUTTON, struct.pack('!BBff', button, int(down), pos[0], pos[1])))
 
     def _send_scroll(self, dx: int, dy: int) -> None:

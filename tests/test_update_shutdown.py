@@ -7,6 +7,7 @@ from pathlib import Path
 
 import updates
 from tray_icon import TrayController
+from zmb_shutdown import arm_hard_exit_watchdog
 from updates import ReleaseAsset
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -177,16 +178,37 @@ def test_persistent_lifecycle_log_and_single_quit_owner() -> None:
     assert "Python process exiting normally (atexit)." in text
 
 
+def test_hard_exit_watchdog_has_bounded_fallback() -> None:
+    fired = threading.Event()
+    codes: list[int] = []
+
+    def fake_exit(code: int) -> None:
+        codes.append(code)
+        fired.set()
+
+    start = time.monotonic()
+    arm_hard_exit_watchdog(0.05, exit_func=fake_exit)
+    assert time.monotonic() - start < 0.05
+    assert fired.wait(0.5)
+    assert codes == [0]
+
+
 def test_close_path_is_nonblocking_by_construction() -> None:
     text = (ROOT / 'linux_client_gtk.py').read_text(encoding='utf-8')
-    block = text.split('    def _on_close_request', 1)[1].split('\n\n', 3)
     lifecycle = text.split('    def _on_close_request', 1)[1]
-    assert 'return True' in lifecycle
-    assert 'self.projects_controller.cancel(wait=False, update_ui=False)' in lifecycle
-    assert 'self.tray.stop_async()' in lifecycle
-    assert 'self.tray.stop()' not in lifecycle
-    assert 'self._update_check_serial += 1' in lifecycle
-    assert 'self._discovery_serial += 1' in lifecycle
+    close_request = lifecycle.split('    def on_close', 1)[0]
+    on_close = lifecycle.split('    def on_close', 1)[1].split('\n\nclass ClientApplication', 1)[0]
+    assert 'return False' in close_request
+    assert 'return True' not in close_request
+    assert 'self.set_visible(False)' in on_close
+    assert 'arm_hard_exit_watchdog(1.25)' in on_close
+    assert 'self.disconnect_remote()' not in on_close
+    assert 'self.terminal_controller.disconnect_for_shutdown()' in on_close
+    assert 'self.projects_controller.cancel(wait=False, update_ui=False)' in on_close
+    assert 'self.tray.stop_async()' in on_close
+    assert 'self.tray.stop()' not in on_close
+    assert 'self._update_check_serial += 1' in on_close
+    assert 'self._discovery_serial += 1' in on_close
 
 
 def main() -> None:
@@ -196,8 +218,9 @@ def main() -> None:
     test_tray_stop_async_never_blocks_caller()
     test_update_paths_cannot_quit_application()
     test_persistent_lifecycle_log_and_single_quit_owner()
+    test_hard_exit_watchdog_has_bounded_fallback()
     test_close_path_is_nonblocking_by_construction()
-    assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.11'
+    assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.15'
     print('update/shutdown regression tests: OK')
 
 

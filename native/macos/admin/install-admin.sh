@@ -158,6 +158,7 @@ $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin set-auto-update noti
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin set-auto-update install
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin set-wake-network on
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin set-wake-network off
+$TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin wake-display
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin xcode-overview
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin xcode-open
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin sim-open
