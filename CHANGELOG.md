@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.14.19 — PreloginConnectFix
+## 0.15.0 — PreloginConnectFix
 
 - Fixed Desktop Connect misclassifying `system online + desktop absent` as a sleeping/offline Mac. Wake-on-LAN is now used only after the live P0/System channel is unavailable.
 - Added bounded P0 `recover-prelogin` for `GUI_SESSION=NO`, with remote LoginWindow helper recovery and readiness polling.

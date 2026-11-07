@@ -1,6 +1,6 @@
 # ZorinMacBridge
 
-## 0.14.19 pre-login connect fix
+## 0.15.0 pre-login connect fix
 
 When Bonjour/P0 reports **system online** but the normal Aqua Desktop is absent, the client now treats the Mac as awake and recovers the LoginWindow endpoint through the paired P0 channel. It no longer sends Wake-on-LAN merely because the Desktop role is missing. The macOS helper also removes the invalid `gui/0` assumption and can load the pre-login LaunchAgent into an already-existing LoginWindow session after an in-place update.
 

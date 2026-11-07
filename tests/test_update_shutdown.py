@@ -220,7 +220,7 @@ def main() -> None:
     test_persistent_lifecycle_log_and_single_quit_owner()
     test_hard_exit_watchdog_has_bounded_fallback()
     test_close_path_is_nonblocking_by_construction()
-    assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.14.19'
+    assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.0'
     print('update/shutdown regression tests: OK')
 
 
