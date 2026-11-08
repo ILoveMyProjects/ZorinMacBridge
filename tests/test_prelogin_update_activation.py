@@ -3,7 +3,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ADMIN = (ROOT / 'native/macos/admin/zmb-admin').read_text(encoding='utf-8')
 
-assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.7'
 assert 'prelogin_process_pids()' in ADMIN
 assert 'restart_prelogin_current_session()' in ADMIN
 assert '/bin/kill -TERM "$pid"' in ADMIN

@@ -23,6 +23,7 @@ ADMIN_PLIST="/Library/LaunchDaemons/${ADMIN_LABEL}.plist"
 UPDATE_PLIST="/Library/LaunchDaemons/com.ilovemyprojects.zorinmacbridge.update.plist"
 APP_BACKUP="${APP_PATH}.zmb-update-backup"
 UPDATE_STATUS_FILE="$ADMIN_DIR/update-status"
+CAPABILITY_STATUS_FILE="$ADMIN_DIR/prelogin-capability-status"
 UPDATE_LOCK_DIR="$HEARTBEAT_DIR/update.lock"
 APP_BIN="$APP_PATH/Contents/MacOS/ZorinMacBridge Server"
 
@@ -63,6 +64,13 @@ status_file_value() {
   local key="$1" default="${2:-}" line
   [ -f "$UPDATE_STATUS_FILE" ] || { printf '%s\n' "$default"; return; }
   line="$(/usr/bin/awk -F= -v k="$key" '$1==k {sub(/^[^=]*=/, ""); print; exit}' "$UPDATE_STATUS_FILE" 2>/dev/null || true)"
+  [ -n "$line" ] && printf '%s\n' "$line" || printf '%s\n' "$default"
+}
+
+capability_status_value() {
+  local key="$1" default="${2:-}" line
+  [ -f "$CAPABILITY_STATUS_FILE" ] || { printf '%s\n' "$default"; return; }
+  line="$(/usr/bin/awk -F= -v k="$key" '$1==k {sub(/^[^=]*=/, ""); print; exit}' "$CAPABILITY_STATUS_FILE" 2>/dev/null || true)"
   [ -n "$line" ] && printf '%s\n' "$line" || printf '%s\n' "$default"
 }
 
@@ -456,6 +464,118 @@ restart_prelogin_current_session() {
   return 1
 }
 
+capability_probe_cmd() {
+  require_root
+  prelogin_console_active || fail "capability probe requires the active macOS LoginWindow session" 69
+  [ -x "$APP_BIN" ] || fail "ZorinMacBridge Server app is not installed" 66
+
+  local label plist result image stdout_log stderr_log target group i detail
+  label="com.ilovemyprojects.zorinmacbridge.capabilityprobe"
+  plist="/var/tmp/${label}.plist"
+  result="/var/tmp/zmb-capability-probe.result"
+  image="/var/tmp/zmb-capability-probe.png"
+  stdout_log="/var/tmp/zmb-capability-probe.out"
+  stderr_log="/var/tmp/zmb-capability-probe.err"
+
+  /bin/launchctl bootout "loginwindow/${label}" >/dev/null 2>&1 || true
+  # A new probe attempt invalidates any previous readiness proof immediately.
+  # This prevents a stale PASS from surviving a revoked TCC permission or a
+  # newly failing LoginWindow probe for the same installed build.
+  /bin/rm -f "$CAPABILITY_STATUS_FILE"
+  /bin/rm -f "$plist" "$result" "$image" "$stdout_log" "$stderr_log"
+
+  cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${label}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${APP_BIN}</string>
+    <string>--capability-probe</string>
+    <string>--probe-output</string>
+    <string>${result}</string>
+    <string>--probe-image</string>
+    <string>${image}</string>
+  </array>
+  <key>LimitLoadToSessionType</key>
+  <string>LoginWindow</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>${stdout_log}</string>
+  <key>StandardErrorPath</key>
+  <string>${stderr_log}</string>
+</dict>
+</plist>
+PLIST
+  /usr/bin/plutil -lint "$plist" >/dev/null 2>&1 || fail "generated capability-probe LaunchAgent is invalid" 70
+  /usr/sbin/chown root:wheel "$plist"
+  /bin/chmod 600 "$plist"
+
+  if ! /bin/launchctl bootstrap loginwindow "$plist" >/dev/null 2>&1; then
+    detail="$(/bin/launchctl print "loginwindow/${label}" 2>&1 | /usr/bin/tail -n 8 | /usr/bin/tr '\n' ' ' || true)"
+    /bin/rm -f "$plist"
+    fail "could not bootstrap capability probe in LoginWindow: ${detail}" 70
+  fi
+
+  i=1
+  while [ "$i" -le 400 ]; do
+    if [ -f "$result" ] && /usr/bin/grep -q '^overall=' "$result" 2>/dev/null; then break; fi
+    /bin/sleep 0.1
+    i=$((i + 1))
+  done
+  /bin/launchctl bootout "loginwindow/${label}" >/dev/null 2>&1 || true
+  /bin/rm -f "$plist"
+
+  if [ ! -f "$result" ] || ! /usr/bin/grep -q '^overall=' "$result" 2>/dev/null; then
+    detail="$(/usr/bin/tail -n 20 "$stderr_log" 2>/dev/null | /usr/bin/tr '\n' ' ' | /usr/bin/cut -c1-1200)"
+    [ -n "$detail" ] || detail="probe did not produce a structured result within 40 seconds"
+    fail "LoginWindow capability probe failed: ${detail}" 70
+  fi
+
+  local app_version app_cdhash overall capture input_corehid input_legacy proof_tmp now
+  app_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist" 2>/dev/null || true)"
+  app_cdhash="$(/usr/bin/codesign -dvvv "$APP_PATH" 2>&1 | /usr/bin/sed -n 's/^CDHash=//p' | /usr/bin/head -n 1 | /usr/bin/tr '[:upper:]' '[:lower:]')"
+  overall="$(/usr/bin/awk -F= '$1=="overall" {sub(/^[^=]*=/, ""); print; exit}' "$result" 2>/dev/null || true)"
+  capture="$(/usr/bin/awk -F= '$1=="capture_result" {sub(/^[^=]*=/, ""); print; exit}' "$result" 2>/dev/null || true)"
+  input_corehid="$(/usr/bin/awk -F= '$1=="input_corehid_result" {sub(/^[^=]*=/, ""); print; exit}' "$result" 2>/dev/null || true)"
+  input_legacy="$(/usr/bin/awk -F= '$1=="input_legacy_result" {sub(/^[^=]*=/, ""); print; exit}' "$result" 2>/dev/null || true)"
+  now="$(/bin/date +%s)"
+  /bin/mkdir -p "$ADMIN_DIR"
+  proof_tmp="${CAPABILITY_STATUS_FILE}.tmp.$$"
+  {
+    printf 'recorded_at=%s\n' "$now"
+    printf 'app_version=%s\n' "$(sanitize_value "$app_version")"
+    printf 'app_cdhash=%s\n' "$(sanitize_value "$app_cdhash")"
+    printf 'overall=%s\n' "$(sanitize_value "$overall")"
+    printf 'capture_result=%s\n' "$(sanitize_value "$capture")"
+    printf 'input_corehid_result=%s\n' "$(sanitize_value "$input_corehid")"
+    printf 'input_legacy_result=%s\n' "$(sanitize_value "$input_legacy")"
+  } > "$proof_tmp"
+  /usr/sbin/chown root:wheel "$proof_tmp"
+  /bin/chmod 644 "$proof_tmp"
+  /bin/mv "$proof_tmp" "$CAPABILITY_STATUS_FILE"
+
+  target="$(target_user 2>/dev/null || true)"
+  if valid_user "$target"; then
+    group="$(/usr/bin/id -gn "$target" 2>/dev/null || printf 'staff')"
+    /usr/sbin/chown "$target:$group" "$result" "$stdout_log" "$stderr_log" 2>/dev/null || true
+    [ ! -f "$image" ] || /usr/sbin/chown "$target:$group" "$image" 2>/dev/null || true
+  fi
+  /bin/chmod 600 "$result" "$stdout_log" "$stderr_log" 2>/dev/null || true
+  [ ! -f "$image" ] || /bin/chmod 600 "$image" 2>/dev/null || true
+
+  /bin/cat "$result"
+  if [ -f "$image" ]; then
+    printf 'capture_artifact=%s\n' "$image"
+  fi
+}
+
 load_prelogin_current_session() {
   # /Library/LaunchAgents + LimitLoadToSessionType=LoginWindow is normally
   # loaded automatically when the LoginWindow session is created.  The special
@@ -637,7 +757,7 @@ desktop_tls_fingerprint() {
 
 status_cmd() {
   require_root
-  local host server_id osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening prelogin_agent_exists prelogin_agent_loaded prelogin_ready prelogin_console auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired desktop_tls_fp ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg auto_update_mode update_current update_latest update_available update_checked update_result update_error power_lines developer_dir wake_mac
+  local host server_id osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening prelogin_agent_exists prelogin_agent_loaded prelogin_ready prelogin_console auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired desktop_tls_fp ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg auto_update_mode update_current update_latest update_available update_checked update_result update_error power_lines developer_dir wake_mac prelogin_probe_present prelogin_probe_current prelogin_probe_ready prelogin_probe_overall prelogin_probe_capture prelogin_probe_input_corehid prelogin_probe_input_legacy proof_version proof_cdhash app_version app_cdhash
   host="$(/bin/hostname 2>/dev/null || echo unknown)"
   server_id="$(config_value SERVER_ID unknown)"
   osver="$(/usr/bin/sw_vers -productVersion 2>/dev/null || echo unknown)"
@@ -702,6 +822,23 @@ status_cmd() {
   update_checked="$(status_file_value checked_at 0)"
   update_result="$(status_file_value result never)"
   update_error="$(status_file_value error '')"
+  prelogin_probe_present=0; [ -f "$CAPABILITY_STATUS_FILE" ] && prelogin_probe_present=1 || true
+  proof_version="$(capability_status_value app_version '')"
+  proof_cdhash="$(capability_status_value app_cdhash '' | /usr/bin/tr '[:upper:]' '[:lower:]')"
+  prelogin_probe_overall="$(capability_status_value overall never)"
+  prelogin_probe_capture="$(capability_status_value capture_result unknown)"
+  prelogin_probe_input_corehid="$(capability_status_value input_corehid_result unknown)"
+  prelogin_probe_input_legacy="$(capability_status_value input_legacy_result unknown)"
+  app_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist" 2>/dev/null || true)"
+  app_cdhash="$(/usr/bin/codesign -dvvv "$APP_PATH" 2>&1 | /usr/bin/sed -n 's/^CDHash=//p' | /usr/bin/head -n 1 | /usr/bin/tr '[:upper:]' '[:lower:]')"
+  prelogin_probe_current=0
+  if [ -n "$app_version" ] && [ -n "$app_cdhash" ] && [ "$proof_version" = "$app_version" ] && [ "$proof_cdhash" = "$app_cdhash" ]; then
+    prelogin_probe_current=1
+  fi
+  prelogin_probe_ready=0
+  if [ "$prelogin_probe_current" = "1" ] && [ "$prelogin_probe_overall" = "PASS" ] && [ "$prelogin_probe_capture" = "PASS" ]; then
+    if [ "$prelogin_probe_input_corehid" = "PASS" ] || [ "$prelogin_probe_input_legacy" = "PASS" ]; then prelogin_probe_ready=1; fi
+  fi
   ssh_unlock=0
   if printf '%s' "$major" | /usr/bin/grep -Eq '^[0-9]+$' && [ "$major" -ge 26 ] && [ "$remote_login" = "on" ]; then
     ssh_unlock=1
@@ -734,6 +871,13 @@ status_cmd() {
   printf 'prelogin_agent_loaded=%s\n' "$prelogin_agent_loaded"
   printf 'prelogin_console_active=%s\n' "$prelogin_console"
   printf 'prelogin_ready=%s\n' "$prelogin_ready"
+  printf 'prelogin_probe_present=%s\n' "$prelogin_probe_present"
+  printf 'prelogin_probe_current=%s\n' "$prelogin_probe_current"
+  printf 'prelogin_probe_ready=%s\n' "$prelogin_probe_ready"
+  printf 'prelogin_probe_overall=%s\n' "$prelogin_probe_overall"
+  printf 'prelogin_probe_capture=%s\n' "$prelogin_probe_capture"
+  printf 'prelogin_probe_input_corehid=%s\n' "$prelogin_probe_input_corehid"
+  printf 'prelogin_probe_input_legacy=%s\n' "$prelogin_probe_input_legacy"
   printf 'auto_start_server=%s\n' "$auto_start"
   printf 'launch_at_login=%s\n' "$launch_at_login"
   printf 'zmb_bind=%s\n' "$bind"
@@ -1369,6 +1513,7 @@ case "${1:-}" in
   logs) logs_cmd ;;
   diagnose) diagnose_cmd ;;
   recover-all) recover_all_cmd ;;
+  capability-probe) [ "$#" -eq 1 ] || fail "usage: zmb-admin capability-probe" 64; capability_probe_cmd ;;
   check-update) check_update_cmd ;;
   update-now) update_now_cmd ;;
   set-auto-update) [ "$#" -eq 2 ] || fail "usage: zmb-admin set-auto-update off|notify|install" 64; set_auto_update_cmd "$2" ;;
@@ -1413,6 +1558,7 @@ Usage: zmb-admin COMMAND
   logs
   diagnose
   recover-all
+  capability-probe
   check-update
   update-now
   set-auto-update off|notify|install

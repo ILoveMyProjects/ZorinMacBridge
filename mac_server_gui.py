@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import errno
+import pwd
 import re
 import subprocess
 import os
 import sys
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from mac_server import (
-    NativeStreamerLibrary,
+    CapabilityProbeLibrary, NativeStreamerLibrary,
     DEFAULT_SHARE, accessibility_permission_status, ensure_certificate, is_lan_ip,
     permission_api_self_test, request_accessibility_permission, request_screen_capture_permission,
-    screen_capture_permission_status, serve, configure_runtime_home,
+    screen_capture_permission_status, serve, configure_runtime_home, request_prelogin_handoff,
 )
 from discovery import LanAdvertiser
 from resources import resource_path, set_tk_icon
@@ -41,6 +44,32 @@ def _prelogin_config_value(key: str) -> str:
     except OSError:
         pass
     return ''
+
+
+def _console_session_user() -> str:
+    """Return the user owning /dev/console; root/loginwindow means pre-login."""
+    try:
+        uid = os.stat('/dev/console').st_uid
+        return pwd.getpwuid(uid).pw_name
+    except Exception:
+        return ''
+
+
+def _serve_aqua_with_handoff_retry(*args, stop_event, log, ready_callback, retry_seconds: float = 8.0, **kwargs) -> None:
+    """Retry only EADDRINUSE while LoginWindow releases the shared Desktop port."""
+    deadline = time.monotonic() + max(0.0, float(retry_seconds))
+    attempt = 0
+    while True:
+        try:
+            serve(*args, stop_event=stop_event, log=log, ready_callback=ready_callback, **kwargs)
+            return
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE or time.monotonic() >= deadline:
+                raise
+            attempt += 1
+            log(f'[handoff] Desktop port still owned by LoginWindow; Aqua bind retry {attempt}')
+            if stop_event.wait(0.25):
+                return
 
 
 def _prelogin_target_home() -> tuple[str, Path]:
@@ -93,6 +122,22 @@ def _prelogin_server_cli() -> int:
     log(f'[prelogin] target_user={user} home={home}')
     log(f'[prelogin] starting LoginWindow Desktop on {bind}:{port}')
     advertiser = LanAdvertiser(bind, port, current_version(), server_id)
+    stop_event = threading.Event()
+
+    def watch_loginwindow_handoff() -> None:
+        while not stop_event.wait(0.25):
+            console_user = _console_session_user()
+            if not console_user or console_user in {'root', 'loginwindow', '_mbsetupuser'}:
+                continue
+            lease = request_prelogin_handoff(console_user, log=log)
+            if lease is not None:
+                lease.handoff_sent_event.wait(timeout=0.75)
+            log(f'[prelogin/handoff] stopping LoginWindow listener for Aqua user={console_user}')
+            stop_event.set()
+            return
+
+    monitor = threading.Thread(target=watch_loginwindow_handoff, name='zmb-prelogin-handoff', daemon=True)
+    monitor.start()
     try:
         try:
             advertiser.start()
@@ -100,9 +145,10 @@ def _prelogin_server_cli() -> int:
             log(f'[prelogin] WARNING: Bonjour advertisement failed: {type(exc).__name__}: {exc}')
         serve(
             bind, port, share, 30.0, 1920, 8_000_000, verifier,
-            prelogin=True, log=log,
+            prelogin=True, stop_event=stop_event, log=log,
         )
     finally:
+        stop_event.set()
         try:
             advertiser.stop()
         except Exception:
@@ -499,8 +545,26 @@ class ServerGUI:
             return
         keys = {item.key for item in missing}
 
-        if keys & {'p0_status', 'p0_installed', 'p0_daemon', 'update_daemon'}:
+        if keys & {'p0_status', 'p0_installed', 'p0_daemon', 'update_daemon', 'prelogin_agent'}:
             self.enable_unattended_access()
+            return
+        if 'prelogin_release_identity' in keys:
+            messagebox.showerror(
+                'REQUIRED: production pre-login signing',
+                'This installed app is not a Stage C production-signed build with both required restricted capabilities.\n\n'
+                'Install a Developer ID release whose embedded provisioning profile authorizes Persistent Content Capture '
+                'and CoreHID virtual-device access. ZorinMacBridge will not label an ad-hoc/source build READY for unattended LoginWindow use.',
+            )
+            return
+        if 'prelogin_capability_proof' in keys:
+            messagebox.showwarning(
+                'REQUIRED: verify LoginWindow capture + input',
+                'READY requires a successful capability probe for this exact installed app build.\n\n'
+                '1. Sign out or reboot the Mac to the normal macOS LoginWindow.\n'
+                '2. From the paired Zorin client run the System capability-probe action.\n'
+                '3. Confirm overall=PASS, then log in and click “Refresh REQUIRED setup”.\n\n'
+                'Updating or re-signing the app invalidates the previous proof automatically.',
+            )
             return
         if 'remote_login' in keys or 'ssh_transport' in keys:
             self.open_remote_login_settings()
@@ -579,6 +643,16 @@ class ServerGUI:
                 text = f'P0 files installed but a system service is not loaded · Remote Login: {remote}'
             else:
                 text = f'P0 unattended access is not installed · Remote Login: {remote}'
+            if installed:
+                agent = 'ready' if state.get('prelogin_agent_contract_ready') else 'REQUIRED'
+                signing = 'ready' if state.get('prelogin_release_identity_ready') else 'REQUIRED'
+                if state.get('prelogin_probe_ready'):
+                    probe_text = 'PASS/current'
+                elif state.get('prelogin_probe_present') and not state.get('prelogin_probe_current'):
+                    probe_text = 'STALE/REQUIRED'
+                else:
+                    probe_text = str(state.get('prelogin_probe_overall') or 'never') + '/REQUIRED'
+                text += f' · Pre-login agent: {agent} · Signing: {signing} · LoginWindow proof: {probe_text}'
             self.admin_status_var.set(text)
             self._update_required_setup()
 
@@ -751,9 +825,15 @@ class ServerGUI:
         if app is None:
             return 'source/unknown'
         try:
+            from mac_release_signing import app_has_release_identity, release_identity_summary
+            if app_has_release_identity(app):
+                return release_identity_summary(app)
+        except Exception:
+            pass
+        try:
             from mac_local_signing import app_has_local_identity, identity_summary
             if app_has_local_identity(app):
-                return 'stable local DR · ' + identity_summary()
+                return 'legacy stable local DR · ' + identity_summary()
         except Exception:
             pass
         try:
@@ -950,8 +1030,10 @@ class ServerGUI:
 
         def worker() -> None:
             try:
-                serve(bind, port, share, 30.0, 2560, 8_000_000, auth,
-                      stop_event=self.stop_event, log=self._log, ready_callback=ready)
+                _serve_aqua_with_handoff_retry(
+                    bind, port, share, 30.0, 2560, 8_000_000, auth,
+                    stop_event=self.stop_event, log=self._log, ready_callback=ready,
+                )
             except Exception as exc:
                 self._log(f'ERROR: {exc}')
                 self.root.after(0, lambda error=str(exc): messagebox.showerror('Server error', error))
@@ -991,6 +1073,25 @@ class ServerGUI:
         self.root.destroy()
 
 
+def _capability_probe_cli(output_path: Path, image_path: Path) -> int:
+    if os.geteuid() != 0:
+        raise RuntimeError('capability probe must run as root in the LoginWindow session')
+    probe = CapabilityProbeLibrary()
+    rc = probe.run(output_path, image_path)
+    if rc != 0:
+        raise RuntimeError(f'native capability probe failed with code {rc}')
+    return 0
+
+
+def _argv_path(flag: str, default: str) -> Path:
+    if flag not in sys.argv:
+        return Path(default)
+    idx = sys.argv.index(flag)
+    if idx + 1 >= len(sys.argv):
+        raise RuntimeError(f'{flag} requires a path')
+    return Path(sys.argv[idx + 1])
+
+
 def _p0_update_check_cli() -> int:
     from updates import check_for_updates
     info = check_for_updates(timeout=12.0)
@@ -1015,6 +1116,16 @@ def _p0_update_stage_cli(stage_root: Path) -> int:
 
 
 def main() -> None:
+    if '--capability-probe' in sys.argv:
+        try:
+            output = _argv_path('--probe-output', '/var/tmp/zmb-capability-probe.result')
+            image = _argv_path('--probe-image', '/var/tmp/zmb-capability-probe.png')
+            raise SystemExit(_capability_probe_cli(output, image))
+        except SystemExit:
+            raise
+        except Exception as exc:
+            print(f'CAPABILITY PROBE FAILED: {type(exc).__name__}: {exc}', file=sys.stderr, flush=True)
+            raise SystemExit(1)
     if '--prelogin-server' in sys.argv:
         try:
             raise SystemExit(_prelogin_server_cli())
@@ -1080,10 +1191,31 @@ def main() -> None:
         except Exception as exc:
             print(f'SELFTEST FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)
             raise SystemExit(1)
+    if '--verify-release-app' in sys.argv:
+        try:
+            idx = sys.argv.index('--verify-release-app')
+            target = Path(sys.argv[idx + 1])
+            from mac_release_signing import verify_release_app
+            info = verify_release_app(target)
+            print(f'RELEASE SIGNING OK: team={info.team_identifier} profile={info.name}')
+            raise SystemExit(0)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            print(f'RELEASE SIGNING FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)
+            raise SystemExit(1)
     if '--self-test-permission-apis' in sys.argv:
         try:
             names = permission_api_self_test()
             print('SELFTEST OK: macOS permission APIs resolved: ' + ', '.join(names))
+            raise SystemExit(0)
+        except Exception as exc:
+            print(f'SELFTEST FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)
+            raise SystemExit(1)
+    if '--self-test-capability-probe-load' in sys.argv:
+        try:
+            probe = CapabilityProbeLibrary()
+            print(f'SELFTEST OK: Stage-B capability probe library loaded from {probe.path}')
             raise SystemExit(0)
         except Exception as exc:
             print(f'SELFTEST FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)

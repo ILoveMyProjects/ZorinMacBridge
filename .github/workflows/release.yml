@@ -19,6 +19,22 @@ jobs:
           set -euo pipefail
           scripts/verify-release-source.sh
 
+  macos-native-gate:
+    needs: [release-source-check]
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - macos-26
+          - xcode-27
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and verify native macOS dylib
+        run: |
+          set -euo pipefail
+          scripts/verify-macos-native-gate.sh
+
   linux-amd64:
     needs: [release-source-check]
     runs-on: ubuntu-24.04
@@ -123,15 +139,15 @@ jobs:
           path: release/*
 
   macos-arm64:
-    needs: [release-source-check]
-    runs-on: macos-15
+    needs: [release-source-check, macos-native-gate]
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
-      - name: Verify macOS transport signing
+      - name: Verify macOS signing scripts
         run: |
           set -euo pipefail
-          bash -n scripts/sign-macos-transport.sh
-          scripts/sign-macos-transport.sh --self-test
+          bash -n scripts/sign-macos-release.sh
+          python3 -m py_compile mac_release_signing.py
       - name: Verify macOS Project Sync dependency
         run: |
           set -euo pipefail
@@ -144,24 +160,42 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install pyinstaller Pillow==12.3.0 cryptography==50.0.1 certifi 'zeroconf>=0.147,<1' 'pystray>=0.19.5,<1'
+      - name: Configure Developer ID signing and provisioning
+        env:
+          MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          MACOS_DEVELOPER_ID_PROFILE_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+          test -n "${MACOS_DEVELOPER_ID_P12_BASE64:-}" || { echo 'Missing secret: MACOS_DEVELOPER_ID_P12_BASE64' >&2; exit 1; }
+          test -n "${MACOS_DEVELOPER_ID_P12_PASSWORD:-}" || { echo 'Missing secret: MACOS_DEVELOPER_ID_P12_PASSWORD' >&2; exit 1; }
+          test -n "${MACOS_DEVELOPER_ID_PROFILE_BASE64:-}" || { echo 'Missing secret: MACOS_DEVELOPER_ID_PROFILE_BASE64' >&2; exit 1; }
+          mkdir -p build/signing
+          python3 - <<'PYSECRETS'
+          import base64, os, pathlib
+          pathlib.Path('build/signing/developer-id.p12').write_bytes(base64.b64decode(os.environ['MACOS_DEVELOPER_ID_P12_BASE64']))
+          pathlib.Path('build/signing/ZorinMacBridge.provisionprofile').write_bytes(base64.b64decode(os.environ['MACOS_DEVELOPER_ID_PROFILE_BASE64']))
+          PYSECRETS
+          KEYCHAIN_PATH="$RUNNER_TEMP/zmb-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)-$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import build/signing/developer-id.p12 -k "$KEYCHAIN_PATH" -P "$MACOS_DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          MACOS_CODESIGN_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F'"' '/Developer ID Application:/ {print $2; exit}')"
+          test -n "$MACOS_CODESIGN_IDENTITY" || { echo 'No Developer ID Application identity was imported.' >&2; exit 1; }
+          MACOS_CODESIGN_SHA1="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -v needle="$MACOS_CODESIGN_IDENTITY" 'index($0, "\"" needle "\"") {print $2; exit}')"
+          python3 mac_release_signing.py --verify-profile build/signing/ZorinMacBridge.provisionprofile "$MACOS_CODESIGN_SHA1"
+          echo "MACOS_CODESIGN_IDENTITY=$MACOS_CODESIGN_IDENTITY" >> "$GITHUB_ENV"
+          echo "MACOS_CODESIGN_SHA1=$MACOS_CODESIGN_SHA1" >> "$GITHUB_ENV"
+          echo "MACOS_PROVISIONING_PROFILE=$GITHUB_WORKSPACE/build/signing/ZorinMacBridge.provisionprofile" >> "$GITHUB_ENV"
+          echo "MACOS_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
       - name: Build macOS Apple Silicon server
         run: |
-          mkdir -p build
-          MACOSX_DEPLOYMENT_TARGET=13.0 clang -O2 -fPIC -Wno-deprecated-declarations -c \
-            native/macos/ZMBLoginInput.c \
-            -o build/ZMBLoginInput.o
-          MACOSX_DEPLOYMENT_TARGET=13.0 swiftc -O -emit-library \
-            -framework ScreenCaptureKit \
-            -framework VideoToolbox \
-            -framework CoreMedia \
-            -framework CoreVideo \
-            -framework CoreGraphics \
-            -framework IOKit \
-            -framework AppKit \
-            native/macos/ZMBStreamerLib.swift \
-            build/ZMBLoginInput.o \
-            -o build/libzmb_streamer.dylib
-          test -f build/libzmb_streamer.dylib
+          scripts/verify-macos-native-gate.sh
 
           mkdir -p build/AppIcon.iconset
           sips -z 16 16 assets/server.png --out build/AppIcon.iconset/icon_16x16.png >/dev/null
@@ -177,6 +211,7 @@ jobs:
           iconutil -c icns build/AppIcon.iconset -o build/server.icns
 
           pyinstaller --noconfirm --clean --windowed \
+            --codesign-identity "$MACOS_CODESIGN_IDENTITY" \
             --name 'ZorinMacBridge Server' \
             --osx-bundle-identifier com.ilovemyprojects.zorinmacbridge.server \
             --icon build/server.icns \
@@ -184,33 +219,31 @@ jobs:
             --add-data 'VERSION:.' \
             --add-data 'native/macos/admin:native/macos/admin' \
             --add-binary 'build/libzmb_streamer.dylib:.' \
+            --add-binary 'build/libzmb_capability_probe.dylib:.' \
             --collect-all cryptography \
             --collect-all certifi \
             --collect-all zeroconf \
             --collect-all pystray \
             --hidden-import pystray._darwin \
             --hidden-import mac_terminal_setup \
+            --hidden-import mac_release_signing \
             mac_server_gui.py
 
           /usr/libexec/PlistBuddy -c "Add :NSScreenCaptureUsageDescription string ZorinMacBridge streams this Mac display only to an authenticated LAN client." 'dist/ZorinMacBridge Server.app/Contents/Info.plist' || true
           APP_VERSION="$(cat VERSION)"
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" 'dist/ZorinMacBridge Server.app/Contents/Info.plist' 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $APP_VERSION" 'dist/ZorinMacBridge Server.app/Contents/Info.plist'
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_VERSION" 'dist/ZorinMacBridge Server.app/Contents/Info.plist' 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $APP_VERSION" 'dist/ZorinMacBridge Server.app/Contents/Info.plist'
-          echo '=== macOS phase: transport signing ==='
-          scripts/sign-macos-transport.sh 'dist/ZorinMacBridge Server.app'
+          echo '=== macOS phase: Developer ID + restricted-entitlement provisioning ==='
+          scripts/sign-macos-release.sh \
+            'dist/ZorinMacBridge Server.app' \
+            "$MACOS_PROVISIONING_PROFILE" \
+            "$MACOS_CODESIGN_IDENTITY"
           echo '=== macOS phase: frozen-app self tests ==='
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-streamer-load
+          'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-capability-probe-load
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-update-tls
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-permission-apis
-          echo '=== macOS phase: create stable per-Mac designated requirement ==='
-          'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-local-signing-identity
-          echo '=== macOS phase: stable local-DR round trip ==='
-          rm -rf 'build/local-sign-test'
-          mkdir -p 'build/local-sign-test'
-          ditto 'dist/ZorinMacBridge Server.app' 'build/local-sign-test/ZorinMacBridge Server.app'
-          'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --local-sign-app 'build/local-sign-test/ZorinMacBridge Server.app'
-          codesign --verify --deep --strict --verbose=2 'build/local-sign-test/ZorinMacBridge Server.app'
-          codesign -d -r- 'build/local-sign-test/ZorinMacBridge Server.app' 2>&1 | grep -F 'info[ZMBLocalIdentity]'
+          'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --verify-release-app 'dist/ZorinMacBridge Server.app'
           mkdir -p release build/dmgroot
           cp -R 'dist/ZorinMacBridge Server.app' build/dmgroot/
           ln -s /Applications build/dmgroot/Applications
@@ -218,6 +251,12 @@ jobs:
             -srcfolder build/dmgroot \
             -ov -format UDZO 'release/ZorinMacBridge-Server_macOS-arm64.dmg'
           (cd release && shasum -a 256 * > SHA256SUMS-macOS-arm64.txt)
+      - name: Remove temporary signing keychain
+        if: always()
+        run: |
+          if [ -n "${MACOS_KEYCHAIN_PATH:-}" ]; then
+            security delete-keychain "$MACOS_KEYCHAIN_PATH" >/dev/null 2>&1 || true
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: macos-arm64

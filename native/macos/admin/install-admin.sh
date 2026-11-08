@@ -154,6 +154,7 @@ $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin unpair *
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin logs
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin diagnose
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin recover-all
+$TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin capability-probe
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin check-update
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin update-now
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin set-auto-update off

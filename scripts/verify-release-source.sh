@@ -6,11 +6,13 @@ cd "$ROOT"
 
 VERSION_VALUE="$(tr -d '[:space:]' < VERSION)"
 HEAD_SHA="$(git rev-parse HEAD 2>/dev/null || printf 'unknown')"
-SCRIPT_SHA="$(shasum -a 256 scripts/sign-macos-transport.sh | awk '{print $1}')"
+SIGN_SHA="$(shasum -a 256 scripts/sign-macos-release.sh | awk '{print $1}')"
+PROFILE_CODE_SHA="$(shasum -a 256 mac_release_signing.py | awk '{print $1}')"
 
 echo "[release-source] VERSION=$VERSION_VALUE"
 echo "[release-source] HEAD=$HEAD_SHA"
-echo "[release-source] sign-macos-transport.sh SHA256=$SCRIPT_SHA"
+echo "[release-source] sign-macos-release.sh SHA256=$SIGN_SHA"
+echo "[release-source] mac_release_signing.py SHA256=$PROFILE_CODE_SHA"
 echo "[release-source] ref=${GITHUB_REF:-<none>}"
 echo "[release-source] ref_name=${GITHUB_REF_NAME:-<none>}"
 echo "[release-source] ref_type=${GITHUB_REF_TYPE:-<none>}"
@@ -23,28 +25,60 @@ if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
   fi
 fi
 
-# v0.6.7+ invariant: PyInstaller nested signatures must be preserved.
-if grep -Fq "signing nested native libraries ad-hoc" scripts/sign-macos-transport.sh; then
-  echo "ERROR: obsolete v0.6.6 transport-signing code is present in this checkout." >&2
+for marker in \
+  'MACOS_DEVELOPER_ID_P12_BASE64' \
+  'MACOS_DEVELOPER_ID_PROFILE_BASE64' \
+  '--codesign-identity "$MACOS_CODESIGN_IDENTITY"' \
+  'scripts/sign-macos-release.sh'; do
+  grep -Fq -- "$marker" .github/workflows/release.yml || {
+    echo "ERROR: Stage C release marker missing from workflow: $marker" >&2
+    exit 1
+  }
+done
+
+for entitlement in \
+  'com.apple.developer.persistent-content-capture' \
+  'com.apple.developer.hid.virtual.device'; do
+  grep -Fq "$entitlement" mac_release_signing.py || {
+    echo "ERROR: required release entitlement missing from verifier: $entitlement" >&2
+    exit 1
+  }
+  grep -Fq "$entitlement" native/macos/signing/ZorinMacBridge.release-entitlements.plist || {
+    echo "ERROR: required release entitlement missing from manifest: $entitlement" >&2
+    exit 1
+  }
+done
+
+grep -Fq 'Contents/embedded.provisionprofile' scripts/sign-macos-release.sh || {
+  echo 'ERROR: release signing does not embed the provisioning profile.' >&2
   exit 1
-fi
-if ! grep -Fq "preserving PyInstaller nested signatures" scripts/sign-macos-transport.sh; then
-  echo "ERROR: expected v0.6.7+ outer-bundle-only signing marker is missing." >&2
+}
+grep -Fq -- '--options runtime' scripts/sign-macos-release.sh || {
+  echo 'ERROR: release signing does not enable hardened runtime.' >&2
   exit 1
-fi
-if ! grep -Fq "probing stable per-Mac explicit DR shape with nested framework" scripts/sign-macos-transport.sh; then
-  echo "ERROR: expected nested-framework signing preflight is missing." >&2
+}
+grep -Fq -- '--timestamp' scripts/sign-macos-release.sh || {
+  echo 'ERROR: release signing does not request a secure timestamp.' >&2
+  exit 1
+}
+if grep -Fq 'codesign --force --deep' scripts/sign-macos-release.sh; then
+  echo 'ERROR: release signer must not use --deep while signing.' >&2
   exit 1
 fi
 
-# Keep runtime local signing aligned with the release signer.
-if grep -Fq "rglob('*.dylib')" mac_local_signing.py || grep -Fq "rglob('*.so')" mac_local_signing.py; then
-  echo "ERROR: runtime local signing appears to re-sign nested Mach-O files." >&2
+# Stage C invariant: a production app is never converted back to ad-hoc after
+# download. The legacy local DR remains source/dev-only.
+if grep -Fq -- '--local-sign-app' install-macos.sh; then
+  echo 'ERROR: installer still locally re-signs a production release.' >&2
   exit 1
 fi
-if ! grep -Fq "Only the outer .app needs a fresh signature" mac_local_signing.py; then
-  echo "ERROR: expected outer-app-only local-signing invariant is missing." >&2
+if grep -Fq 'stage_and_sign' updates.py; then
+  echo 'ERROR: updater still locally re-signs a production release.' >&2
   exit 1
 fi
+grep -Fq 'app_has_release_identity' mac_local_signing.py || {
+  echo 'ERROR: legacy local-sign bootstrap does not protect provisioned releases.' >&2
+  exit 1
+}
 
-echo "[release-source] source invariants OK"
+echo "[release-source] Stage C source invariants OK"

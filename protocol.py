@@ -15,6 +15,7 @@ AUTH_FAIL = 3
 FRAME = 10  # legacy JPEG frame (pre-0.4 compatibility only)
 VIDEO_H264 = 11
 VIDEO_STATS = 12  # lightweight server-side stream telemetry
+SESSION_STATE = 13  # lifecycle/pipeline state (pre-login handoff and diagnostics)
 MOUSE_MOVE = 20
 MOUSE_BUTTON = 21
 SCROLL = 22
@@ -89,6 +90,11 @@ class PacketReader:
     def __init__(self) -> None:
         self.buffer = bytearray()
         self.pending = deque()
+
+    def drain_pending(self) -> list[tuple[int, bytes]]:
+        out = list(self.pending)
+        self.pending.clear()
+        return out
 
     def feed(self, data: bytes) -> list[tuple[int, bytes]]:
         if data:

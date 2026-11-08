@@ -445,19 +445,26 @@ def _verify_requirement(app: Path, requirement: str, label: str) -> None:
 
 
 def _verify_macos_transport_app(app: Path, progress: ProgressCallback | None, expected_version: str | None = None) -> None:
-    """Verify the release artifact before it is re-signed for this Mac."""
+    """Verify a production macOS release before installation.
+
+    Stage C requires the downloaded app to retain its Developer ID signature,
+    embedded Apple provisioning profile and both restricted pre-login
+    entitlements. The updater must never convert a production release into an
+    ad-hoc/local-DR build.
+    """
     import plistlib
+    from mac_release_signing import verify_release_app
 
     codesign = Path('/usr/bin/codesign')
     if not codesign.exists():
         raise RuntimeError('codesign was not found; refusing to install an unverified macOS update.')
-    _emit(progress, 'Verifying downloaded macOS application…')
+    _emit(progress, 'Verifying Developer ID signature and provisioning profile…')
     completed = subprocess.run(
         [str(codesign), '--verify', '--strict', '--deep', '--verbose=2', str(app)],
         text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=120,
     )
     if completed.returncode != 0:
-        raise RuntimeError('Downloaded macOS app has an invalid transport signature. Update aborted.\n' + (completed.stdout or '').strip())
+        raise RuntimeError('Downloaded macOS app has an invalid code signature. Update aborted.\n' + (completed.stdout or '').strip())
     info = app / 'Contents' / 'Info.plist'
     try:
         with info.open('rb') as fh:
@@ -472,49 +479,43 @@ def _verify_macos_transport_app(app: Path, progress: ProgressCallback | None, ex
         raise RuntimeError(
             f'Downloaded macOS app version {bundle_version or "<missing>"!r} does not match release {expected_version!r}. Update aborted.'
         )
-
+    release_info = verify_release_app(app)
+    _emit(progress, f'Developer ID release verified: team {release_info.team_identifier}; profile {release_info.name}.')
 
 def _verify_macos_update_identity(current_app: Path | None, new_app: Path, progress: ProgressCallback | None) -> None:
-    """Verify that an already locally-signed install keeps the same per-Mac DR.
+    """Verify release identity continuity without re-signing the new app.
 
-    v0.6.6 is the migration point for the certificate-free stable DR model. Older
-    installs may have build-bound ad-hoc, transport, or experimental local-certificate
-    signatures. Every installed update is re-signed with the same explicit per-Mac DR
-    *before* replacing the app.
+    Production Stage-C releases keep their Apple-issued Developer ID identity
+    and provisioning profile intact. Existing legacy local-DR installs are
+    allowed to migrate once to that release identity.
     """
-    from mac_local_signing import app_has_local_identity, verify_app_local_identity
+    from mac_release_signing import app_has_release_identity, verify_release_app
 
-    verify_app_local_identity(new_app)
+    new_info = verify_release_app(new_app)
     if current_app is None or not current_app.is_dir():
-        _emit(progress, 'Stable local designated requirement verified for the new installation.')
+        _emit(progress, f'Developer ID release identity verified for new installation (team {new_info.team_identifier}).')
         return
 
-    if not app_has_local_identity(current_app):
-        _emit(progress, 'One-time migration: current app uses the old build-bound identity; new app uses this Mac\'s stable local designated requirement.')
+    if app_has_release_identity(current_app):
+        old_info = verify_release_app(current_app)
+        if old_info.team_identifier != new_info.team_identifier:
+            raise RuntimeError(
+                f'Update Developer Team mismatch: installed={old_info.team_identifier}, downloaded={new_info.team_identifier}. '
+                'The update was NOT installed.'
+            )
+        old_req = _designated_requirement(current_app)
+        _verify_requirement(new_app, old_req, 'New application')
+        _emit(progress, 'Developer ID designated requirement and TeamIdentifier continuity verified.')
         return
 
-    old_req = _designated_requirement(current_app)
-    new_req = _designated_requirement(new_app)
-    _verify_requirement(new_app, old_req, 'New application')
-    _verify_requirement(current_app, new_req, 'Current application')
-    _emit(progress, 'Stable designated requirement verified: privacy permissions remain attached to the same app identity.')
-
+    _emit(progress, 'One-time migration: legacy local/ad-hoc code identity → Developer ID provisioned release.')
 
 def prepare_macos_update_for_root(
     stage_root: Path,
     progress: ProgressCallback | None = None,
     timeout: float = 30.0,
 ) -> PreparedMacUpdate:
-    """Prepare a verified, locally-signed macOS update without installing it.
-
-    This is the P0/root-helper handoff used for unattended updates. Network
-    retrieval, GitHub release selection, checksum verification, transport code
-    signature verification and this Mac's stable local designated requirement are
-    handled by the normal frozen app executable. In P0 unattended mode that
-    executable is launched by the root helper with a root-owned staging directory
-    and a root-owned local-identity token, so no user-writable handoff exists
-    between verification/signing and replacement in /Applications.
-    """
+    """Prepare a verified production macOS update without modifying its signature."""
     if platform.system().lower() != 'darwin' or platform.machine().lower() not in {'arm64', 'aarch64'}:
         raise RuntimeError('P0 macOS update staging is supported on Apple Silicon Macs only.')
 
@@ -550,24 +551,28 @@ def prepare_macos_update_for_root(
             if not source_app.is_dir():
                 raise RuntimeError('The downloaded DMG does not contain ZorinMacBridge Server.app.')
             _verify_macos_transport_app(source_app, progress, expected_version=info.latest)
+            _verify_macos_update_identity(_current_macos_app(), source_app, progress)
 
-            from mac_local_signing import stage_and_sign
             final_stage = stage_root / 'prepared'
             final_stage.mkdir(parents=True, exist_ok=True)
-            _emit(progress, "Applying this Mac's persistent local code identity…")
-            signed_app, identity = stage_and_sign(source_app, final_stage)
-            _emit(progress, f'Stable local DR ready: {identity.cert_sha256[:16]}…')
-            _verify_macos_update_identity(_current_macos_app(), signed_app, progress)
-            return PreparedMacUpdate(
-                current=info.current, latest=info.latest, available=True, staged_app=str(signed_app),
+            staged_app = final_stage / 'ZorinMacBridge Server.app'
+            if staged_app.exists():
+                shutil.rmtree(staged_app)
+            _emit(progress, 'Staging verified Developer ID application without re-signing…')
+            completed = subprocess.run(
+                ['/usr/bin/ditto', str(source_app), str(staged_app)],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=180,
             )
+            if completed.returncode != 0:
+                raise RuntimeError('Could not stage verified macOS update:\n' + (completed.stdout or '').strip())
+            _verify_macos_transport_app(staged_app, progress, expected_version=info.latest)
+            return PreparedMacUpdate(current=info.current, latest=info.latest, available=True, staged_app=str(staged_app))
         finally:
             if mounted:
                 subprocess.run(
                     [str(hdiutil), 'detach', str(mount_dir), '-quiet'],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=30,
                 )
-
 
 def _install_macos(package_path: Path, progress: ProgressCallback | None, expected_version: str | None = None) -> None:
     hdiutil = '/usr/bin/hdiutil'
@@ -578,10 +583,8 @@ def _install_macos(package_path: Path, progress: ProgressCallback | None, expect
     if not Path(hdiutil).exists() or not Path(osascript).exists():
         raise RuntimeError('Required macOS system tools hdiutil/osascript were not found.')
 
-    from mac_local_signing import stage_and_sign
-
     mount_dir = package_path.parent / 'mounted-dmg'
-    stage_root = package_path.parent / 'locally-signed-stage'
+    stage_root = package_path.parent / 'release-signed-stage'
     mount_dir.mkdir(exist_ok=True)
     stage_root.mkdir(exist_ok=True)
     mounted = False
@@ -589,11 +592,7 @@ def _install_macos(package_path: Path, progress: ProgressCallback | None, expect
         _emit(progress, 'Mounting the verified DMG…')
         completed = subprocess.run(
             [hdiutil, 'attach', str(package_path), '-nobrowse', '-readonly', '-mountpoint', str(mount_dir), '-quiet'],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
-            timeout=120,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=120,
         )
         if completed.returncode != 0:
             raise RuntimeError('Could not mount the update DMG:\n' + (completed.stdout or '').strip())
@@ -602,12 +601,20 @@ def _install_macos(package_path: Path, progress: ProgressCallback | None, expect
         source_app = mount_dir / app_name
         if not source_app.is_dir():
             raise RuntimeError(f'The downloaded DMG does not contain {app_name}.')
-
         _verify_macos_transport_app(source_app, progress, expected_version=expected_version)
-        _emit(progress, 'Applying this Mac\'s persistent local code identity…')
-        signed_app, identity = stage_and_sign(source_app, stage_root)
-        _emit(progress, f'Stable local DR ready: {identity.cert_sha256[:16]}…')
-        _verify_macos_update_identity(_current_macos_app(), signed_app, progress)
+        _verify_macos_update_identity(_current_macos_app(), source_app, progress)
+
+        staged_app = stage_root / app_name
+        if staged_app.exists():
+            shutil.rmtree(staged_app)
+        _emit(progress, 'Preserving Developer ID signature while staging update…')
+        completed = subprocess.run(
+            ['/usr/bin/ditto', str(source_app), str(staged_app)],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=180,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError('Could not stage verified macOS update:\n' + (completed.stdout or '').strip())
+        _verify_macos_transport_app(staged_app, progress, expected_version=expected_version)
 
         _emit(progress, 'Waiting for the macOS administrator-password prompt…')
         script = (
@@ -618,25 +625,19 @@ def _install_macos(package_path: Path, progress: ProgressCallback | None, expect
             'end run'
         )
         completed = subprocess.run(
-            [osascript, '-e', script, str(signed_app), destination],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
-            timeout=600,
+            [osascript, '-e', script, str(staged_app), destination],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=600,
         )
         if completed.returncode != 0:
             output = (completed.stdout or '').strip()
             raise RuntimeError('macOS application installation failed:\n' + (output or f'osascript exited with code {completed.returncode}'))
-        _emit(progress, 'macOS application installed with the stable local designated requirement.')
+        _verify_macos_transport_app(Path(destination), progress, expected_version=expected_version)
+        _emit(progress, 'macOS Developer ID application installed; restricted-entitlement profile preserved.')
     finally:
         if mounted:
             subprocess.run(
                 [hdiutil, 'detach', str(mount_dir), '-quiet'],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=30,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=30,
             )
 
 def install_update(

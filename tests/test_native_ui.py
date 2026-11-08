@@ -37,10 +37,11 @@ assert 'self.disconnect_remote()' not in restart_block
 
 assert not (root / 'scripts/setup-stable-signing-linux.sh').exists()
 assert (root / 'mac_local_signing.py').exists()
-assert (root / 'scripts/sign-macos-transport.sh').exists()
+assert (root / 'scripts/sign-macos-release.sh').exists()
 assert 'Require stable macOS signing identity' not in release
-assert 'MACOS_CERTIFICATE_P12_BASE64' not in release
-assert '--self-test-local-signing-identity' in release
+assert 'MACOS_DEVELOPER_ID_P12_BASE64' in release
+assert 'MACOS_DEVELOPER_ID_PROFILE_BASE64' in release
+assert '--verify-release-app' in release
 assert 'macos-intel' not in release
 assert 'macos-15-intel' not in release
 assert 'ZorinMacBridge-Server_macOS-x86_64.dmg' not in release

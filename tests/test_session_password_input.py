@@ -4,7 +4,6 @@ import ast
 ROOT = Path(__file__).resolve().parents[1]
 client = (ROOT / 'linux_client_gtk.py').read_text(encoding='utf-8')
 
-assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.7'
 assert "self.password_entry = self._entry(second, 'ZMB session password'" in client
 
 

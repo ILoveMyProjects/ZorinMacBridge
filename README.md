@@ -1,12 +1,12 @@
-## 0.15.7 pre-login login-flow fix
+## 0.15.8 CGDisplayStream Swift/Xcode fix
 
-0.15.7 targets the real post-reboot LoginWindow failure chain. The server no longer keeps global video ownership during slow native cleanup after capture has already been stopped; this removes the repeated `previous video session did not stop within 4s` reconnect loop seen on real hardware.
+0.15.8 targets the real post-reboot LoginWindow failure chain. The server no longer keeps global video ownership during slow native cleanup after capture has already been stopped; this removes the repeated `previous video session did not stop within 4s` reconnect loop seen on real hardware.
 
 For LoginWindow video, the primary capture backend is now `CGDisplayStreamCreateWithDispatchQueue` on the physical display. Frames arrive as IOSurfaces, are wrapped as `CVPixelBuffer`s, and go through the existing VideoToolbox H.264 encoder. `SCScreenshotManager.captureSampleBuffer()` remains a fallback when the display stream cannot be started. The normal logged-in Aqua desktop continues to use `SCStream`.
 
 The first H.264 access unit is still required within six seconds. If neither pre-login capture backend produces a frame, the server returns native diagnostics instead of leaving the client indefinitely on `Waiting for first frame`.
 
-The LoginWindow input path remains IOHIDSystem-first. macOS can still deny synthetic keyboard/click events at SecureEventInput on some builds even when video works; 0.15.7 does not claim to bypass that OS security boundary. Accessibility remains REQUIRED and rejected input is logged per event without tearing down the control session.
+The LoginWindow input path remains IOHIDSystem-first. macOS can still deny synthetic keyboard/click events at SecureEventInput on some builds even when video works; 0.15.8 does not claim to bypass that OS security boundary. Accessibility remains REQUIRED and rejected input is logged per event without tearing down the control session.
 
 # ZorinMacBridge
 
@@ -125,7 +125,7 @@ curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/mast
 
 The macOS server supports **Apple Silicon (arm64) only**. The installer verifies the Mac architecture, downloads the arm64 `.dmg`, verifies SHA-256, and installs **ZorinMacBridge Server** into `/Applications`. Intel Macs are not supported.
 
-Starting with v0.6.7, installation uses a **stable explicit macOS designated requirement (DR)** instead of a certificate/keychain identity. No Developer ID, local certificate, GitHub signing secret, or Linux signing setup is required for this private/internal workflow. Each Mac creates one local random identity marker, injects it into the staged app, and re-signs the app ad-hoc with the same explicit DR on every update. GitHub Actions runs a real `codesign` preflight that proves this DR shape before the long macOS builds start.
+Starting with **0.15.11 Stage C**, production macOS releases use **Developer ID Application signing plus an embedded Apple-issued provisioning profile**. The profile must authorize Persistent Content Capture and Virtual HID for `com.ilovemyprojects.zorinmacbridge.server`. The installer and updater preserve that signed bundle exactly; they no longer re-sign a production release locally. The older explicit local-DR path remains only as a legacy/source fallback.
 
 ## Remote desktop architecture
 
@@ -140,6 +140,8 @@ control TLS socket   ──────────────► mouse / keybo
 video TLS socket     ◄────────────── H.264 stream
 file TLS sockets     ◄─────────────► files / folders
 ```
+
+Starting with **0.15.12 Stage D**, LoginWindow is treated as one explicit remote session rather than three unrelated authenticated sockets. Desktop authentication owns the pre-login input session and returns an in-memory `session_token`; the video connection must present that token and cannot outlive a replaced Desktop owner. The server reports native pipeline progress (`capture-frame -> pixel-buffer -> encode-submit -> h264-written`), while the Linux client confirms the final `client-decoded` step with `First H.264 frame decoded`. When macOS changes `/dev/console` from LoginWindow to the logged-in user, the server announces an explicit Aqua handoff, releases the pre-login listener, and the client performs a fast reconnect to the normal user-session server.
 
 The video path uses:
 
@@ -221,7 +223,7 @@ The macOS root updater also canonicalizes its `/var/tmp` staging directory befor
 
 A successful **System → Pair this Mac** now becomes the single trust ceremony for the selected Mac. The user still verifies the macOS SSH host fingerprint once. After that verification, P0 returns the desktop TLS SHA-256 fingerprint through the already-pinned SSH channel, and the Zorin client stores it as the Desktop certificate pin automatically. Bonjour/mDNS is **not** used as a source of trust. Terminal / Project Actions, Xcode and Files refresh their state immediately after pairing, so they no longer remain stuck on stale "not paired" UI until the machine is reselected. Files still requires an active authenticated Desktop session because file transfer is carried on that channel.
 
-Starting with **v0.14.0**, the Mac app treats the prerequisites for the intended full Zorin workflow as an explicit setup contract rather than optional-looking status. The **Required setup for full Zorin operation** panel turns red and lists every missing item: Screen Recording, Accessibility, the saved ZMB session password, P0/recovery services, Remote Login/SSH readiness and host fingerprint, launch-at-login, and automatic desktop-server start. The app also shows a startup alert while any of these are missing and provides **Fix next REQUIRED item** plus a direct **Open Remote Login Settings** action.
+Starting with **v0.14.0**, the Mac app treats the prerequisites for the intended full Zorin workflow as an explicit setup contract rather than optional-looking status. The **Required setup for full Zorin operation** panel turns red and lists every missing item: Screen Recording, Accessibility, the saved ZMB session password, P0/recovery services, Remote Login/SSH readiness and host fingerprint, launch-at-login, and automatic desktop-server start. Starting with **0.15.13 Stage F**, READY also requires a valid LoginWindow pre-login LaunchAgent, the Stage C Developer ID/provisioning identity with both restricted pre-login capabilities, and a successful Stage B capability proof for the **exact currently installed app build**. The proof is bound to app version + CDHash, so update/re-sign invalidates it and a new LoginWindow proof is required. The app also shows a startup alert while any requirement is missing and provides **Fix next REQUIRED item** plus a direct **Open Remote Login Settings** action.
 
 ## LAN discovery and changing DHCP addresses
 
@@ -305,21 +307,20 @@ See [`docs/acceptance/P6_ACCEPTANCE.md`](docs/acceptance/P6_ACCEPTANCE.md) befor
 
 macOS controls Screen Recording and mouse/keyboard control through its privacy/TCC system. ZorinMacBridge cannot silently grant itself those permissions. In v0.5.2+, the server window has explicit **Request Screen Recording Access** and **Request Mouse/Keyboard Access** buttons. Those APIs are invoked only by a local click on the Mac; a remote connection never triggers a privacy prompt.
 
-For permissions to survive application updates reliably, macOS needs to recognize the new build as the same application. Ad-hoc signed builds do not provide a stable code identity across changed versions. For private/internal use, ZorinMacBridge uses a persistent self-signed code-signing identity created locally on each Mac. The private key never leaves that Mac. The project keeps the bundle identifier stable as:
+For permissions and restricted capabilities to survive updates, production releases use one Apple-issued code identity from build through installation. The stable bundle identifier is:
 
 ```text
 com.ilovemyprojects.zorinmacbridge.server
 ```
 
-For a true VNC/remote-desktop product, Apple also documents the restricted **Persistent Content Capture** entitlement:
+Stage C requires the provisioning profile and final code signature to authorize both:
 
 ```text
 com.apple.developer.persistent-content-capture
+com.apple.developer.hid.virtual.device
 ```
 
-Apple requires explicit approval before an app can use that entitlement. Do not add it to release signing until Apple has approved the entitlement for the developer account.
-
-The transport signature from GitHub is not used as the installed identity. Before installation, v0.6.7+ injects that Mac's persistent local identity marker and re-signs the staged app with the same explicit designated requirement, so later updates keep the same DR without certificates or keychains.
+Both are restricted capabilities. The repository cannot grant them: Apple must approve the developer account/App ID first, and the matching Developer ID provisioning profile must be supplied to the release workflow. A production bundle is never re-signed ad-hoc after download because doing so would break that authorization chain. See [`SIGNING.md`](SIGNING.md).
 
 ## Remote controls
 
@@ -424,7 +425,7 @@ With P0 enabled and the Mac paired, the Zorin **System** tab also provides:
 - **Update now** — download, verify and install the Mac update remotely with no local password prompt;
 - **Automatic updates: Off / Notify only / Install automatically**.
 
-The scheduled Mac updater runs every 6 hours. `Notify only` records whether a newer release exists and exposes it in the System tab. `Install automatically` downloads the Apple Silicon `.dmg`, verifies the release SHA-256, verifies the macOS transport signature and bundle identifier, reapplies the Mac's persistent local designated requirement, makes a backup, installs the app, refreshes the bundled P0 helpers, and restarts the desktop service when a user GUI session exists. A failed install rolls the application bundle back.
+The scheduled Mac updater runs every 6 hours. `Notify only` records whether a newer release exists and exposes it in the System tab. `Install automatically` downloads the Apple Silicon `.dmg`, verifies SHA-256, verifies the Developer ID signature, embedded provisioning profile, bundle/version, TeamIdentifier continuity and required restricted entitlements, stages the bundle without re-signing it, makes a backup, installs it, refreshes the bundled P0 helpers, and restarts the desktop service when a user GUI session exists. A failed install rolls the application bundle back.
 
 The P0 updater is a separate system LaunchDaemon from the recovery daemon so replacing/reloading recovery components cannot terminate the update transaction that is performing the replacement. No additional privileged network listener is opened; remote control still travels through the restricted SSH key.
 
@@ -444,13 +445,13 @@ For real-Mac validation before tagging the release, follow [`docs/acceptance/P1_
 
 ## Stable macOS permissions across updates
 
-There is **no signing setup to run on Zorin/Linux**. Do not create GitHub signing secrets and do not run a signing helper.
+There is no signing setup to run on Zorin/Linux. Production signing happens only in the macOS release job.
 
-For v0.6+, each Mac automatically owns one persistent local signing identity. The one-command installer and the in-app updater re-sign the staged server app with that same identity before placing it in `/Applications`. The private key never leaves the Mac.
+The repository maintainer must configure a Developer ID Application certificate and an Apple-issued Developer ID provisioning profile in GitHub Actions. The profile must grant the two Stage C restricted entitlements. Fresh install and updates verify and preserve that release identity; they do not create a new per-Mac production signature.
 
-The first migration from an older v0.5.x build can require Screen Recording and mouse/keyboard approval once because the code identity genuinely changes at that boundary. After migration, normal v0.6+ updates reuse the same identity on that Mac.
+Migrating from an older ad-hoc/local-DR build to the Developer ID identity is a real code-identity boundary and macOS may require privacy approval again once at that migration.
 
-See [`SIGNING.md`](SIGNING.md) for the architecture.
+See [`SIGNING.md`](SIGNING.md) for the architecture and required GitHub secrets.
 
 ## Security model
 
@@ -519,13 +520,23 @@ swiftc -frontend -parse native/macos/ZMBStreamerLib.swift
 
 The final macOS compilation of the native streaming dylib is performed on the macOS GitHub Actions runners because ScreenCaptureKit and VideoToolbox are macOS frameworks. The dylib is loaded into `ZorinMacBridge Server.app` with `ctypes`; it is not launched as a child capture process.
 
+Starting with 0.15.9, native macOS compilation is also a required **push/pull-request CI gate**, not only a release-time build. GitHub Actions compiles the native dylib on both Apple-Silicon `macos-26` and `xcode-27` runners through `scripts/verify-macos-native-gate.sh`. A tagged release is blocked until the same gate passes, preventing Swift/SDK compile failures from being discovered only after tagging.
+
+### Stage B: prove LoginWindow capabilities before changing runtime again
+
+0.15.10 adds a diagnostic-only capability probe. It runs as the existing `ZorinMacBridge Server.app` identity inside the real `LoginWindow` launchd session and classifies capture and input independently. Capture PASS requires a real non-uniform ScreenCaptureKit image saved as `/var/tmp/zmb-capability-probe.png`; input PASS requires a harmless Shift down/up to be observable in the LoginWindow session. The probe also reports the effective Persistent Content Capture and CoreHID virtual-device entitlements. It does **not** type text, does not know the login password, and does not modify the production video/input paths. See `docs/development/STAGE_B_CAPABILITY_PROBE.md`.
+
+### Stage C: production signing/provisioning gate
+
+0.15.11 moves production macOS distribution to Developer ID + an embedded provisioning profile. Release creation fails if the profile does not authorize both restricted pre-login capabilities, if the selected certificate is not authorized by the profile, or if the final app loses those entitlements. Installer/update paths preserve the signed app instead of re-signing it locally. See `docs/development/STAGE_C_SIGNING_PROVISIONING.md`.
+
 ## Troubleshooting
 
 The Linux client includes a **Logs** tab. Connection logs show TCP, TLS, fingerprint verification, authentication, control-channel state, H.264 video-channel state, decode errors, and disconnect reasons. Passwords are never written to the logs.
 
 If macOS asks for Screen Recording **when you press Connect**, make sure you are on v0.4.3 or newer. v0.4.0-v0.4.2 launched a separate native capture executable, which could be treated as separate TCC-responsible code. v0.4.3 runs ScreenCaptureKit in the main server process instead.
 
-v0.6.7+ re-signs installed updates with the same explicit designated requirement on each Mac. If permissions change after a normal v0.6.7+ update, treat that as a bug and capture the server log plus the `Code signing:` line from the server UI.
+0.15.11+ production updates preserve the Developer ID signature and embedded provisioning profile. If the `Code signing:` line stops showing a Developer ID team/profile after an update, treat that as a signing regression and do not continue pre-login testing.
 
 If video works but mouse/keyboard does not, check the Mac server log for:
 
@@ -541,20 +552,11 @@ MIT — see [LICENSE](LICENSE).
 
 ## macOS privacy permissions and updates
 
-Screen Recording and Accessibility are macOS TCC permissions tied to the app's code identity.
-The release artifact's transport identity is not the installed identity in v0.6+: the staged app is re-signed locally before installation.
-ZorinMacBridge never bypasses TCC and, starting with v0.5.1, a remote **Connect** will not
-trigger the Screen Recording prompt: if permission is missing, the video channel fails with
-a clear message and the permission must be granted locally on the Mac.
-
-Stable permissions across v0.6+ updates use the automatic per-Mac identity described in [`SIGNING.md`](SIGNING.md); no Linux signing command is required.
+Screen Recording and Accessibility are macOS TCC permissions tied to the app's code identity. Stage C production releases keep the same Developer ID/App ID identity from CI through `/Applications` and carry the Apple-issued provisioning profile required for restricted capabilities. ZorinMacBridge never bypasses TCC; missing user consent still requires the appropriate local macOS approval.
 
 ### macOS privacy permissions across updates
 
-macOS installs from **v0.6 onward use a persistent per-Mac code identity**.
-The release workflow produces an ad-hoc transport artifact with an explicit transport DR; the installer/updater applies that Mac's persistent local DR before installation.
-After the one-time migration from an older build, Screen Recording and mouse/keyboard privacy grants are intended to remain associated with the same installed app identity across normal v0.6+ updates.
-See `SIGNING.md`.
+Starting with **0.15.11**, production updates preserve the Developer ID signature and embedded provisioning profile instead of applying a per-Mac ad-hoc signature. The updater verifies TeamIdentifier/designated-requirement continuity before replacement. Migrating once from a legacy local-DR build can still be a privacy-approval boundary. See [`SIGNING.md`](SIGNING.md).
 
 
 ### True 2K/4K virtual desktop and sleep resilience (0.14.14)

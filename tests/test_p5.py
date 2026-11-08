@@ -5,6 +5,7 @@ import ast
 from pathlib import Path
 
 from zmb_video_policy import ADAPTIVE_TIERS, choose_adaptive_step, initial_tier_for_viewport, profile_for_tier
+from zmb_client_runtime import initialize_client_runtime_state
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -28,7 +29,9 @@ def test_protocol_and_source_guards() -> None:
     assert 'VIDEO_STATS = 12' in protocol
     client = (ROOT / 'linux_client.py').read_text()
     assert "'Adaptive'" in client
-    assert 'queue.Queue(maxsize=1)' in client
+    state = type('State', (), {})()
+    initialize_client_runtime_state(state)
+    assert state.video_frames.maxsize == 1
     assert '_video_reconfigure_event' in client
     server = (ROOT / 'mac_server.py').read_text()
     assert 'TCP_NODELAY' in server

@@ -31,4 +31,22 @@ jobs:
           bash -n native/macos/admin/zmb-admin-ssh
           bash -n native/macos/admin/zmb-system-daemon
           bash -n scripts/verify-release-source.sh
+          bash -n scripts/verify-macos-native-gate.sh
+          bash -n scripts/build-macos-capability-probe.sh
           scripts/verify-release-source.sh
+
+  macos-native-build:
+    name: macOS native build (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - macos-26
+          - xcode-27
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and verify native macOS dylib
+        run: |
+          set -euo pipefail
+          scripts/verify-macos-native-gate.sh

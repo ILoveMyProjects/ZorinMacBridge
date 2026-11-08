@@ -279,7 +279,18 @@ def bootstrap_installed_app_identity() -> None:
         same_location = app.resolve() == expected.resolve()
     except Exception:
         same_location = str(app) == str(expected)
-    if not same_location or app_has_local_identity(app):
+    if not same_location:
+        return
+    try:
+        from mac_release_signing import app_has_release_identity
+        if app_has_release_identity(app):
+            # Stage C: never overwrite a Developer-ID/provisioned release with
+            # an ad-hoc local signature. Doing so would strip the restricted
+            # entitlement authorization carried by embedded.provisionprofile.
+            return
+    except Exception:
+        pass
+    if app_has_local_identity(app):
         return
 
     ensure_local_identity()

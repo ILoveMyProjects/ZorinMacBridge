@@ -80,6 +80,25 @@ def evaluate_setup_requirements(
                     'required for unattended update checks/repair',
                     bool(admin_state.get('updater_loaded')),
                 ),
+                SetupRequirement(
+                    'prelogin_agent',
+                    'LoginWindow pre-login agent',
+                    'required to start the remote Desktop before macOS login after reboot',
+                    bool(admin_state.get('prelogin_agent_exists'))
+                    and bool(admin_state.get('prelogin_agent_contract_ready')),
+                ),
+                SetupRequirement(
+                    'prelogin_release_identity',
+                    'Production pre-login signing capabilities',
+                    'requires Developer ID provisioning with Persistent Content Capture and virtual HID',
+                    bool(admin_state.get('prelogin_release_identity_ready')),
+                ),
+                SetupRequirement(
+                    'prelogin_capability_proof',
+                    'Verified LoginWindow capture and input',
+                    'requires a PASS capability probe for this exact installed app build',
+                    bool(admin_state.get('prelogin_probe_ready')),
+                ),
             ])
 
         remote_login = str(admin_state.get('remote_login') or 'unknown')

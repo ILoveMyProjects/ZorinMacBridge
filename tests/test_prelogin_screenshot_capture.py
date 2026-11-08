@@ -4,9 +4,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SWIFT = (ROOT / 'native/macos/ZMBStreamerLib.swift').read_text(encoding='utf-8')
 SERVER = (ROOT / 'mac_server.py').read_text(encoding='utf-8')
 
-assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.7'
 
-# SCScreenshotManager remains a modern LoginWindow fallback, while 0.15.7
+# SCScreenshotManager remains a modern LoginWindow fallback, while 0.15.10
 # prefers CGDisplayStream for the physical login screen. Normal Aqua SCStream
 # remains separate.
 assert 'SCScreenshotManager.captureSampleBuffer' in SWIFT

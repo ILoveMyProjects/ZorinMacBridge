@@ -1,11 +1,12 @@
 from pathlib import Path
 import ast
 
+from zmb_client_runtime import initialize_client_runtime_state
+
 ROOT = Path(__file__).resolve().parents[1]
 client = (ROOT / "linux_client_gtk.py").read_text(encoding="utf-8")
 legacy = (ROOT / "linux_client.py").read_text(encoding="utf-8")
 
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "0.15.7"
 assert "def _build_fullscreen_bar" in client
 assert "self.fullscreen_bar = self._build_fullscreen_bar()" in client
 assert "outer.append(self.fullscreen_bar)" in client
@@ -65,7 +66,10 @@ assert '_apply_fullscreen_layout(False)' in exit_src
 # button/key callback can read it. The missing initialization made both buttons
 # look dead by raising AttributeError inside the GTK signal callback.
 init_src = method_source(client, 'ClientWindow', '__init__')
-assert 'self.fullscreen_active = False' in init_src
+assert 'initialize_client_runtime_state(self)' in init_src
+probe = type('Probe', (), {})()
+initialize_client_runtime_state(probe)
+assert probe.fullscreen_active is False
 assert "self.connect('notify::fullscreened', self._fullscreened_changed)" in init_src
 assert 'def _window_is_fullscreen' in client
 assert 'def _fullscreened_changed' in client

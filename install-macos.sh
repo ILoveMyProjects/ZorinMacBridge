@@ -61,30 +61,33 @@ if [ ! -d "$SOURCE" ]; then
   exit 1
 fi
 
-# Verify the transport artifact before changing its local code identity.
+# Stage C: a production release must already carry a valid Developer ID
+# signature plus an Apple-issued provisioning profile authorizing the restricted
+# pre-login capture/input entitlements. Never re-sign it locally.
 codesign --verify --deep --strict --verbose=2 "$SOURCE"
 ACTUAL_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$SOURCE/Contents/Info.plist" 2>/dev/null || true)"
 if [ "$ACTUAL_BUNDLE_ID" != "$BUNDLE_ID" ]; then
   echo "Unexpected bundle identifier: $ACTUAL_BUNDLE_ID" >&2
   exit 1
 fi
+"$SOURCE/Contents/MacOS/ZorinMacBridge Server" --verify-release-app "$SOURCE"
 
-SIGNED="$STAGE/$APP_NAME"
-ditto "$SOURCE" "$SIGNED"
+STAGED="$STAGE/$APP_NAME"
+ditto "$SOURCE" "$STAGED"
+codesign --verify --deep --strict --verbose=2 "$STAGED"
+"$STAGED/Contents/MacOS/ZorinMacBridge Server" --verify-release-app "$STAGED"
 
-echo "Applying this Mac's stable local designated requirement…"
-"$SOURCE/Contents/MacOS/ZorinMacBridge Server" --local-sign-app "$SIGNED"
-codesign --verify --deep --strict --verbose=2 "$SIGNED"
-
-echo "Installing to /Applications…"
+echo "Installing verified Developer ID release to /Applications…"
 sudo rm -rf "$DEST"
-sudo ditto "$SIGNED" "$DEST"
+sudo ditto "$STAGED" "$DEST"
+
+codesign --verify --deep --strict --verbose=2 "$DEST"
+"$DEST/Contents/MacOS/ZorinMacBridge Server" --verify-release-app "$DEST"
 
 echo
 echo "ZorinMacBridge Server is installed in /Applications."
-echo "This Mac now has a persistent local designated requirement for ZorinMacBridge."
-echo "Future in-app updates are re-signed with the same designated requirement before installation."
-echo "No certificate, keychain setup, GitHub login, Developer ID, or Linux signing setup is required."
+echo "Developer ID signature, embedded provisioning profile, Persistent Content Capture and Virtual HID entitlements were verified."
+echo "Future production updates preserve this Apple-issued code identity; they are not re-signed locally."
 echo "The app was NOT started automatically."
 
 if [ "$APP_ONLY" -eq 0 ]; then

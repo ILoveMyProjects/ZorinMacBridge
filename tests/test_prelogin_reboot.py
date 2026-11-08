@@ -4,7 +4,6 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.7'
 
 server = (ROOT / 'mac_server.py').read_text(encoding='utf-8')
 gui = (ROOT / 'mac_server_gui.py').read_text(encoding='utf-8')
@@ -16,6 +15,7 @@ uninstall = (ROOT / 'native/macos/admin/uninstall-admin.sh').read_text(encoding=
 admin = (ROOT / 'native/macos/admin/zmb-admin').read_text(encoding='utf-8')
 build = (ROOT / 'scripts/build-macos-streamer.sh').read_text(encoding='utf-8')
 workflow = (ROOT / '.github/workflows/release.yml').read_text(encoding='utf-8')
+gate = (ROOT / 'scripts/verify-macos-native-gate.sh').read_text(encoding='utf-8')
 native_c = (ROOT / 'native/macos/ZMBLoginInput.c').read_text(encoding='utf-8')
 
 plist_path = ROOT / 'native/macos/admin/com.ilovemyprojects.zorinmacbridge.prelogin.plist'
@@ -58,8 +58,9 @@ assert 'zmb_login_input_key' in native_c
 assert 'zmb_login_input_pointer' in native_c
 assert 'zmb_login_input_scroll' in native_c
 assert '-framework IOKit' in build
-assert '-framework IOKit' in workflow
-assert 'ZMBLoginInput.o' in build and 'ZMBLoginInput.o' in workflow
+assert 'ZMBLoginInput.o' in build
+assert 'scripts/build-macos-streamer.sh' in gate
+assert 'scripts/verify-macos-native-gate.sh' in workflow
 
 # Installer/recovery own the /Library/LaunchAgents helper; uninstall removes it.
 assert '/Library/LaunchAgents/${PRELOGIN_LABEL}.plist' in install
