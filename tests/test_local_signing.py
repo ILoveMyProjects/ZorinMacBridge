@@ -34,24 +34,28 @@ def main() -> None:
     local_signing = Path('mac_local_signing.py').read_text(encoding='utf-8')
     release_signing = Path('mac_release_signing.py').read_text(encoding='utf-8')
 
-    # Stage C production releases use Developer ID + an Apple-issued profile.
-    assert 'MACOS_DEVELOPER_ID_P12_BASE64' in workflow
-    assert 'MACOS_DEVELOPER_ID_PROFILE_BASE64' in workflow
-    assert 'scripts/sign-macos-release.sh' in workflow
-    assert '--codesign-identity "$MACOS_CODESIGN_IDENTITY"' in workflow
+    # 0.15.19: the default release path is free/ad-hoc. Developer ID support is
+    # retained only as an optional branch when all maintainer secrets exist.
+    assert 'MACOS_RELEASE_SIGNING_MODE=adhoc' in workflow
+    assert 'MACOS_RELEASE_SIGNING_MODE=developer-id' in workflow
+    assert "scripts/sign-macos-transport.sh 'dist/ZorinMacBridge Server.app'" in workflow
+    assert 'Missing secret: MACOS_DEVELOPER_ID_P12_BASE64' not in workflow
+    assert 'Missing secret: MACOS_DEVELOPER_ID_PROFILE_BASE64' not in workflow
+    assert 'scripts/sign-macos-release.sh' in workflow  # optional paid branch only
     assert 'embedded.provisionprofile' in release_signing
     assert 'com.apple.developer.persistent-content-capture' in release_signing
     assert 'com.apple.developer.hid.virtual.device' in release_signing
 
-    # The installed production bundle must never be converted back to ad-hoc.
-    assert '--local-sign-app' not in installer
-    assert 'stage_and_sign' not in updater
-    assert 'app_has_release_identity' in local_signing
-    assert 'Developer-ID/provisioned release' in local_signing
-    assert '--verify-release-app' in server
+    # Free installs/updates are re-signed locally with one stable per-Mac DR.
+    assert '--local-sign-app "$STAGED"' in installer
+    assert 'stage_and_sign' in updater
+    assert 'free stable per-Mac ad-hoc identity' in updater
+    assert 'app_has_release_identity' in local_signing  # preserves optional Developer ID builds
+    assert 'Optional Developer-ID releases keep their publisher signature.' in local_signing
+    assert '--verify-release-app' in server  # optional verification CLI remains available
 
-    # Keep the certificate-free stable DR implementation only as a legacy/source
-    # fallback; it must not acquire release credentials or restricted entitlements.
+    # Local signing itself must never acquire paid credentials or restricted
+    # entitlements. It remains certificate-free.
     for forbidden in (
         'MACOS_DEVELOPER_ID_P12_BASE64',
         'MACOS_DEVELOPER_ID_P12_PASSWORD',
@@ -63,7 +67,7 @@ def main() -> None:
     assert 'ZMBLocalIdentity' in local_signing
     assert 'TOKEN_PATH' in local_signing
 
-    print('legacy local-DR fallback + Stage C production signing tests: OK')
+    print('free local-DR release path + optional Developer ID tests: OK')
 
 
 if __name__ == '__main__':

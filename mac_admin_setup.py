@@ -143,14 +143,22 @@ def _prelogin_agent_contract_ready() -> bool:
     )
 
 
-def _release_identity_ready() -> bool:
+def _release_signing_mode() -> str:
     if not APP_PATH.is_dir():
-        return False
+        return 'missing'
     try:
         from mac_release_signing import app_has_release_identity
-        return bool(app_has_release_identity(APP_PATH))
+        if app_has_release_identity(APP_PATH):
+            return 'developer-id'
     except Exception:
-        return False
+        pass
+    try:
+        from mac_local_signing import app_has_local_identity
+        if app_has_local_identity(APP_PATH):
+            return 'local-adhoc'
+    except Exception:
+        pass
+    return 'transport-adhoc'
 
 
 def _prelogin_probe_state() -> dict[str, str | bool]:
@@ -205,7 +213,7 @@ def admin_component_state() -> dict[str, str | bool]:
         'ssh_host_key_ready': bool(ssh_host_fingerprints()),
         'prelogin_agent_exists': PRELOGIN_PLIST.is_file(),
         'prelogin_agent_contract_ready': _prelogin_agent_contract_ready(),
-        'prelogin_release_identity_ready': _release_identity_ready(),
+        'release_signing_mode': _release_signing_mode(),
     }
     state.update(probe)
     return state

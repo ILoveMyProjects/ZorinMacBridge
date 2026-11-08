@@ -1,3 +1,5 @@
+> **0.15.19 correction:** paid Developer ID/provisioning is no longer a READY requirement. READY is based on the pre-login agent plus a current physical capability proof for the installed build.
+
 # Stage F — Pre-login readiness contract
 
 Stage F changes only the definition and reporting of **READY**. It does not alter the Stage D capture/input/handoff runtime.

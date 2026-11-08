@@ -1,3 +1,5 @@
+> **Historical note (superseded by 0.15.19):** Stage C originally made Developer ID/provisioning mandatory. 0.15.19 changes this policy: the default release is free ad-hoc transport signing plus stable per-Mac local signing. Developer ID/profile support is optional only. This document remains as the design record for that optional branch.
+
 # Stage C — Developer ID signing and restricted-entitlement provisioning
 
 ## TARGET

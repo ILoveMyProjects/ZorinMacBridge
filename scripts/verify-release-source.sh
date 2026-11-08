@@ -31,60 +31,52 @@ if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
   fi
 fi
 
+# Free release path is mandatory. Developer ID is optional and may be enabled only
+# when all credentials are supplied by the maintainer.
 for marker in \
-  'MACOS_DEVELOPER_ID_P12_BASE64' \
-  'MACOS_DEVELOPER_ID_PROFILE_BASE64' \
-  '--codesign-identity "$MACOS_CODESIGN_IDENTITY"' \
-  'scripts/sign-macos-release.sh'; do
+  'MACOS_RELEASE_SIGNING_MODE=adhoc' \
+  'Apple Developer credentials not configured; using free ad-hoc transport signing.' \
+  "scripts/sign-macos-transport.sh 'dist/ZorinMacBridge Server.app'" \
+  'MACOS_RELEASE_SIGNING_MODE=developer-id'; do
   grep -Fq -- "$marker" .github/workflows/release.yml || {
-    echo "ERROR: Stage C release marker missing from workflow: $marker" >&2
+    echo "ERROR: free/optional macOS signing marker missing from workflow: $marker" >&2
     exit 1
   }
 done
 
+for forbidden in \
+  "Missing secret: MACOS_DEVELOPER_ID_P12_BASE64" \
+  "Missing secret: MACOS_DEVELOPER_ID_P12_PASSWORD" \
+  "Missing secret: MACOS_DEVELOPER_ID_PROFILE_BASE64"; do
+  if grep -Fq -- "$forbidden" .github/workflows/release.yml; then
+    echo "ERROR: paid Apple signing is still mandatory: $forbidden" >&2
+    exit 1
+  fi
+done
+
+# Optional Developer ID helpers remain valid when a maintainer explicitly supplies
+# credentials, but the default installer/updater must support free local ad-hoc
+# identity without requiring a provisioning profile.
 for entitlement in \
   'com.apple.developer.persistent-content-capture' \
   'com.apple.developer.hid.virtual.device'; do
   grep -Fq "$entitlement" mac_release_signing.py || {
-    echo "ERROR: required release entitlement missing from verifier: $entitlement" >&2
-    exit 1
-  }
-  grep -Fq "$entitlement" native/macos/signing/ZorinMacBridge.release-entitlements.plist || {
-    echo "ERROR: required release entitlement missing from manifest: $entitlement" >&2
+    echo "ERROR: optional Developer ID verifier lost entitlement support: $entitlement" >&2
     exit 1
   }
 done
 
-grep -Fq 'Contents/embedded.provisionprofile' scripts/sign-macos-release.sh || {
-  echo 'ERROR: release signing does not embed the provisioning profile.' >&2
+grep -Fq -- '--local-sign-app "$STAGED"' install-macos.sh || {
+  echo 'ERROR: free installer path does not apply a stable local ad-hoc identity.' >&2
   exit 1
 }
-grep -Fq -- '--options runtime' scripts/sign-macos-release.sh || {
-  echo 'ERROR: release signing does not enable hardened runtime.' >&2
+grep -Fq 'stage_and_sign' updates.py || {
+  echo 'ERROR: free updater path does not apply a stable local ad-hoc identity.' >&2
   exit 1
 }
-grep -Fq -- '--timestamp' scripts/sign-macos-release.sh || {
-  echo 'ERROR: release signing does not request a secure timestamp.' >&2
-  exit 1
-}
-if grep -Fq 'codesign --force --deep' scripts/sign-macos-release.sh; then
-  echo 'ERROR: release signer must not use --deep while signing.' >&2
+if grep -Fq "'prelogin_release_identity'" mac_requirements.py; then
+  echo 'ERROR: READY still requires paid Developer ID/provisioning.' >&2
   exit 1
 fi
 
-# Stage C invariant: a production app is never converted back to ad-hoc after
-# download. The legacy local DR remains source/dev-only.
-if grep -Fq -- '--local-sign-app' install-macos.sh; then
-  echo 'ERROR: installer still locally re-signs a production release.' >&2
-  exit 1
-fi
-if grep -Fq 'stage_and_sign' updates.py; then
-  echo 'ERROR: updater still locally re-signs a production release.' >&2
-  exit 1
-fi
-grep -Fq 'app_has_release_identity' mac_local_signing.py || {
-  echo 'ERROR: legacy local-sign bootstrap does not protect provisioned releases.' >&2
-  exit 1
-}
-
-echo "[release-source] Stage C source invariants OK"
+echo "[release-source] free macOS signing path + optional Developer ID invariants OK"

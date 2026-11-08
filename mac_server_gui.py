@@ -548,14 +548,6 @@ class ServerGUI:
         if keys & {'p0_status', 'p0_installed', 'p0_daemon', 'update_daemon', 'prelogin_agent'}:
             self.enable_unattended_access()
             return
-        if 'prelogin_release_identity' in keys:
-            messagebox.showerror(
-                'REQUIRED: production pre-login signing',
-                'This installed app is not a Stage C production-signed build with both required restricted capabilities.\n\n'
-                'Install a Developer ID release whose embedded provisioning profile authorizes Persistent Content Capture '
-                'and CoreHID virtual-device access. ZorinMacBridge will not label an ad-hoc/source build READY for unattended LoginWindow use.',
-            )
-            return
         if 'prelogin_capability_proof' in keys:
             messagebox.showwarning(
                 'REQUIRED: verify LoginWindow capture + input',
@@ -645,14 +637,14 @@ class ServerGUI:
                 text = f'P0 unattended access is not installed · Remote Login: {remote}'
             if installed:
                 agent = 'ready' if state.get('prelogin_agent_contract_ready') else 'REQUIRED'
-                signing = 'ready' if state.get('prelogin_release_identity_ready') else 'REQUIRED'
+                signing = str(state.get('release_signing_mode') or 'unknown')
                 if state.get('prelogin_probe_ready'):
                     probe_text = 'PASS/current'
                 elif state.get('prelogin_probe_present') and not state.get('prelogin_probe_current'):
                     probe_text = 'STALE/REQUIRED'
                 else:
                     probe_text = str(state.get('prelogin_probe_overall') or 'never') + '/REQUIRED'
-                text += f' · Pre-login agent: {agent} · Signing: {signing} · LoginWindow proof: {probe_text}'
+                text += f' · Pre-login agent: {agent} · Signing: {signing} (informational) · LoginWindow proof: {probe_text}'
             self.admin_status_var.set(text)
             self._update_required_setup()
 

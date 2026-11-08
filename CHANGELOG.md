@@ -1,3 +1,11 @@
+## 0.15.19 - free macOS release signing
+
+- Removes the hard dependency on paid Apple Developer credentials from GitHub Actions, installation, updates and READY/readiness.
+- Makes the default macOS release path certificate-free: GitHub ad-hoc transport signing, followed by one stable per-Mac local ad-hoc designated requirement before installation/update.
+- Keeps Developer ID + provisioning as an optional enhancement only when all three maintainer secrets are explicitly configured; missing secrets no longer fail CI or block `.dmg` creation.
+- Removes Developer ID/provisioning from the REQUIRED setup contract. READY now depends on the actual LoginWindow agent and current capability proof, not on a paid signing service.
+- Preserves GitHub-built Linux `.deb` and macOS `.dmg` installers.
+
 ## 0.15.18 - macOS 26 native build fix
 
 - Fixes the Swift 6.3 exclusivity violation in the Stage-B capability probe by reading image pixels through the borrowed `UnsafeMutableRawBufferPointer` while `withUnsafeMutableBytes` is active.

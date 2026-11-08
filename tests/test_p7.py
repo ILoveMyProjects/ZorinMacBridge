@@ -15,7 +15,6 @@ def main() -> None:
         'ssh_host_key_ready': True,
         'prelogin_agent_exists': True,
         'prelogin_agent_contract_ready': True,
-        'prelogin_release_identity_ready': True,
         'prelogin_probe_ready': True,
     }
     requirements = evaluate_setup_requirements(
@@ -51,7 +50,6 @@ def main() -> None:
     prelogin_broken = dict(ready_state)
     prelogin_broken.update(
         prelogin_agent_contract_ready=False,
-        prelogin_release_identity_ready=False,
         prelogin_probe_ready=False,
     )
     requirements = evaluate_setup_requirements(
@@ -63,7 +61,8 @@ def main() -> None:
         auto_start_server=True,
     )
     missing = {item.key for item in missing_setup_requirements(requirements)}
-    assert {'prelogin_agent', 'prelogin_release_identity', 'prelogin_capability_proof'} <= missing
+    assert {'prelogin_agent', 'prelogin_capability_proof'} <= missing
+    assert 'prelogin_release_identity' not in missing
 
     gui = (ROOT / 'mac_server_gui.py').read_text(encoding='utf-8')
     terminal = (ROOT / 'mac_terminal_setup.py').read_text(encoding='utf-8')
@@ -82,7 +81,7 @@ def main() -> None:
     assert "'ssh_port_ready': ssh_port_ready" in admin
     assert "'ssh_host_key_ready': bool(ssh_host_fingerprints())" in admin
     assert "'prelogin_agent_contract_ready': _prelogin_agent_contract_ready()" in admin
-    assert "'prelogin_release_identity_ready': _release_identity_ready()" in admin
+    assert "'release_signing_mode': _release_signing_mode()" in admin
     assert "'prelogin_probe_ready': ready" in admin
     assert "if 'remote login: on' in remote_text" in admin
     assert "elif 'remote login: off' in remote_text" in admin

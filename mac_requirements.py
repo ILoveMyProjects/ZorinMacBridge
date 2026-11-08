@@ -88,12 +88,6 @@ def evaluate_setup_requirements(
                     and bool(admin_state.get('prelogin_agent_contract_ready')),
                 ),
                 SetupRequirement(
-                    'prelogin_release_identity',
-                    'Production pre-login signing capabilities',
-                    'requires Developer ID provisioning with Persistent Content Capture and virtual HID',
-                    bool(admin_state.get('prelogin_release_identity_ready')),
-                ),
-                SetupRequirement(
                     'prelogin_capability_proof',
                     'Verified LoginWindow capture and input',
                     'requires a PASS capability probe for this exact installed app build',

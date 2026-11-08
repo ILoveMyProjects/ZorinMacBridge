@@ -23,7 +23,6 @@ def _base_state(**changes):
         'ssh_host_key_ready': True,
         'prelogin_agent_exists': True,
         'prelogin_agent_contract_ready': True,
-        'prelogin_release_identity_ready': True,
         'prelogin_probe_ready': True,
     }
     state.update(changes)
@@ -46,7 +45,6 @@ def main() -> None:
 
     for key, field in (
         ('prelogin_agent', 'prelogin_agent_contract_ready'),
-        ('prelogin_release_identity', 'prelogin_release_identity_ready'),
         ('prelogin_capability_proof', 'prelogin_probe_ready'),
     ):
         missing = {item.key for item in missing_setup_requirements(_requirements(_base_state(**{field: False})))}
@@ -106,7 +104,8 @@ def main() -> None:
     assert "printf 'app_cdhash=%s\\n'" in admin
     assert "printf 'prelogin_probe_current=%s\\n'" in admin
     assert "printf 'prelogin_probe_ready=%s\\n'" in admin
-    assert 'REQUIRED: production pre-login signing' in gui
+    assert 'REQUIRED: production pre-login signing' not in gui
+    assert 'Signing: {signing} (informational)' in gui
     assert 'REQUIRED: verify LoginWindow capture + input' in gui
     assert 'LoginWindow capture/input has not been proven for this exact app build' in terminal
     print('Stage F pre-login readiness gate tests: OK')

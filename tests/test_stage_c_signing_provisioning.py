@@ -89,20 +89,25 @@ local_signing = (ROOT / 'mac_local_signing.py').read_text(encoding='utf-8')
 gui = (ROOT / 'mac_server_gui.py').read_text(encoding='utf-8')
 manifest = (ROOT / 'native/macos/signing/ZorinMacBridge.release-entitlements.plist').read_text(encoding='utf-8')
 
-# Release must fail closed without the Apple-issued certificate/profile secrets.
+# Developer ID/profile validation remains available, but is optional. The
+# workflow must have a fully free ad-hoc branch when no Apple secrets exist.
 for marker in (
-    'MACOS_DEVELOPER_ID_P12_BASE64',
-    'MACOS_DEVELOPER_ID_P12_PASSWORD',
-    'MACOS_DEVELOPER_ID_PROFILE_BASE64',
-    '--codesign-identity "$MACOS_CODESIGN_IDENTITY"',
+    'MACOS_RELEASE_SIGNING_MODE=adhoc',
+    'MACOS_RELEASE_SIGNING_MODE=developer-id',
+    'Apple Developer credentials not configured; using free ad-hoc transport signing.',
+    "scripts/sign-macos-transport.sh 'dist/ZorinMacBridge Server.app'",
     'scripts/sign-macos-release.sh',
 ):
     assert marker in workflow, marker
-assert "scripts/sign-macos-transport.sh 'dist/ZorinMacBridge Server.app'" not in workflow
-assert "--local-sign-app 'build/local-sign-test/ZorinMacBridge Server.app'" not in workflow
+for forbidden in (
+    'Missing secret: MACOS_DEVELOPER_ID_P12_BASE64',
+    'Missing secret: MACOS_DEVELOPER_ID_P12_PASSWORD',
+    'Missing secret: MACOS_DEVELOPER_ID_PROFILE_BASE64',
+):
+    assert forbidden not in workflow, forbidden
 
-# The profile is embedded before final signing; the release claims exactly the
-# restricted capabilities Stage B is intended to prove on LoginWindow.
+# Optional publisher signing still embeds/validates the restricted capabilities
+# when a maintainer deliberately configures the credentials.
 assert 'Contents/embedded.provisionprofile' in sign_script
 assert '--options runtime' in sign_script
 assert '--timestamp' in sign_script
@@ -112,15 +117,14 @@ assert 'codesign --force --deep' not in sign_script
 for key in REQUIRED_RESTRICTED_ENTITLEMENTS:
     assert key in manifest
 
-# Production install/update preserves the Developer-ID signature. Local DR is
-# now legacy/dev-only and bootstrap explicitly skips a provisioned release.
-assert '--verify-release-app "$SOURCE"' in installer
-assert '--local-sign-app' not in installer
-assert 'stage_and_sign' not in updater
-assert 'Staging verified Developer ID application without re-signing' in updater
+# Default install/update must work without Developer ID and apply a stable local
+# ad-hoc identity. Optional Developer ID builds are preserved unchanged.
+assert '--local-sign-app "$STAGED"' in installer
+assert 'stage_and_sign' in updater
+assert 'MACOS_RELEASE_SIGNING_MODE=developer-id' in workflow
 assert 'app_has_release_identity' in local_signing
-assert 'never overwrite a Developer-ID/provisioned release' in local_signing
+assert 'Optional Developer-ID releases keep their publisher signature.' in local_signing
 assert '--verify-release-app' in gui
 assert 'release_identity_summary' in gui
 
-print('Stage C Developer ID/provisioning regression checks passed')
+print('optional Developer ID + mandatory free signing regression checks passed')

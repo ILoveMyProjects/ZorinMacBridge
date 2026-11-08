@@ -132,8 +132,6 @@ def run_terminal_setup() -> int:
         print('REQUIRED_SETUP_END')
         print()
         keys = {item.key for item in missing}
-        if 'prelogin_release_identity' in keys:
-            _required('The installed app is not a Stage C Developer ID/provisioned build with the required pre-login capabilities.')
         if 'prelogin_capability_proof' in keys:
             _required('LoginWindow capture/input has not been proven for this exact app build. Reboot/sign out to LoginWindow and run the paired System capability-probe from Zorin.')
         _required('Setup is incomplete. Open ZorinMacBridge Server on this Mac and resolve every red REQUIRED item before relying on unattended operation.')

@@ -284,9 +284,8 @@ def bootstrap_installed_app_identity() -> None:
     try:
         from mac_release_signing import app_has_release_identity
         if app_has_release_identity(app):
-            # Stage C: never overwrite a Developer-ID/provisioned release with
-            # an ad-hoc local signature. Doing so would strip the restricted
-            # entitlement authorization carried by embedded.provisionprofile.
+            # Optional Developer-ID releases keep their publisher signature.
+            # The default free release path is locally ad-hoc signed instead.
             return
     except Exception:
         pass

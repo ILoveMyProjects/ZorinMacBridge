@@ -172,16 +172,26 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install pyinstaller Pillow==12.3.0 cryptography==50.0.1 certifi 'zeroconf>=0.147,<1' 'pystray>=0.19.5,<1'
-      - name: Configure Developer ID signing and provisioning
+      - name: Configure optional Developer ID signing
         env:
           MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
           MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
           MACOS_DEVELOPER_ID_PROFILE_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_PROFILE_BASE64 }}
         run: |
           set -euo pipefail
-          test -n "${MACOS_DEVELOPER_ID_P12_BASE64:-}" || { echo 'Missing secret: MACOS_DEVELOPER_ID_P12_BASE64' >&2; exit 1; }
-          test -n "${MACOS_DEVELOPER_ID_P12_PASSWORD:-}" || { echo 'Missing secret: MACOS_DEVELOPER_ID_P12_PASSWORD' >&2; exit 1; }
-          test -n "${MACOS_DEVELOPER_ID_PROFILE_BASE64:-}" || { echo 'Missing secret: MACOS_DEVELOPER_ID_PROFILE_BASE64' >&2; exit 1; }
+          present=0
+          [ -n "${MACOS_DEVELOPER_ID_P12_BASE64:-}" ] && present=$((present + 1))
+          [ -n "${MACOS_DEVELOPER_ID_P12_PASSWORD:-}" ] && present=$((present + 1))
+          [ -n "${MACOS_DEVELOPER_ID_PROFILE_BASE64:-}" ] && present=$((present + 1))
+          if [ "$present" -eq 0 ]; then
+            echo 'Apple Developer credentials not configured; using free ad-hoc transport signing.'
+            echo 'MACOS_RELEASE_SIGNING_MODE=adhoc' >> "$GITHUB_ENV"
+            exit 0
+          fi
+          if [ "$present" -ne 3 ]; then
+            echo 'Optional Developer ID signing is partially configured. Set all three MACOS_DEVELOPER_ID_* secrets or none of them.' >&2
+            exit 1
+          fi
           mkdir -p build/signing
           python3 - <<'PYSECRETS'
           import base64, os, pathlib
@@ -201,6 +211,7 @@ jobs:
           test -n "$MACOS_CODESIGN_IDENTITY" || { echo 'No Developer ID Application identity was imported.' >&2; exit 1; }
           MACOS_CODESIGN_SHA1="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -v needle="$MACOS_CODESIGN_IDENTITY" 'index($0, "\"" needle "\"") {print $2; exit}')"
           python3 mac_release_signing.py --verify-profile build/signing/ZorinMacBridge.provisionprofile "$MACOS_CODESIGN_SHA1"
+          echo "MACOS_RELEASE_SIGNING_MODE=developer-id" >> "$GITHUB_ENV"
           echo "MACOS_CODESIGN_IDENTITY=$MACOS_CODESIGN_IDENTITY" >> "$GITHUB_ENV"
           echo "MACOS_CODESIGN_SHA1=$MACOS_CODESIGN_SHA1" >> "$GITHUB_ENV"
           echo "MACOS_PROVISIONING_PROFILE=$GITHUB_WORKSPACE/build/signing/ZorinMacBridge.provisionprofile" >> "$GITHUB_ENV"
@@ -222,8 +233,12 @@ jobs:
           cp assets/server.png build/AppIcon.iconset/icon_512x512@2x.png
           iconutil -c icns build/AppIcon.iconset -o build/server.icns
 
+          PYINSTALLER_SIGN_ARGS=()
+          if [ "${MACOS_RELEASE_SIGNING_MODE:-adhoc}" = "developer-id" ]; then
+            PYINSTALLER_SIGN_ARGS=(--codesign-identity "$MACOS_CODESIGN_IDENTITY")
+          fi
           pyinstaller --noconfirm --clean --windowed \
-            --codesign-identity "$MACOS_CODESIGN_IDENTITY" \
+            "${PYINSTALLER_SIGN_ARGS[@]}" \
             --name 'ZorinMacBridge Server' \
             --osx-bundle-identifier com.ilovemyprojects.zorinmacbridge.server \
             --icon build/server.icns \
@@ -246,17 +261,26 @@ jobs:
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" 'dist/ZorinMacBridge Server.app/Contents/Info.plist' 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $APP_VERSION" 'dist/ZorinMacBridge Server.app/Contents/Info.plist'
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_VERSION" 'dist/ZorinMacBridge Server.app/Contents/Info.plist' 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $APP_VERSION" 'dist/ZorinMacBridge Server.app/Contents/Info.plist'
           /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion 26.0" 'dist/ZorinMacBridge Server.app/Contents/Info.plist' 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string 26.0" 'dist/ZorinMacBridge Server.app/Contents/Info.plist'
-          echo '=== macOS phase: Developer ID + restricted-entitlement provisioning ==='
-          scripts/sign-macos-release.sh \
-            'dist/ZorinMacBridge Server.app' \
-            "$MACOS_PROVISIONING_PROFILE" \
-            "$MACOS_CODESIGN_IDENTITY"
+          if [ "${MACOS_RELEASE_SIGNING_MODE:-adhoc}" = "developer-id" ]; then
+            echo '=== macOS phase: optional Developer ID + provisioning signing ==='
+            scripts/sign-macos-release.sh \
+              'dist/ZorinMacBridge Server.app' \
+              "$MACOS_PROVISIONING_PROFILE" \
+              "$MACOS_CODESIGN_IDENTITY"
+          else
+            echo '=== macOS phase: free ad-hoc transport signing ==='
+            scripts/sign-macos-transport.sh 'dist/ZorinMacBridge Server.app'
+          fi
           echo '=== macOS phase: frozen-app self tests ==='
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-streamer-load
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-capability-probe-load
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-update-tls
           'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --self-test-permission-apis
-          'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --verify-release-app 'dist/ZorinMacBridge Server.app'
+          if [ "${MACOS_RELEASE_SIGNING_MODE:-adhoc}" = "developer-id" ]; then
+            'dist/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server' --verify-release-app 'dist/ZorinMacBridge Server.app'
+          else
+            codesign --verify --deep --strict --verbose=2 'dist/ZorinMacBridge Server.app'
+          fi
           mkdir -p release build/dmgroot
           cp -R 'dist/ZorinMacBridge Server.app' build/dmgroot/
           ln -s /Applications build/dmgroot/Applications

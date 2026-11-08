@@ -67,33 +67,43 @@ if [ ! -d "$SOURCE" ]; then
   exit 1
 fi
 
-# Stage C: a production release must already carry a valid Developer ID
-# signature plus an Apple-issued provisioning profile authorizing the restricted
-# pre-login capture/input entitlements. Never re-sign it locally.
+# Free releases are ad-hoc transport signed in GitHub Actions. Developer ID is
+# supported when configured by the maintainer, but it is never required.
 codesign --verify --deep --strict --verbose=2 "$SOURCE"
 ACTUAL_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$SOURCE/Contents/Info.plist" 2>/dev/null || true)"
 if [ "$ACTUAL_BUNDLE_ID" != "$BUNDLE_ID" ]; then
   echo "Unexpected bundle identifier: $ACTUAL_BUNDLE_ID" >&2
   exit 1
 fi
-"$SOURCE/Contents/MacOS/ZorinMacBridge Server" --verify-release-app "$SOURCE"
 
 STAGED="$STAGE/$APP_NAME"
 ditto "$SOURCE" "$STAGED"
+if "$SOURCE/Contents/MacOS/ZorinMacBridge Server" --verify-release-app "$SOURCE" >/dev/null 2>&1; then
+  SIGNING_MODE="developer-id"
+  echo "Optional Developer ID release detected; preserving publisher signature."
+else
+  SIGNING_MODE="local-adhoc"
+  echo "Free release detected; applying this Mac's stable local ad-hoc identity."
+  "$SOURCE/Contents/MacOS/ZorinMacBridge Server" --local-sign-app "$STAGED"
+fi
 codesign --verify --deep --strict --verbose=2 "$STAGED"
-"$STAGED/Contents/MacOS/ZorinMacBridge Server" --verify-release-app "$STAGED"
 
-echo "Installing verified Developer ID release to /Applications…"
+echo "Installing verified $SIGNING_MODE release to /Applications…"
 sudo rm -rf "$DEST"
 sudo ditto "$STAGED" "$DEST"
 
 codesign --verify --deep --strict --verbose=2 "$DEST"
-"$DEST/Contents/MacOS/ZorinMacBridge Server" --verify-release-app "$DEST"
+if [ "$SIGNING_MODE" = "developer-id" ]; then
+  "$DEST/Contents/MacOS/ZorinMacBridge Server" --verify-release-app "$DEST"
+fi
 
 echo
 echo "ZorinMacBridge Server is installed in /Applications."
-echo "Developer ID signature, embedded provisioning profile, Persistent Content Capture and Virtual HID entitlements were verified."
-echo "Future production updates preserve this Apple-issued code identity; they are not re-signed locally."
+if [ "$SIGNING_MODE" = "developer-id" ]; then
+  echo "Optional Developer ID signature and provisioning profile were preserved."
+else
+  echo "A free per-Mac stable ad-hoc code identity was applied; no paid Apple developer service was required."
+fi
 echo "The app was NOT started automatically."
 
 if [ "$APP_ONLY" -eq 0 ]; then

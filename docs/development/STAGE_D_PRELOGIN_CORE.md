@@ -42,7 +42,7 @@ The Aqua GUI retries `EADDRINUSE` for a bounded 8-second window while the LoginW
 
 ## Non-goals
 
-Stage D does not replace Stage B capability proof or Stage C Developer ID/provisioning requirements. It does not claim that ScreenCaptureKit/CoreHID are authorized on a physical LoginWindow. Those remain real-device acceptance conditions.
+Stage D does not replace the Stage B capability proof. As of 0.15.19, Developer ID/provisioning is optional rather than a required acceptance condition. The physical LoginWindow probe remains authoritative for whether capture/input actually work on the free or optional-signing path.
 
 ## Authentication framing
 
