@@ -1,3 +1,27 @@
+## 0.15.17 - Apple Silicon macOS 26+ target
+
+- Corrects the 0.15.16 platform scope: the supported Mac target is Apple Silicon arm64 (M1+) running macOS 26.0 Tahoe or later.
+- Raises native C/Swift deployment target and the app `LSMinimumSystemVersion` to 26.0; macOS 25 and older are rejected by installers/source setup.
+- Makes CoreHID a required Stage-B capability dependency for the macOS 26 target instead of a weak/optional SDK path.
+- Narrows native CI and tagged macOS packaging to the `macos-26` Apple-Silicon runner.
+- Keeps GitHub-hosted installable release packaging for both machines: Linux amd64 `.deb` and macOS arm64 `.dmg`; local validation does not build either installer.
+
+## 0.15.16 - Apple Silicon macOS 15+ target
+
+- Narrows the supported Mac platform to Apple Silicon arm64 (M1+) with macOS 15.0 or later; Intel and macOS 14 or older are intentionally unsupported.
+- Sets the native C/Swift deployment target to macOS 15.0 and stamps `LSMinimumSystemVersion=15.0` into the release app.
+- CI now compiles on the M1 `macos-15` runner (oldest supported OS) and `macos-26`; Xcode 27 is no longer a required target for this machine profile.
+- Removes pre-macOS-15 capture/streamer fallbacks from the production Swift streamer.
+- Makes CoreHID capability probing optional at SDK build time: macOS 15 builds use the legacy IOHID/Quartz probe, while newer SDK builds may weak-link CoreHID without raising the app deployment target.
+
+## 0.15.15 — ScreenCaptureKitOnlyFix
+
+- Fixes the Stage A macOS 26/Xcode 27 native-build failure: `CGDisplayStream.start()` / `.stop()` are unavailable from the macOS 15+ SDKs and cannot be used by the production streamer.
+- Removes `CGDisplayStream` completely from `ZMBStreamerLib.swift` instead of bypassing SDK availability checks.
+- Uses `SCScreenshotManager.captureSampleBuffer()` as the sole LoginWindow capture backend on macOS 14+; the logged-in Aqua desktop continues to use continuous `SCStream`.
+- Preserves the Stage D pre-login pipeline states (`capture-frame -> pixel-buffer -> encode-submit -> h264-written -> client-decoded`) and the existing bounded first-H.264 timeout/diagnostics.
+- Adds a native-source regression guard that rejects any reintroduction of `CGDisplayStream` into the production streamer.
+
 ## 0.15.14 — SessionLifecycleRefactor
 
 - Implements Stage G without changing the intended Desktop/LoginWindow user flow: shared session lifecycle policy is extracted from GUI/server monoliths into `zmb_session_lifecycle.py`.

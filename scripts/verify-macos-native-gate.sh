@@ -13,7 +13,7 @@ if [[ "$(uname -m)" != "arm64" ]]; then
   exit 1
 fi
 
-for tool in clang swiftc xcodebuild file otool nm; do
+for tool in clang swiftc xcodebuild file otool nm xcrun; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "ERROR: required macOS build tool is missing: $tool" >&2
     exit 1
@@ -52,6 +52,16 @@ file build/ZMBLoginInput.o | grep -F 'arm64'
 file build/libzmb_streamer.dylib | grep -F 'arm64'
 file build/libzmb_capability_probe.dylib | grep -F 'arm64'
 
+echo '=== verify macOS 26.0 deployment target ==='
+for binary in build/libzmb_streamer.dylib build/libzmb_capability_probe.dylib; do
+  minos="$(otool -l "$binary" | awk '/LC_BUILD_VERSION/{seen=1; next} seen && $1=="minos" {print $2; exit}')"
+  test "$minos" = '26.0' || {
+    echo "ERROR: $binary deployment target is $minos, expected 26.0" >&2
+    exit 1
+  }
+  echo "$binary minos=$minos"
+done
+
 echo '=== verify linked macOS frameworks ==='
 otool -L build/libzmb_streamer.dylib | tee build/libzmb_streamer.otool.txt
 grep -F '/System/Library/Frameworks/ScreenCaptureKit.framework/' build/libzmb_streamer.otool.txt
@@ -62,8 +72,14 @@ grep -F '/System/Library/Frameworks/IOKit.framework/' build/libzmb_streamer.otoo
 echo '=== verify Stage-B capability probe frameworks ==='
 otool -L build/libzmb_capability_probe.dylib | tee build/libzmb_capability_probe.otool.txt
 grep -F '/System/Library/Frameworks/ScreenCaptureKit.framework/' build/libzmb_capability_probe.otool.txt
-grep -F '/System/Library/Frameworks/CoreHID.framework/' build/libzmb_capability_probe.otool.txt
 grep -F '/System/Library/Frameworks/Security.framework/' build/libzmb_capability_probe.otool.txt
+SDK="$(xcrun --sdk macosx --show-sdk-path)"
+test -d "$SDK/System/Library/Frameworks/CoreHID.framework" || {
+  echo 'ERROR: macOS 26+ SDK with CoreHID.framework is required.' >&2
+  exit 1
+}
+grep -F '/System/Library/Frameworks/CoreHID.framework/' build/libzmb_capability_probe.otool.txt
+echo 'CoreHID probe support: required and linked for macOS 26+ target'
 
 echo '=== verify exported ABI ==='
 nm -gU build/libzmb_streamer.dylib | tee build/libzmb_streamer.nm.txt

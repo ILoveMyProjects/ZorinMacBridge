@@ -14,9 +14,20 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Verify tag and release source
+      - name: Install Linux/Zorin test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
+            python3-pil python3-pil.imagetk python3-av python3-certifi \
+            python3-keyring python3-secretstorage python3-zeroconf python3-pystray \
+            python3-tk wl-clipboard xclip xvfb pkexec openssh-client \
+            gir1.2-vte-3.91 libvte-2.91-gtk4-0 rsync
+      - name: Verify tag, release source and tests
         run: |
           set -euo pipefail
+          /usr/bin/python3 -m compileall -q .
+          scripts/run-tests.sh
           scripts/verify-release-source.sh
 
   macos-native-gate:
@@ -26,7 +37,6 @@ jobs:
       matrix:
         runner:
           - macos-26
-          - xcode-27
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -76,7 +86,7 @@ jobs:
           chmod 0755 "$PKG/DEBIAN"
           chmod g-s "$PKG/DEBIAN"  # clear inherited setgid on unusual build filesystems
           install -m 0644 linux_client_gtk.py linux_client.py protocol.py discovery.py resources.py \
-            tray_icon.py updates.py settings.py secret_store.py zmb_admin_backend.py zmb_pairing_state.py zmb_system_page.py zmb_xcode_page.py zmb_xcode_data.py zmb_shell_backend.py zmb_terminal_page.py zmb_project_data.py zmb_projects_page.py zmb_sync_backend.py zmb_video_policy.py zmb_recovery.py zmb_shutdown.py "$APP/"
+            tray_icon.py updates.py settings.py secret_store.py zmb_admin_backend.py zmb_pairing_state.py zmb_system_page.py zmb_xcode_page.py zmb_xcode_data.py zmb_shell_backend.py zmb_terminal_page.py zmb_project_data.py zmb_projects_page.py zmb_sync_backend.py zmb_video_policy.py zmb_recovery.py zmb_shutdown.py zmb_session_lifecycle.py zmb_client_runtime.py "$APP/"
           install -m 0644 VERSION "$APP/VERSION"
           install -m 0644 assets/client.png "$APP/assets/client.png"
 
@@ -133,6 +143,8 @@ jobs:
           dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_video_policy.py'
           dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_recovery.py'
           dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_shutdown.py'
+          dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_session_lifecycle.py'
+          dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_client_runtime.py'
       - uses: actions/upload-artifact@v4
         with:
           name: linux-amd64
@@ -233,6 +245,7 @@ jobs:
           APP_VERSION="$(cat VERSION)"
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" 'dist/ZorinMacBridge Server.app/Contents/Info.plist' 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $APP_VERSION" 'dist/ZorinMacBridge Server.app/Contents/Info.plist'
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_VERSION" 'dist/ZorinMacBridge Server.app/Contents/Info.plist' 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $APP_VERSION" 'dist/ZorinMacBridge Server.app/Contents/Info.plist'
+          /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion 26.0" 'dist/ZorinMacBridge Server.app/Contents/Info.plist' 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string 26.0" 'dist/ZorinMacBridge Server.app/Contents/Info.plist'
           echo '=== macOS phase: Developer ID + restricted-entitlement provisioning ==='
           scripts/sign-macos-release.sh \
             'dist/ZorinMacBridge Server.app' \

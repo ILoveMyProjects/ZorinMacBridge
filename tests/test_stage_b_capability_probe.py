@@ -22,11 +22,13 @@ assert "--add-binary 'build/libzmb_capability_probe.dylib:.'" in release
 assert "--self-test-capability-probe-load" in release
 
 # CoreHID is diagnostic-only and must not become a dependency of the normal streamer dylib.
-assert '-framework CoreHID' in probe_build
+assert 'CoreHID.framework' in probe_build
+assert '-weak_framework' not in probe_build
 assert '-framework CoreHID' not in streamer_build
 assert 'scripts/build-macos-capability-probe.sh' in gate
 assert '_zmb_capability_probe_run' in gate
 assert "CoreHID.framework" in gate
+assert "CoreHID probe support: required and linked for macOS 26+ target" in gate
 
 # The capture proof must save a real screenshot and reject a uniform/black frame.
 for marker in (
@@ -63,9 +65,14 @@ assert '"capability-probe"' in backend
 assert 'prelogin_console_active || fail' in admin
 assert 'LimitLoadToSessionType' in admin and 'LoginWindow' in admin
 
-# Packaging needs a modern SDK for CoreHID, but normal runtime deployment target remains unchanged.
+# Target runtime is macOS 26+. CoreHID is a required SDK/runtime dependency.
 assert 'runs-on: macos-26' in release
 assert 'MACOSX_DEPLOYMENT_TARGET=26.0' in probe_build
-assert 'MACOSX_DEPLOYMENT_TARGET=13.0' in streamer_build
+assert 'arm64-apple-macos26.0' in probe_build
+assert 'import CoreHID' in probe
+assert '#if canImport(CoreHID)' not in probe
+assert 'UNAVAILABLE_SDK' not in probe
+assert 'UNAVAILABLE_OS' not in probe
+assert 'MACOSX_DEPLOYMENT_TARGET=26.0' in streamer_build
 
 print('Stage B pre-login capability probe regression checks passed')

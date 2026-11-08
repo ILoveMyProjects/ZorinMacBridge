@@ -20,6 +20,12 @@ if [ "$ARCH" != "arm64" ]; then
   echo "ZorinMacBridge Server supports Apple Silicon (arm64) Macs only; detected: $ARCH" >&2
   exit 1
 fi
+MACOS_VERSION="$(/usr/bin/sw_vers -productVersion 2>/dev/null || true)"
+MACOS_MAJOR="${MACOS_VERSION%%.*}"
+if [[ ! "$MACOS_MAJOR" =~ ^[0-9]+$ ]] || (( MACOS_MAJOR < 26 )); then
+  echo "ZorinMacBridge requires macOS 26.0 or later; detected: ${MACOS_VERSION:-unknown}" >&2
+  exit 1
+fi
 ASSET="ZorinMacBridge-Server_macOS-arm64.dmg"
 SUMS="SHA256SUMS-macOS-arm64.txt"
 

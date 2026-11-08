@@ -1,3 +1,15 @@
+## 0.15.17 Apple Silicon / macOS 26+ target
+
+The supported Mac platform is deliberately narrow: **Apple Silicon arm64 (M1 or newer) running macOS 26.0 Tahoe or later**. Intel Macs and macOS 25 or older are unsupported. Native C/Swift artifacts are compiled with deployment target 26.0 and the release app declares `LSMinimumSystemVersion=26.0`. Native CI and tagged macOS packaging run on the Apple-Silicon `macos-26` runner.
+
+LoginWindow capture uses `SCScreenshotManager.captureSampleBuffer()` and the existing VideoToolbox H.264 pipeline. Aqua capture remains on continuous `SCStream`. Stage-B capability probing requires CoreHID on this target and still compares it with the legacy IOHID/Quartz path for diagnostics.
+
+## 0.15.16 Apple Silicon / macOS 15+ target
+
+The supported Mac platform is now deliberately narrow: **Apple Silicon arm64 (M1 or newer) running macOS 15.0 Sequoia or later**. Intel Macs and macOS 14 or older are unsupported. Native C/Swift artifacts are compiled with deployment target 15.0 and the release app declares `LSMinimumSystemVersion=15.0`. CI compiles on the M1 `macos-15` runner as the oldest supported environment and also on `macos-26` for current-SDK compatibility; Xcode 27 is not a required product target.
+
+LoginWindow capture uses `SCScreenshotManager.captureSampleBuffer()` and the existing VideoToolbox H.264 pipeline. Aqua capture remains on continuous `SCStream`. Stage-B CoreHID probing no longer raises the application minimum OS: on the macOS 15 SDK the probe uses ScreenCaptureKit plus the legacy IOHID/Quartz input path; newer SDKs may compile CoreHID only as an optional runtime-gated diagnostic.
+
 ## 0.15.8 CGDisplayStream Swift/Xcode fix
 
 0.15.8 targets the real post-reboot LoginWindow failure chain. The server no longer keeps global video ownership during slow native cleanup after capture has already been stopped; this removes the repeated `previous video session did not stop within 4s` reconnect loop seen on real hardware.
@@ -14,7 +26,7 @@ The LoginWindow input path remains IOHIDSystem-first. macOS can still deny synth
 
 0.15.5 combines the 0.15.4 LoginWindow screenshot-capture path with the missing pre-login update activation step. After `update-now` at LoginWindow, the old pre-login PID must exit and a new process from the updated `/Applications` bundle must reopen the Desktop port before the update can report success. The screenshot-capture fix from 0.15.4 remains unchanged. After a successful Mac update, the System page also triggers a fresh Bonjour scan so the UI reflects the newly running version instead of retaining a stale pre-update label.
 
-For the macOS LoginWindow session on macOS 14+, pre-login video now uses `SCScreenshotManager.captureSampleBuffer()` and feeds those samples into the existing VideoToolbox H.264 encoder. The normal logged-in Aqua desktop keeps the existing continuous `SCStream` path. LoginWindow also performs the same Screen Recording preflight instead of silently entering a zero-frame capture when TCC is unavailable.
+For the macOS LoginWindow session on supported macOS 26+, pre-login video now uses `SCScreenshotManager.captureSampleBuffer()` and feeds those samples into the existing VideoToolbox H.264 encoder. The normal logged-in Aqua desktop keeps the existing continuous `SCStream` path. LoginWindow also performs the same Screen Recording preflight instead of silently entering a zero-frame capture when TCC is unavailable.
 
 The 0.15.2 input hardening remains: remote input waits for the first decoded pre-login frame, individual rejected input events do not kill the Desktop session, and the IOHID-to-Quartz fallback is retained.
 
@@ -500,7 +512,7 @@ chmod +x scripts/setup-source-linux.sh run_client.sh
 
 ## macOS server
 
-macOS 13+ and Xcode Command Line Tools are required for the native in-process ScreenCaptureKit/VideoToolbox streaming library.
+macOS 26.0+ on Apple Silicon (M1 or newer) and Xcode Command Line Tools are required for the native in-process ScreenCaptureKit/VideoToolbox streaming library. Intel Macs and macOS 25 or older are intentionally unsupported.
 
 ```bash
 git clone https://github.com/ILoveMyProjects/ZorinMacBridge.git
@@ -520,7 +532,7 @@ swiftc -frontend -parse native/macos/ZMBStreamerLib.swift
 
 The final macOS compilation of the native streaming dylib is performed on the macOS GitHub Actions runners because ScreenCaptureKit and VideoToolbox are macOS frameworks. The dylib is loaded into `ZorinMacBridge Server.app` with `ctypes`; it is not launched as a child capture process.
 
-Starting with 0.15.9, native macOS compilation is also a required **push/pull-request CI gate**, not only a release-time build. GitHub Actions compiles the native dylib on both Apple-Silicon `macos-26` and `xcode-27` runners through `scripts/verify-macos-native-gate.sh`. A tagged release is blocked until the same gate passes, preventing Swift/SDK compile failures from being discovered only after tagging.
+Starting with 0.15.9, native macOS compilation is also a required **push/pull-request CI gate**, not only a release-time build. GitHub Actions compiles the native dylib on the Apple-Silicon `macos-26` runner through `scripts/verify-macos-native-gate.sh`. A tagged release is blocked until the same gate passes, preventing Swift/SDK compile failures from being discovered only after tagging.
 
 ### Stage B: prove LoginWindow capabilities before changing runtime again
 

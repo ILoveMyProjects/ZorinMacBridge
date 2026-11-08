@@ -327,7 +327,6 @@ private final class VirtualDisplayManager {
     }
 }
 
-@available(macOS 13.0, *)
 final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     private let fps: Int32
     private let maxWidth: Int
@@ -352,7 +351,6 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private let writerLock = NSLock()
     private var stream: SCStream?
-    private var loginDisplayStream: CGDisplayStream?
     private var preloginEncodeSubmitted = false
     private var preloginStageLogged = Set<String>()
     private var compression: VTCompressionSession?
@@ -434,11 +432,9 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         finished = true
         resultCode = code
         let activeStream = stream
-        let activeLoginDisplayStream = loginDisplayStream
         let activeCompression = compression
         let activeTask = runTask
         stream = nil
-        loginDisplayStream = nil
         compression = nil
         runTask = nil
         stateLock.unlock()
@@ -447,9 +443,6 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         if let reason { log(reason) }
         if let activeStream {
             activeStream.stopCapture(completionHandler: nil)
-        }
-        if let activeLoginDisplayStream {
-            _ = activeLoginDisplayStream.stop()
         }
         if let activeCompression {
             // Remote desktop prefers bounded teardown over draining stale frames.
@@ -537,19 +530,9 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         )
 
         if prelogin {
-            do {
-                try await startPreloginDisplayStream(displayID: display.displayID, width: width, height: height)
-                log("prelogin-capture-mode=cgdisplaystream width=\(width) height=\(height) fps=\(min(fps, 15)) bitrate=\(bitrate)")
-                return
-            } catch {
-                log("prelogin-cgdisplaystream-start-error=\(error.localizedDescription)")
-                if #available(macOS 14.0, *) {
-                    log("prelogin-capture-mode=screenshot-manager-fallback width=\(width) height=\(height) fps=\(min(fps, 10)) bitrate=\(bitrate)")
-                    try await runPreloginScreenshotLoop(filter: filter, configuration: config)
-                    return
-                }
-                log("prelogin-capture-mode=screen-capture-kit-stream-fallback macos<14")
-            }
+            log("prelogin-capture-mode=screenshot-manager width=\(width) height=\(height) fps=\(min(fps, 10)) bitrate=\(bitrate)")
+            try await runPreloginScreenshotLoop(filter: filter, configuration: config)
+            return
         }
 
         let newStream = SCStream(filter: filter, configuration: config, delegate: self)
@@ -559,115 +542,6 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         log("stream-started width=\(width) height=\(height) fps=\(fps) bitrate=\(bitrate)")
     }
 
-    private func startPreloginDisplayStream(displayID: CGDirectDisplayID, width: Int, height: Int) async throws {
-        let streamFPS = max(1, min(Int(fps), 15))
-        let duration = CMTime(value: 1, timescale: CMTimeScale(streamFPS))
-        var frameIndex: Int64 = 0
-        let properties: [CFString: Any] = [
-            CGDisplayStream.showCursor: true,
-            CGDisplayStream.queueDepth: 2,
-            CGDisplayStream.minimumFrameTime: 1.0 / Double(streamFPS),
-        ]
-
-        guard let displayStream = CGDisplayStream(
-            dispatchQueueDisplay: displayID,
-            outputWidth: width,
-            outputHeight: height,
-            pixelFormat: Int32(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
-            properties: properties as CFDictionary,
-            queue: sampleQueue,
-            handler: { [weak self] status, _, surface, _ in
-                guard let self else { return }
-                if status == .stopped {
-                    self.log("prelogin-cgdisplaystream-stopped")
-                    return
-                }
-                guard status == .frameComplete, let surface else { return }
-
-                let (isFinished, activeCompression) = self.withStateLock {
-                    (self.finished, self.compression)
-                }
-                if isFinished { return }
-                self.markPreloginStage("capture-frame")
-                guard let activeCompression else {
-                    self.requestStop(code: 43, reason: "prelogin-display-stream-encoder-missing")
-                    return
-                }
-
-                var unmanagedBuffer: Unmanaged<CVPixelBuffer>?
-                let cvStatus = CVPixelBufferCreateWithIOSurface(
-                    kCFAllocatorDefault,
-                    surface,
-                    nil,
-                    &unmanagedBuffer
-                )
-                guard cvStatus == kCVReturnSuccess, let unmanagedBuffer else {
-                    self.log("prelogin-cgdisplaystream-pixelbuffer-error status=\(cvStatus)")
-                    return
-                }
-                let pixelBuffer = unmanagedBuffer.takeRetainedValue()
-                self.markPreloginStage("pixel-buffer")
-                let pts = CMTime(value: frameIndex, timescale: CMTimeScale(streamFPS))
-                frameIndex &+= 1
-                if frameIndex == 1 {
-                    self.log("prelogin-cgdisplaystream-first-frame")
-                }
-                if self.encodeImageBuffer(activeCompression, imageBuffer: pixelBuffer, pts: pts, duration: duration) {
-                    self.withStateLock { self.preloginEncodeSubmitted = true }
-                    self.markPreloginStage("encode-submit")
-                }
-            }
-        ) else {
-            throw NSError(
-                domain: "ZorinMacBridge",
-                code: 44,
-                userInfo: [NSLocalizedDescriptionKey: "CGDisplayStream could not be created for the LoginWindow display"]
-            )
-        }
-
-        let alreadyFinished = withStateLock { () -> Bool in
-            if finished { return true }
-            preloginEncodeSubmitted = false
-            loginDisplayStream = displayStream
-            return false
-        }
-        if alreadyFinished {
-            _ = displayStream.stop()
-            return
-        }
-
-        let startResult = displayStream.start()
-        guard startResult == .success else {
-            withStateLock { loginDisplayStream = nil }
-            throw NSError(
-                domain: "ZorinMacBridge",
-                code: 45,
-                userInfo: [NSLocalizedDescriptionKey: "CGDisplayStreamStart failed with CGError \(startResult.rawValue)"]
-            )
-        }
-
-        // A display stream can report successful start yet never deliver a
-        // complete LoginWindow frame on some macOS/WindowServer combinations.
-        // Give it a short proof-of-life window, then fall back to the modern
-        // screenshot API instead of leaving Python to time out blindly.
-        for _ in 0..<20 {
-            try await Task.sleep(nanoseconds: 100_000_000)
-            let (stopped, encodeSubmitted) = withStateLock {
-                (finished, preloginEncodeSubmitted)
-            }
-            if stopped || encodeSubmitted { return }
-        }
-
-        _ = displayStream.stop()
-        withStateLock { loginDisplayStream = nil }
-        throw NSError(
-            domain: "ZorinMacBridge",
-            code: 46,
-            userInfo: [NSLocalizedDescriptionKey: "CGDisplayStream started but did not submit a LoginWindow frame to VideoToolbox within 2s"]
-        )
-    }
-
-    @available(macOS 14.0, *)
     private func runPreloginScreenshotLoop(filter: SCContentFilter, configuration: SCStreamConfiguration) async throws {
         let pollFPS = max(1, min(Int(fps), 10))
         let duration = CMTime(value: 1, timescale: CMTimeScale(pollFPS))
@@ -980,7 +854,6 @@ public func zmb_virtual_display_last_error() -> UnsafeMutablePointer<CChar>? {
 
 @_cdecl("zmb_display_list_json")
 public func zmb_display_list_json() -> UnsafeMutablePointer<CChar>? {
-    guard #available(macOS 13.0, *) else { return ownedCString("[]") }
     var rows: [[String: Any]] = []
     var count: UInt32 = 0
     guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else {
@@ -1015,7 +888,6 @@ public func zmb_string_free(_ pointer: UnsafeMutablePointer<CChar>?) {
 
 @_cdecl("zmb_streamer_create")
 public func zmb_streamer_create(_ fps: Int32, _ maxWidth: Int32, _ bitrate: Int32, _ targetWidth: Int32, _ targetHeight: Int32, _ displayID: UInt32, _ prelogin: Int32, _ outputFD: Int32, _ logFD: Int32) -> UnsafeMutableRawPointer? {
-    guard #available(macOS 13.0, *) else { return nil }
     let streamer = H264ScreenStreamer(
         fps: fps,
         maxWidth: Int(maxWidth),
@@ -1033,18 +905,13 @@ public func zmb_streamer_create(_ fps: Int32, _ maxWidth: Int32, _ bitrate: Int3
 @_cdecl("zmb_streamer_run")
 public func zmb_streamer_run(_ handle: UnsafeMutableRawPointer?) -> Int32 {
     guard let handle else { return 10 }
-    if #available(macOS 13.0, *) {
-        return takeStreamer(handle).runBlocking()
-    }
-    return 11
+    return takeStreamer(handle).runBlocking()
 }
 
 @_cdecl("zmb_streamer_stop")
 public func zmb_streamer_stop(_ handle: UnsafeMutableRawPointer?) {
     guard let handle else { return }
-    if #available(macOS 13.0, *) {
-        takeStreamer(handle).requestStop(code: 0, reason: nil)
-    }
+    takeStreamer(handle).requestStop(code: 0, reason: nil)
 }
 
 @_cdecl("zmb_streamer_destroy")

@@ -245,7 +245,6 @@ private func runCaptureProbe(report: inout ProbeReport, imageURL: URL) -> Bool {
     }
 }
 
-@available(macOS 26.0, *)
 private func coreHIDShiftProbe() async -> (String, String) {
     let descriptor = Data([
         0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,
@@ -310,10 +309,6 @@ private func coreHIDShiftProbe() async -> (String, String) {
 }
 
 private func runCoreHIDProbe(report: inout ProbeReport) -> Bool {
-    guard #available(macOS 26.0, *) else {
-        report.add("input_corehid_result", "UNAVAILABLE_OS")
-        return false
-    }
     let semaphore = DispatchSemaphore(value: 0)
     let box = ProbeResultBox<(String, String)>()
     Task {

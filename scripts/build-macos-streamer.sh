@@ -12,10 +12,10 @@ fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$ROOT/build"
-MACOSX_DEPLOYMENT_TARGET=13.0 clang -O2 -fPIC -Wno-deprecated-declarations -c \
+MACOSX_DEPLOYMENT_TARGET=26.0 clang -arch arm64 -mmacosx-version-min=26.0 -O2 -fPIC -Wno-deprecated-declarations -c \
   "$ROOT/native/macos/ZMBLoginInput.c" \
   -o "$ROOT/build/ZMBLoginInput.o"
-MACOSX_DEPLOYMENT_TARGET=13.0 swiftc -O -emit-library \
+MACOSX_DEPLOYMENT_TARGET=26.0 swiftc -target arm64-apple-macos26.0 -O -emit-library \
   -framework ScreenCaptureKit \
   -framework VideoToolbox \
   -framework CoreMedia \

@@ -12,26 +12,37 @@ fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SDK="$(xcrun --sdk macosx --show-sdk-path)"
-if [[ ! -d "$SDK/System/Library/Frameworks/CoreHID.framework" ]]; then
-  echo "ERROR: selected macOS SDK does not provide CoreHID.framework; Stage B requires macOS 26+ SDK." >&2
-  exit 1
-fi
 
 mkdir -p "$ROOT/build"
 if [[ ! -f "$ROOT/build/ZMBLoginInput.o" ]]; then
-  MACOSX_DEPLOYMENT_TARGET=13.0 clang -O2 -fPIC -Wno-deprecated-declarations -c \
+  MACOSX_DEPLOYMENT_TARGET=26.0 clang -arch arm64 -mmacosx-version-min=26.0 -O2 -fPIC -Wno-deprecated-declarations -c \
     "$ROOT/native/macos/ZMBLoginInput.c" \
     -o "$ROOT/build/ZMBLoginInput.o"
 fi
 
-MACOSX_DEPLOYMENT_TARGET=26.0 swiftc -swift-version 5 -O -emit-library \
-  -framework ScreenCaptureKit \
-  -framework CoreGraphics \
-  -framework ImageIO \
-  -framework Security \
-  -framework CryptoKit \
-  -framework CoreHID \
-  -framework IOKit \
+SWIFT_ARGS=(
+  -swift-version 5
+  -target arm64-apple-macos26.0
+  -O
+  -emit-library
+  -framework ScreenCaptureKit
+  -framework CoreGraphics
+  -framework ImageIO
+  -framework Security
+  -framework CryptoKit
+  -framework IOKit
+)
+
+# macOS 26 is the minimum supported runtime. CoreHID is therefore a required
+# Stage-B capability dependency, not a weak/optional compatibility path.
+if [[ ! -d "$SDK/System/Library/Frameworks/CoreHID.framework" ]]; then
+  echo 'ERROR: macOS 26+ SDK with CoreHID.framework is required.' >&2
+  exit 1
+fi
+SWIFT_ARGS+=( -framework CoreHID )
+echo 'Capability probe: CoreHID SDK support required (macOS 26+ target).'
+
+MACOSX_DEPLOYMENT_TARGET=26.0 swiftc "${SWIFT_ARGS[@]}" \
   "$ROOT/native/macos/capability-probe/ZMBCapabilityProbe.swift" \
   "$ROOT/build/ZMBLoginInput.o" \
   -o "$ROOT/build/libzmb_capability_probe.dylib"
