@@ -17,6 +17,12 @@ echo "[release-source] ref=${GITHUB_REF:-<none>}"
 echo "[release-source] ref_name=${GITHUB_REF_NAME:-<none>}"
 echo "[release-source] ref_type=${GITHUB_REF_TYPE:-<none>}"
 
+OBSOLETE_PRELOGIN_TEST="tests/test_prelogin_displaystream_capture.py"
+if [ -e "$OBSOLETE_PRELOGIN_TEST" ]; then
+  echo "ERROR: obsolete CGDisplayStream regression test is still tracked: $OBSOLETE_PRELOGIN_TEST" >&2
+  exit 1
+fi
+
 if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
   EXPECTED_TAG="v${VERSION_VALUE}"
   if [ "${GITHUB_REF_NAME:-}" != "$EXPECTED_TAG" ]; then

@@ -165,10 +165,10 @@ private func imageLumaRange(_ image: CGImage) -> Int {
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
         var minLuma = 255
         var maxLuma = 0
-        for offset in stride(from: 0, to: bytes.count, by: 4) {
-            let r = Int(bytes[offset])
-            let g = Int(bytes[offset + 1])
-            let b = Int(bytes[offset + 2])
+        for offset in stride(from: 0, to: raw.count, by: 4) {
+            let r = Int(raw[offset])
+            let g = Int(raw[offset + 1])
+            let b = Int(raw[offset + 2])
             let luma = (77 * r + 150 * g + 29 * b) >> 8
             minLuma = min(minLuma, luma)
             maxLuma = max(maxLuma, luma)

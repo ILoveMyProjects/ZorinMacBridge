@@ -1,3 +1,7 @@
+## 0.15.18 macOS 26 native build fix
+
+0.15.18 fixes the macOS 26/Xcode 26.6 native CI blockers found after 0.15.17: a Swift 6.3 exclusive-access violation in the capability probe and a stale CGDisplayStream regression test that must not remain tracked. The supported platform remains Apple Silicon (M1+) on macOS 26.0 or later. GitHub Actions remains responsible for building the installable Linux `.deb` and macOS `.dmg`.
+
 ## 0.15.17 Apple Silicon / macOS 26+ target
 
 The supported Mac platform is deliberately narrow: **Apple Silicon arm64 (M1 or newer) running macOS 26.0 Tahoe or later**. Intel Macs and macOS 25 or older are unsupported. Native C/Swift artifacts are compiled with deployment target 26.0 and the release app declares `LSMinimumSystemVersion=26.0`. Native CI and tagged macOS packaging run on the Apple-Silicon `macos-26` runner.

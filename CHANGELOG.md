@@ -1,3 +1,9 @@
+## 0.15.18 - macOS 26 native build fix
+
+- Fixes the Swift 6.3 exclusivity violation in the Stage-B capability probe by reading image pixels through the borrowed `UnsafeMutableRawBufferPointer` while `withUnsafeMutableBytes` is active.
+- Adds source gates that reject the obsolete `tests/test_prelogin_displaystream_capture.py` regression test, which targets the removed `CGDisplayStream` backend.
+- Keeps ScreenCaptureKit-only pre-login capture, the Apple-Silicon/macOS-26 target, and GitHub-built `.deb` + `.dmg` installers unchanged.
+
 ## 0.15.17 - Apple Silicon macOS 26+ target
 
 - Corrects the 0.15.16 platform scope: the supported Mac target is Apple Silicon arm64 (M1+) running macOS 26.0 Tahoe or later.
