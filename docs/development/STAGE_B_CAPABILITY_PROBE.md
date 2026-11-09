@@ -11,7 +11,7 @@ The probe records the current code-signing identifier and the effective values o
 
 For capture it creates a real ScreenCaptureKit `SCStream`, waits for the first `.started`/`.complete` screen sample with bounded startup/first-frame deadlines, converts that frame to a `CGImage`, writes `/var/tmp/zmb-capability-probe.png`, records dimensions/SHA-256, and rejects a uniformly black frame. This mirrors the production LoginWindow video backend introduced in 0.15.27. `CGPreflightScreenCaptureAccess()` remains diagnostic only.
 
-For input it calls the same `ZMBCoreHIDInput.swift` implementation compiled into the production streamer. The probe creates the production CoreHID virtual keyboard and absolute pointer, proves a harmless left-Shift down/up transition, moves the pointer a small bounded distance, verifies that movement, then restores the pointer. It never types text and never sends a password. The old IOHID/Quartz path is still measured only as a diagnostic comparison.
+For input it calls the same `ZMBCoreHIDInput.swift` implementation compiled into the production streamer. The probe creates the production CoreHID virtual keyboard and absolute pointer, proves a harmless left-Shift down/up transition, moves the pointer a small bounded distance, verifies that movement, then restores the pointer. It never types text and never sends a password. Starting with 0.15.30 the IOHID/Quartz path is also the production fallback when CoreHID cannot be created. The probe continues to report it separately because CoreHID and fallback delivery have different guarantees.
 
 ## How it runs
 
@@ -45,6 +45,6 @@ Files are handed back to the configured target user with mode `0600` where possi
 
 `capture_result=FAIL_BLACK_OR_UNIFORM` means ScreenCaptureKit delivered a frame object but not a usable LoginWindow image.
 
-`input_legacy_result=UNCONFIRMED_DELIVERY` remains diagnostic only. Legacy IOHID/Quartz cannot make production pre-login VERIFIED.
+`input_legacy_result` remains separate from managed CoreHID readiness. A PASS is useful evidence for the production fallback, while managed `input_corehid_result=PASS` remains the stricter VERIFIED readiness signal.
 
 Starting with 0.15.27, Stage B and the production LoginWindow runtime intentionally share the same ScreenCaptureKit/CoreHID mechanism class; the probe is no longer a proof of a different fallback path.

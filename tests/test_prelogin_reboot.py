@@ -51,14 +51,19 @@ assert 'max_width = min(max_width, 1920)' in server
 assert 'fps = min(fps, 30.0)' in server
 assert 'LoginWindowInput' in server
 
-# Production LoginWindow input is CoreHID HIDVirtualDevice. The old IOHID/Quartz
-# shim remains only in the capability-probe dylib as a diagnostic comparison.
+# Production LoginWindow input prefers CoreHID HIDVirtualDevice and carries the
+# bundled IOHIDSystem/kCGSessionEventTap fallback so an unavailable CoreHID
+# device cannot tear down the pre-login control/video session.
 assert 'HIDVirtualDevice(properties:' in corehid
 assert 'zmb_corehid_input_key' in corehid
 assert 'zmb_corehid_input_pointer' in corehid
 assert '-framework CoreHID' in build
 assert 'ZMBCoreHIDInput.swift' in build
-assert 'ZMBLoginInput.o' not in build
+assert 'ZMBLoginInput.c' in build
+assert 'ZMBLoginInput.o' in build
+assert '-framework IOKit' in build
+assert 'zmb_login_input_open' in server
+assert "self.backend = 'legacy'" in server
 assert 'IOHIDPostEvent' in native_c
 assert 'scripts/build-macos-streamer.sh' in gate
 assert 'scripts/verify-macos-native-gate.sh' in workflow

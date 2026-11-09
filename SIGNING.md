@@ -45,7 +45,7 @@ The managed capability tier is now the actual production backend, not just a rea
 
 - video: ScreenCaptureKit `SCStream` with bounded content discovery, bounded stream startup and a first-frame watchdog;
 - input: CoreHID `HIDVirtualDevice` virtual keyboard + absolute pointer;
-- legacy IOHIDSystem/Quartz: diagnostic comparison only inside the capability-probe dylib.
+- legacy IOHIDSystem/Quartz: bundled production fallback starting with 0.15.30 when CoreHID cannot be created; the capability probe still records it separately from managed CoreHID proof.
 
 The physical probe exercises an actual SCStream first frame and the same CoreHID input source before the build can be marked VERIFIED.
 

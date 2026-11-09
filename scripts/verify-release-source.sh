@@ -85,15 +85,10 @@ grep -Fq "'prelogin_release_identity_ready'" mac_requirements.py || {
   echo 'ERROR: pre-login readiness is not wired to the verified managed-capability identity.' >&2
   exit 1
 }
-grep -Fq "proof.get('input_corehid_result') == 'PASS'" mac_admin_setup.py || {
-  echo 'ERROR: pre-login proof still permits a non-CoreHID input path.' >&2
-  exit 1
-}
 
-# Production LoginWindow must use the exact managed mechanisms proven by the
-# physical capability probe: ScreenCaptureKit SCStream for video and CoreHID
-# HIDVirtualDevice for keyboard/pointer. The old system-screenshot and legacy
-# IOHID/Quartz paths are diagnostic-only and must never return as production.
+# Production LoginWindow keeps managed ScreenCaptureKit/CoreHID as primary,
+# but CoreHID creation failure must not kill the control session.  The bundled
+# native IOHIDSystem/kCGSessionEventTap bridge is the in-process fallback.
 grep -Fq 'prelogin-backend=screencapturekit-persistent' native/macos/ZMBStreamerLib.swift || {
   echo 'ERROR: production pre-login video is not using managed ScreenCaptureKit.' >&2
   exit 1
@@ -116,6 +111,18 @@ grep -Fq 'zmb_corehid_input_open' mac_server.py || {
 }
 grep -Fq 'zmb_corehid_input_pointer' mac_server.py || {
   echo 'ERROR: production LoginWindow pointer is not wired to CoreHID.' >&2
+  exit 1
+}
+grep -Fq 'native/macos/ZMBLoginInput.c' scripts/build-macos-streamer.sh || {
+  echo 'ERROR: production streamer no longer compiles the LoginWindow native input fallback.' >&2
+  exit 1
+}
+grep -Fq 'zmb_login_input_open' mac_server.py || {
+  echo 'ERROR: production LoginWindow input fallback is not wired.' >&2
+  exit 1
+}
+grep -Fq 'kCGSessionEventTap' native/macos/ZMBLoginInput.c || {
+  echo 'ERROR: LoginWindow native fallback lost the session event-tap path.' >&2
   exit 1
 }
 grep -Fq 'capture_scstream_first_frame' native/macos/capability-probe/ZMBCapabilityProbe.swift || {
@@ -141,5 +148,7 @@ grep -Fq 'Refusing to replace a pre-login-capable Developer ID installation with
   exit 1
 }
 
-echo "[release-source] resilient Aqua fallback + managed pre-login capability gate OK"
-# Marker used by regression tests: pre-login READY requires Apple-managed Developer ID/provisioning.
+echo "[release-source] resilient Aqua + LoginWindow native input fallback gate OK"
+
+# Marker used by readiness regression tests: pre-login READY requires Apple-managed Developer ID/provisioning.
+# resilient Aqua fallback remains supported alongside LoginWindow native input fallback.

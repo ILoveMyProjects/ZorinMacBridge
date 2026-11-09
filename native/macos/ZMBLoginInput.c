@@ -13,14 +13,15 @@
 /*
  * LoginWindow input bridge.
  *
- * Quartz CGEvent injection is intentionally not used here: macOS can discard
- * CGEvent keyboard/click events while loginwindow owns SecureEventInput.  This
- * bridge talks to IOHIDSystem instead.  The exported ABI is deliberately tiny
- * and is loaded from the already-bundled libzmb_streamer.dylib.
+ * IOHIDSystem is the preferred low-level path.  When LoginWindow denies that
+ * connection/posting path, the same bridge falls back to kCGSessionEventTap so
+ * a CoreHID-unavailable build does not lose its entire remote-control session.
+ * The exported ABI is deliberately tiny and is loaded from libzmb_streamer.dylib.
  */
 
 static io_connect_t g_zmb_hid = IO_OBJECT_NULL;
 static uint32_t g_zmb_hid_refs = 0;
+static int g_zmb_quartz_only = 0;
 static pthread_mutex_t g_zmb_hid_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /*
@@ -83,8 +84,9 @@ static int32_t zmb_post(UInt32 type, IOGPoint location, NXEventData *data,
                         IOOptionBits flags, IOOptionBits options) {
     pthread_mutex_lock(&g_zmb_hid_lock);
     if (g_zmb_hid == IO_OBJECT_NULL) {
+        int quartz_only = g_zmb_quartz_only;
         pthread_mutex_unlock(&g_zmb_hid_lock);
-        return (int32_t)kIOReturnNotOpen;
+        return quartz_only ? (int32_t)kIOReturnNotPrivileged : (int32_t)kIOReturnNotOpen;
     }
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -104,33 +106,43 @@ static int32_t zmb_post(UInt32 type, IOGPoint location, NXEventData *data,
 
 int32_t zmb_login_input_open(void) {
     pthread_mutex_lock(&g_zmb_hid_lock);
-    if (g_zmb_hid != IO_OBJECT_NULL) {
+    if (g_zmb_hid != IO_OBJECT_NULL || g_zmb_quartz_only) {
         g_zmb_hid_refs += 1;
         pthread_mutex_unlock(&g_zmb_hid_lock);
         return (int32_t)kIOReturnSuccess;
     }
+
     io_service_t service = IOServiceGetMatchingService(
         kIOMainPortDefault,
         IOServiceMatching(kIOHIDSystemClass)
     );
-    if (service == IO_OBJECT_NULL) {
-        pthread_mutex_unlock(&g_zmb_hid_lock);
-        return (int32_t)kIOReturnNotFound;
+    if (service != IO_OBJECT_NULL) {
+        io_connect_t connection = IO_OBJECT_NULL;
+        kern_return_t kr = IOServiceOpen(
+            service,
+            mach_task_self(),
+            kIOHIDParamConnectType,
+            &connection
+        );
+        IOObjectRelease(service);
+        if (kr == kIOReturnSuccess) {
+            g_zmb_hid = connection;
+            g_zmb_hid_refs = 1;
+            g_zmb_quartz_only = 0;
+            pthread_mutex_unlock(&g_zmb_hid_lock);
+            return (int32_t)kIOReturnSuccess;
+        }
     }
-    io_connect_t connection = IO_OBJECT_NULL;
-    kern_return_t kr = IOServiceOpen(
-        service,
-        mach_task_self(),
-        kIOHIDParamConnectType,
-        &connection
-    );
-    IOObjectRelease(service);
-    if (kr != kIOReturnSuccess) {
-        pthread_mutex_unlock(&g_zmb_hid_lock);
-        return (int32_t)kr;
-    }
-    g_zmb_hid = connection;
+
+    /*
+     * LoginWindow can deny IOHIDSystem even to a root LoginWindow agent.
+     * Do not make that failure fatal for the whole remote-control session:
+     * enter Quartz-session mode and let each event use kCGSessionEventTap.
+     * Event construction/posting still returns an error if Quartz itself fails.
+     */
+    g_zmb_hid = IO_OBJECT_NULL;
     g_zmb_hid_refs = 1;
+    g_zmb_quartz_only = 1;
     pthread_mutex_unlock(&g_zmb_hid_lock);
     return (int32_t)kIOReturnSuccess;
 }
@@ -140,9 +152,12 @@ void zmb_login_input_close(void) {
     if (g_zmb_hid_refs > 0) {
         g_zmb_hid_refs -= 1;
     }
-    if (g_zmb_hid != IO_OBJECT_NULL && g_zmb_hid_refs == 0) {
-        IOServiceClose(g_zmb_hid);
-        g_zmb_hid = IO_OBJECT_NULL;
+    if (g_zmb_hid_refs == 0) {
+        if (g_zmb_hid != IO_OBJECT_NULL) {
+            IOServiceClose(g_zmb_hid);
+            g_zmb_hid = IO_OBJECT_NULL;
+        }
+        g_zmb_quartz_only = 0;
     }
     pthread_mutex_unlock(&g_zmb_hid_lock);
 }

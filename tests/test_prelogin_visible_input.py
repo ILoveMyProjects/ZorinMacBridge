@@ -12,8 +12,10 @@ gtk = (ROOT / 'linux_client_gtk.py').read_text(encoding='utf-8')
 assert 'status != .complete && status != .started' in swift
 assert 'first sample after startCapture()' in swift
 
-# IOHID privilege rejection must have a LoginWindow-session Quartz fallback.
+# IOHID open/post rejection must have a LoginWindow-session Quartz fallback.
+assert 'g_zmb_quartz_only' in native
 assert 'kIOReturnNotPrivileged' in native
+assert 'enter Quartz-session mode' in native
 assert 'kCGSessionEventTap' in native
 assert 'zmb_quartz_pointer' in native
 assert 'zmb_quartz_key' in native

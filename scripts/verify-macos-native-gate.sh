@@ -68,6 +68,7 @@ grep -F '/System/Library/Frameworks/ScreenCaptureKit.framework/' build/libzmb_st
 grep -F '/System/Library/Frameworks/VideoToolbox.framework/' build/libzmb_streamer.otool.txt
 grep -F '/System/Library/Frameworks/CoreGraphics.framework/' build/libzmb_streamer.otool.txt
 grep -F '/System/Library/Frameworks/CoreHID.framework/' build/libzmb_streamer.otool.txt
+grep -F '/System/Library/Frameworks/IOKit.framework/' build/libzmb_streamer.otool.txt
 
 echo '=== verify Stage-B capability probe frameworks ==='
 otool -L build/libzmb_capability_probe.dylib | tee build/libzmb_capability_probe.otool.txt
@@ -91,7 +92,12 @@ for symbol in \
   _zmb_corehid_input_open \
   _zmb_corehid_input_close \
   _zmb_corehid_input_key \
-  _zmb_corehid_input_pointer; do
+  _zmb_corehid_input_pointer \
+  _zmb_login_input_open \
+  _zmb_login_input_close \
+  _zmb_login_input_key \
+  _zmb_login_input_pointer \
+  _zmb_login_input_scroll; do
   grep -Eq "[[:space:]]${symbol}$" build/libzmb_streamer.nm.txt || {
     echo "ERROR: missing exported ABI symbol: ${symbol#_}" >&2
     exit 1

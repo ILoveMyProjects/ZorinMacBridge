@@ -1,3 +1,11 @@
+## 0.15.30 - LoginWindow native input fallback
+
+- Fixes the real post-reboot failure where LoginWindow Desktop authentication succeeded but `HIDVirtualDevice` creation returned `rc=-11`, causing the control owner to disconnect and every pre-login video socket to be rejected as ownerless.
+- Keeps CoreHID as the preferred LoginWindow input backend, but automatically falls back to the bundled native IOHIDSystem bridge and then `kCGSessionEventTap` when CoreHID cannot be created.
+- Links `ZMBLoginInput.c` into the production `libzmb_streamer.dylib` instead of keeping it capability-probe-only.
+- Makes CoreHID unavailability non-fatal during control-session initialization; if every input backend fails, video/control stay connected and input failures are reported per event instead of destroying the pre-login session.
+- Adds a regression test for the observed `CoreHID rc=-11` path and extends the macOS native gate to require the fallback ABI and IOKit linkage.
+
 ## 0.15.29 - capability-probe CoreHID link fix
 
 - Fix macOS 26/Xcode 26 native CI failure caused by redeclaring the production `zmb_corehid_input_*` Swift symbols through `@_silgen_name` inside `ZMBCapabilityProbe.swift`.

@@ -498,11 +498,14 @@ class MacInput:
 
 
 class LoginWindowInput(MacInput):
-    """Inject LoginWindow input through the production CoreHID virtual devices.
+    """LoginWindow input with automatic native fallback.
 
-    This is deliberately the same Apple-managed mechanism verified by the
-    capability probe.  Legacy IOHIDSystem/Quartz remains diagnostic only and is
-    not used for production remote login.
+    CoreHID HIDVirtualDevice remains the preferred path because it provides a
+    real virtual keyboard/pointer when the running process is entitled for it.
+    If CoreHID device creation is unavailable, ZMB falls back in-process to its
+    native IOHIDSystem bridge, which itself degrades to kCGSessionEventTap when
+    IOHIDSystem is denied.  Failure to create CoreHID must never tear down the
+    Desktop control session by itself.
     """
 
     HID_USAGES = {
@@ -544,19 +547,43 @@ class LoginWindowInput(MacInput):
     }
 
     def __init__(self) -> None:
+        # MacInput owns the CoreGraphics geometry helpers used by the legacy
+        # absolute-pointer path.  It does not post any event during init.
+        super().__init__()
         self.native = NativeStreamerLibrary()
-        rc = int(self.native.lib.zmb_corehid_input_open())
-        if rc != 0:
-            raise RuntimeError(f'CoreHID LoginWindow input unavailable (rc={rc})')
-        self.held_buttons: set[int] = set()
-        self.held_modifiers: set[str] = set()
+        self.backend = 'unavailable'
+        self.corehid_open_rc = int(self.native.lib.zmb_corehid_input_open())
+        self.legacy_open_rc: int | None = None
+        if self.corehid_open_rc == 0:
+            self.backend = 'corehid'
+        else:
+            self.legacy_open_rc = int(self.native.lib.zmb_login_input_open())
+            if self.legacy_open_rc == 0:
+                self.backend = 'legacy'
         self.last_nx = 0.5
         self.last_ny = 0.5
+
+    def backend_summary(self) -> str:
+        if self.backend == 'corehid':
+            return 'CoreHID HIDVirtualDevice'
+        if self.backend == 'legacy':
+            return f'IOHIDSystem/kCGSessionEventTap fallback (CoreHID rc={self.corehid_open_rc})'
+        return (
+            'unavailable '
+            f'(CoreHID rc={self.corehid_open_rc}, legacy rc={self.legacy_open_rc})'
+        )
+
+    def _ensure_backend(self) -> None:
+        if self.backend == 'unavailable':
+            raise RuntimeError(
+                f'LoginWindow input unavailable: CoreHID rc={self.corehid_open_rc}, '
+                f'legacy rc={self.legacy_open_rc}'
+            )
 
     @staticmethod
     def _check(rc: int, operation: str) -> None:
         if int(rc) != 0:
-            raise RuntimeError(f'{operation} failed through CoreHID HIDVirtualDevice (rc={int(rc)})')
+            raise RuntimeError(f'{operation} failed (rc={int(rc)})')
 
     @staticmethod
     def _axis(value: float) -> int:
@@ -572,11 +599,39 @@ class LoginWindowInput(MacInput):
             mask |= 0x04
         return mask
 
+    def _legacy_xy(self) -> tuple[int, int]:
+        bounds = self._bounds()
+        width = max(1.0, float(bounds.size.width))
+        height = max(1.0, float(bounds.size.height))
+        x = int(round(float(bounds.origin.x) + self.last_nx * max(0.0, width - 1.0)))
+        y = int(round(float(bounds.origin.y) + self.last_ny * max(0.0, height - 1.0)))
+        return x, y
+
     def _pointer_report(self, *, wheel: int = 0) -> None:
-        rc = self.native.lib.zmb_corehid_input_pointer(
-            self._axis(self.last_nx), self._axis(self.last_ny), self._button_mask(), int(wheel)
+        self._ensure_backend()
+        if self.backend == 'corehid':
+            rc = self.native.lib.zmb_corehid_input_pointer(
+                self._axis(self.last_nx), self._axis(self.last_ny), self._button_mask(), int(wheel)
+            )
+            self._check(rc, 'login-window CoreHID pointer report')
+            return
+        if wheel:
+            rc = self.native.lib.zmb_login_input_scroll(0, int(wheel), ctypes.c_uint32(self._flags()))
+            self._check(rc, 'login-window legacy scroll report')
+            return
+        x, y = self._legacy_xy()
+        if 1 in self.held_buttons:
+            etype, button = self.LEFT_DRAGGED, 0
+        elif 3 in self.held_buttons:
+            etype, button = self.RIGHT_DRAGGED, 1
+        elif 2 in self.held_buttons:
+            etype, button = self.OTHER_DRAGGED, 2
+        else:
+            etype, button = self.MOUSE_MOVED, 0
+        rc = self.native.lib.zmb_login_input_pointer(
+            ctypes.c_uint32(etype), x, y, button, ctypes.c_uint32(self._flags())
         )
-        self._check(rc, 'login-window pointer report')
+        self._check(rc, 'login-window legacy pointer report')
 
     def move(self, nx: float, ny: float) -> None:
         self.last_nx = min(1.0, max(0.0, float(nx)))
@@ -588,13 +643,37 @@ class LoginWindowInput(MacInput):
             return
         self.last_nx = min(1.0, max(0.0, float(nx)))
         self.last_ny = min(1.0, max(0.0, float(ny)))
+        button_num = int(button_num)
+        if self.backend == 'legacy':
+            self._ensure_backend()
+            if button_num == 1:
+                etype, button = (self.LEFT_DOWN if down else self.LEFT_UP), 0
+            elif button_num == 3:
+                etype, button = (self.RIGHT_DOWN if down else self.RIGHT_UP), 1
+            else:
+                etype, button = (self.OTHER_DOWN if down else self.OTHER_UP), 2
+            if down:
+                self.held_buttons.add(button_num)
+            else:
+                self.held_buttons.discard(button_num)
+            x, y = self._legacy_xy()
+            rc = self.native.lib.zmb_login_input_pointer(
+                ctypes.c_uint32(etype), x, y, button, ctypes.c_uint32(self._flags())
+            )
+            self._check(rc, 'login-window legacy button report')
+            return
         if down:
-            self.held_buttons.add(int(button_num))
+            self.held_buttons.add(button_num)
         else:
-            self.held_buttons.discard(int(button_num))
+            self.held_buttons.discard(button_num)
         self._pointer_report()
 
     def scroll(self, dx: int, dy: int) -> None:
+        self._ensure_backend()
+        if self.backend == 'legacy':
+            rc = self.native.lib.zmb_login_input_scroll(int(dx), int(dy), ctypes.c_uint32(self._flags()))
+            self._check(rc, 'login-window legacy scroll report')
+            return
         remaining = int(dy)
         while remaining:
             step = max(-127, min(127, remaining))
@@ -602,18 +681,30 @@ class LoginWindowInput(MacInput):
             remaining -= step
 
     def key(self, keysym: str, down: bool) -> None:
-        usage = self.HID_USAGES.get(keysym)
-        if usage is None and len(keysym) == 1:
-            usage = self.HID_USAGES.get(keysym.lower())
-        if usage is None:
+        self._ensure_backend()
+        is_mod = keysym in self.MOD_FLAGS
+        if is_mod and down:
+            self.held_modifiers.add(keysym)
+        elif is_mod and not down:
+            self.held_modifiers.discard(keysym)
+        if self.backend == 'corehid':
+            usage = self.HID_USAGES.get(keysym)
+            if usage is None and len(keysym) == 1:
+                usage = self.HID_USAGES.get(keysym.lower())
+            if usage is None:
+                return
+            rc = self.native.lib.zmb_corehid_input_key(int(usage), 1 if down else 0)
+            self._check(rc, 'login-window CoreHID keyboard report')
             return
-        if keysym in self.MOD_FLAGS:
-            if down:
-                self.held_modifiers.add(keysym)
-            else:
-                self.held_modifiers.discard(keysym)
-        rc = self.native.lib.zmb_corehid_input_key(int(usage), 1 if down else 0)
-        self._check(rc, 'login-window keyboard report')
+        code = self.KEYCODES.get(keysym)
+        if code is None and len(keysym) == 1:
+            code = self.KEYCODES.get(keysym.lower())
+        if code is None:
+            return
+        rc = self.native.lib.zmb_login_input_key(
+            int(code), 1 if down else 0, ctypes.c_uint32(self._flags()), 1 if is_mod else 0
+        )
+        self._check(rc, 'login-window legacy keyboard report')
 
     def text(self, text: str) -> None:
         for char in text:
@@ -651,7 +742,10 @@ class LoginWindowInput(MacInput):
             except Exception:
                 pass
         try:
-            self.native.lib.zmb_corehid_input_close()
+            if self.backend == 'corehid':
+                self.native.lib.zmb_corehid_input_close()
+            elif self.backend == 'legacy':
+                self.native.lib.zmb_login_input_close()
         except Exception:
             pass
 
@@ -766,6 +860,18 @@ class NativeStreamerLibrary:
         self.lib.zmb_corehid_input_key.restype = ctypes.c_int32
         self.lib.zmb_corehid_input_pointer.argtypes = [ctypes.c_int32, ctypes.c_int32, ctypes.c_uint8, ctypes.c_int32]
         self.lib.zmb_corehid_input_pointer.restype = ctypes.c_int32
+        # Built-in native fallback for LoginWindow when CoreHID virtual devices
+        # cannot be created (for example on an ad-hoc/Aqua release).
+        self.lib.zmb_login_input_open.argtypes = []
+        self.lib.zmb_login_input_open.restype = ctypes.c_int32
+        self.lib.zmb_login_input_close.argtypes = []
+        self.lib.zmb_login_input_close.restype = None
+        self.lib.zmb_login_input_key.argtypes = [ctypes.c_uint16, ctypes.c_int32, ctypes.c_uint32, ctypes.c_int32]
+        self.lib.zmb_login_input_key.restype = ctypes.c_int32
+        self.lib.zmb_login_input_pointer.argtypes = [ctypes.c_uint32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, ctypes.c_uint32]
+        self.lib.zmb_login_input_pointer.restype = ctypes.c_int32
+        self.lib.zmb_login_input_scroll.argtypes = [ctypes.c_int32, ctypes.c_int32, ctypes.c_uint32]
+        self.lib.zmb_login_input_scroll.restype = ctypes.c_int32
 
     def _owned_string(self, fn) -> str:
         pointer = fn()
@@ -879,9 +985,11 @@ def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, prelogin_lea
     """Low-latency input/clipboard channel. Video is deliberately separate."""
     log('[control] connected')
     if prelogin:
-        log('[control] initializing LoginWindow IOHID input')
+        log('[control] initializing LoginWindow native input')
         inp = LoginWindowInput()
-        log('[control] LoginWindow IOHID input initialized')
+        backend_summary = getattr(inp, 'backend_summary', None)
+        backend_name = backend_summary() if callable(backend_summary) else type(inp).__name__
+        log(f'[control] LoginWindow input backend: {backend_name}')
         clipboard = None
     else:
         log('[control] initializing CoreGraphics input')

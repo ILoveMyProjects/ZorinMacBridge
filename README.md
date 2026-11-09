@@ -1,3 +1,7 @@
+## 0.15.30 LoginWindow native input fallback
+
+0.15.30 fixes the real post-reboot loop observed on the Mac where Desktop authentication reached `macOS login window`, CoreHID device creation returned `rc=-11`, the control owner was closed, and pre-login video was then rejected because no active Desktop owner remained. CoreHID stays primary. When it cannot be created, the production server now falls back automatically to the bundled IOHIDSystem bridge and then `kCGSessionEventTap`; CoreHID failure alone no longer tears down control/video.
+
 ## 0.15.29 capability-probe native link fix
 
 0.15.29 fixes the macOS 26/Xcode 26 native capability-probe build by removing duplicate `@_silgen_name` declarations for the shared production CoreHID symbols. The probe and production CoreHID implementation are compiled into one Swift module, so the probe now calls those functions directly. Runtime architecture is unchanged.
@@ -175,7 +179,7 @@ The macOS server supports **Apple Silicon (arm64) only**. The installer verifies
 
 Starting with **0.15.19**, normal logged-in Aqua operation still has a certificate-free path: GitHub Actions can use ad-hoc transport signing and installation/update applies one stable per-Mac local ad-hoc designated requirement. Starting with **0.15.24**, reboot-to-LoginWindow remote login is a separate stricter capability tier: it can become READY only on a Developer ID provisioned build carrying the Apple-managed Persistent Content Capture and CoreHID Virtual Device entitlements, followed by a physical LoginWindow capability proof for that exact build.
 
-Starting with **0.15.27**, those managed capabilities are wired into the actual production LoginWindow runtime: video uses bounded ScreenCaptureKit `SCStream`, while keyboard and pointer input use CoreHID `HIDVirtualDevice`. The physical capability probe now proves the same SCStream-first-frame and CoreHID keyboard/pointer mechanisms used by the live pre-login session. Legacy IOHID/Quartz remains diagnostic-only.
+Starting with **0.15.27**, managed ScreenCaptureKit `SCStream` and CoreHID `HIDVirtualDevice` became the primary production LoginWindow mechanisms. **0.15.30** keeps CoreHID primary but adds the bundled IOHIDSystem → `kCGSessionEventTap` production fallback so a CoreHID-open failure does not destroy the control/video owner. The managed CoreHID probe remains the strongest VERIFIED readiness path; the fallback is validated separately on real hardware.
 
 ## Remote desktop architecture
 
