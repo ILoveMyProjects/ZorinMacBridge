@@ -33,9 +33,11 @@ assert 'HID_USAGES' in login_input
 
 # Capability probe calls the same production CoreHID ABI and requires both a
 # keyboard modifier transition and a real pointer movement before PASS.
-assert '@_silgen_name("zmb_corehid_input_open")' in PROBE
-assert '@_silgen_name("zmb_corehid_input_key")' in PROBE
-assert '@_silgen_name("zmb_corehid_input_pointer")' in PROBE
+assert 'zmb_corehid_input_open()' in PROBE
+assert 'zmb_corehid_input_key(0xE1, 1)' in PROBE
+assert 'zmb_corehid_input_pointer(' in PROBE
+for symbol in ('zmb_corehid_input_open', 'zmb_corehid_input_close', 'zmb_corehid_input_key', 'zmb_corehid_input_pointer'):
+    assert f'@_silgen_name("{symbol}")' not in PROBE
 assert 'input_corehid_keyboard_result' in PROBE
 assert 'input_corehid_pointer_result' in PROBE
 assert 'let ok = keyboardOK && pointerOK' in PROBE

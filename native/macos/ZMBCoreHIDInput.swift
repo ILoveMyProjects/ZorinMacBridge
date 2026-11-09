@@ -2,13 +2,35 @@ import Foundation
 import CoreHID
 
 private final class ZMBCoreHIDDelegate: HIDVirtualDeviceDelegate, @unchecked Sendable {
+    // CoreHID's HIDVirtualDeviceDelegate was imported synchronously by the
+    // Xcode 26 toolchain and asynchronously by newer SDKs. Keep both overloads
+    // so the same source builds on the macOS-26 CI image and newer Xcode while
+    // preserving one runtime behavior.
+    func hidVirtualDevice(
+        _ device: HIDVirtualDevice,
+        receivedSetReportRequestOfType type: HIDReportType,
+        id: HIDReportID?,
+        data: Data
+    ) throws {
+        // ZorinMacBridge exposes input-only virtual HID devices.
+    }
+
     func hidVirtualDevice(
         _ device: HIDVirtualDevice,
         receivedSetReportRequestOfType type: HIDReportType,
         id: HIDReportID?,
         data: Data
     ) async throws {
-        // ZorinMacBridge exposes input-only virtual HID devices.
+        // Same behavior for SDKs that import the delegate requirement async.
+    }
+
+    func hidVirtualDevice(
+        _ device: HIDVirtualDevice,
+        receivedGetReportRequestOfType type: HIDReportType,
+        id: HIDReportID?,
+        maxSize: Int
+    ) throws -> Data {
+        Data(repeating: 0, count: min(maxSize, 8))
     }
 
     func hidVirtualDevice(
@@ -18,6 +40,27 @@ private final class ZMBCoreHIDDelegate: HIDVirtualDeviceDelegate, @unchecked Sen
         maxSize: Int
     ) async throws -> Data {
         Data(repeating: 0, count: min(maxSize, 8))
+    }
+}
+
+private final class ZMBInt32ResultBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Int32
+
+    init(_ value: Int32) {
+        self.value = value
+    }
+
+    func set(_ newValue: Int32) {
+        lock.lock()
+        value = newValue
+        lock.unlock()
+    }
+
+    func get() -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
     }
 }
 
@@ -114,21 +157,18 @@ private final class ZMBCoreHIDInputManager: @unchecked Sendable {
 
     private func dispatch(_ data: Data, on device: HIDVirtualDevice, timeout: TimeInterval = 1.5) -> Int32 {
         let semaphore = DispatchSemaphore(value: 0)
-        let resultLock = NSLock()
-        var result: Int32 = -14
+        let result = ZMBInt32ResultBox(-14)
         Task {
             do {
-                let clock = SuspendingClock()
-                try await device.dispatchInputReport(data: data, timestamp: clock.now)
-                resultLock.lock(); result = 0; resultLock.unlock()
+                try await device.dispatchInputReport(data: data, timestamp: SuspendingClock.now)
+                result.set(0)
             } catch {
-                resultLock.lock(); result = -14; resultLock.unlock()
+                result.set(-14)
             }
             semaphore.signal()
         }
         guard semaphore.wait(timeout: .now() + timeout) == .success else { return -13 }
-        resultLock.lock(); defer { resultLock.unlock() }
-        return result
+        return result.get()
     }
 
     func open() -> Int32 {

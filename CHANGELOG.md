@@ -1,3 +1,16 @@
+## 0.15.29 - capability-probe CoreHID link fix
+
+- Fix macOS 26/Xcode 26 native CI failure caused by redeclaring the production `zmb_corehid_input_*` Swift symbols through `@_silgen_name` inside `ZMBCapabilityProbe.swift`.
+- The capability probe now calls the shared `ZMBCoreHIDInput.swift` functions directly because both files are compiled into the same Swift module.
+- Add regression/source gates that reject reintroduction of the duplicate CoreHID declarations.
+- Keep the 0.15.28 async-safe CoreHID dispatch result handling and the 0.15.27 managed pre-login runtime architecture unchanged.
+
+## 0.15.28 - macOS 26 CoreHID native-build compatibility hotfix
+
+- Keep both synchronous and asynchronous `HIDVirtualDeviceDelegate` overloads so the production CoreHID input backend builds with the Xcode 26 SDK used by the `macos-26` CI runner and with newer SDK imports.
+- Remove direct `NSLock.lock()/unlock()` calls from the async CoreHID report task; result synchronization now happens through a synchronous lock-protected box.
+- No architecture change: LoginWindow video remains ScreenCaptureKit/VideoToolbox and LoginWindow input remains CoreHID `HIDVirtualDevice`.
+
 ## 0.15.27 - production managed pre-login runtime
 
 - Replaces the failed LoginWindow `/usr/sbin/screencapture` production workaround with a bounded ScreenCaptureKit `SCStream` path. Persistent Content Capture is now used by the real LoginWindow video runtime rather than existing only as a signing/readiness contract.

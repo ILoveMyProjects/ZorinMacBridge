@@ -126,6 +126,12 @@ grep -Fq 'input_corehid_pointer_result' native/macos/capability-probe/ZMBCapabil
   echo 'ERROR: physical capability probe no longer proves CoreHID pointer delivery.' >&2
   exit 1
 }
+for symbol in zmb_corehid_input_open zmb_corehid_input_close zmb_corehid_input_key zmb_corehid_input_pointer; do
+  if grep -Fq "@_silgen_name(\"${symbol}\")" native/macos/capability-probe/ZMBCapabilityProbe.swift; then
+    echo "ERROR: capability probe redeclares same-module CoreHID symbol ${symbol}." >&2
+    exit 1
+  fi
+done
 grep -Fq 'Refusing to replace a pre-login-capable Developer ID installation with a free/ad-hoc build.' updates.py || {
   echo 'ERROR: updater can silently downgrade a pre-login-capable installation.' >&2
   exit 1

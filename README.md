@@ -1,3 +1,11 @@
+## 0.15.29 capability-probe native link fix
+
+0.15.29 fixes the macOS 26/Xcode 26 native capability-probe build by removing duplicate `@_silgen_name` declarations for the shared production CoreHID symbols. The probe and production CoreHID implementation are compiled into one Swift module, so the probe now calls those functions directly. Runtime architecture is unchanged.
+
+## 0.15.28 macOS 26 native build hotfix
+
+0.15.28 keeps the 0.15.27 production managed-prelogin architecture and only hardens CoreHID source compatibility for the Xcode 26 macOS CI toolchain plus newer SDK imports.
+
 ## 0.15.27 production managed pre-login runtime
 
 The actual LoginWindow runtime now uses the same Apple-managed mechanisms that the physical capability probe verifies. Pre-login video uses bounded ScreenCaptureKit `SCStream` with Persistent Content Capture; pre-login keyboard and pointer use CoreHID `HIDVirtualDevice`. The old `/usr/sbin/screencapture` workaround and production IOHIDSystem/Quartz injection are removed. The probe now requires a real SCStream first frame plus CoreHID keyboard and pointer proof for the exact installed build. The existing TLS protocol, pairing, VideoToolbox/H.264 transport, single-owner pre-login session and automatic LoginWindow → Aqua handoff remain unchanged. No VNC, Screen Sharing, port 5900, or third-party remote desktop backend is used.

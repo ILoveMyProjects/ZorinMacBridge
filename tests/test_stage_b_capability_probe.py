@@ -51,14 +51,19 @@ for marker in (
 
 # Input proof calls the same production CoreHID ABI and proves keyboard+pointer.
 for marker in (
-    '@_silgen_name("zmb_corehid_input_open")',
-    '@_silgen_name("zmb_corehid_input_key")',
-    '@_silgen_name("zmb_corehid_input_pointer")',
+    'zmb_corehid_input_open()',
+    'zmb_corehid_input_key(0xE1, 1)',
+    'zmb_corehid_input_pointer(',
     'input_corehid_keyboard_result',
     'input_corehid_pointer_result',
     'CGEventSource.flagsState',
 ):
     assert marker in probe, marker
+# ZMBCapabilityProbe.swift and ZMBCoreHIDInput.swift are compiled into the same
+# Swift module. Redeclaring the @cdecl CoreHID symbols through @_silgen_name
+# causes an invalid-redeclaration failure on the macOS 26/Xcode 26 native gate.
+for symbol in ('zmb_corehid_input_open', 'zmb_corehid_input_close', 'zmb_corehid_input_key', 'zmb_corehid_input_pointer'):
+    assert f'@_silgen_name("{symbol}")' not in probe
 assert 'HIDVirtualDevice(properties:' in corehid
 assert 'ZorinMacBridge LoginWindow Keyboard' in corehid
 assert 'ZorinMacBridge LoginWindow Pointer' in corehid

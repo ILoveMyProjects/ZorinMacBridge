@@ -14,14 +14,6 @@ private func zmb_login_input_open() -> Int32
 private func zmb_login_input_close()
 @_silgen_name("zmb_login_input_key")
 private func zmb_login_input_key(_ keyCode: UInt16, _ down: Int32, _ flags: UInt32, _ modifier: Int32) -> Int32
-@_silgen_name("zmb_corehid_input_open")
-private func zmb_corehid_input_open() -> Int32
-@_silgen_name("zmb_corehid_input_close")
-private func zmb_corehid_input_close()
-@_silgen_name("zmb_corehid_input_key")
-private func zmb_corehid_input_key(_ usage: UInt16, _ down: Int32) -> Int32
-@_silgen_name("zmb_corehid_input_pointer")
-private func zmb_corehid_input_pointer(_ x: Int32, _ y: Int32, _ buttons: UInt8, _ wheel: Int32) -> Int32
 
 private final class ProbeResultBox<T>: @unchecked Sendable {
     private let lock = NSLock()
