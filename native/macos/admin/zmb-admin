@@ -759,7 +759,7 @@ desktop_tls_fingerprint() {
 
 status_cmd() {
   require_root
-  local host server_id osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening prelogin_agent_exists prelogin_agent_loaded prelogin_ready prelogin_console auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired desktop_tls_fp ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg auto_update_mode update_current update_latest update_available update_checked update_result update_error power_lines developer_dir wake_mac prelogin_probe_present prelogin_probe_current prelogin_probe_ready prelogin_probe_overall prelogin_probe_capture prelogin_probe_input_corehid prelogin_probe_input_legacy prelogin_release_identity_ready proof_version proof_cdhash app_version app_cdhash
+  local host server_id osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening prelogin_agent_exists prelogin_agent_loaded prelogin_ready prelogin_console auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired desktop_tls_fp ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg auto_update_mode update_current update_latest update_available update_checked update_result update_error power_lines developer_dir wake_mac prelogin_probe_present prelogin_probe_current prelogin_probe_ready prelogin_probe_overall prelogin_probe_capture prelogin_probe_input_result prelogin_probe_input_selected prelogin_probe_input_corehid prelogin_probe_input_userdevice prelogin_probe_input_iohidsystem prelogin_probe_input_quartz prelogin_probe_input_legacy prelogin_release_identity_ready proof_version proof_cdhash app_version app_cdhash
   host="$(/bin/hostname 2>/dev/null || echo unknown)"
   server_id="$(config_value SERVER_ID unknown)"
   osver="$(/usr/bin/sw_vers -productVersion 2>/dev/null || echo unknown)"
@@ -832,7 +832,19 @@ status_cmd() {
   proof_cdhash="$(capability_status_value app_cdhash '' | /usr/bin/tr '[:upper:]' '[:lower:]')"
   prelogin_probe_overall="$(capability_status_value overall never)"
   prelogin_probe_capture="$(capability_status_value capture_result unknown)"
+  prelogin_probe_input_result="$(capability_status_value input_result '')"
+  if [ -z "$prelogin_probe_input_result" ]; then
+    if [ "$(capability_status_value input_corehid_result unknown)" = "PASS" ]; then
+      prelogin_probe_input_result=PASS
+    else
+      prelogin_probe_input_result=FAIL
+    fi
+  fi
+  prelogin_probe_input_selected="$(capability_status_value input_selected_backend unknown)"
   prelogin_probe_input_corehid="$(capability_status_value input_corehid_result unknown)"
+  prelogin_probe_input_userdevice="$(capability_status_value input_userdevice_result unknown)"
+  prelogin_probe_input_iohidsystem="$(capability_status_value input_iohidsystem_result unknown)"
+  prelogin_probe_input_quartz="$(capability_status_value input_quartz_result unknown)"
   prelogin_probe_input_legacy="$(capability_status_value input_legacy_result unknown)"
   app_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist" 2>/dev/null || true)"
   app_cdhash="$(/usr/bin/codesign -dvvv "$APP_PATH" 2>&1 | /usr/bin/sed -n 's/^CDHash=//p' | /usr/bin/head -n 1 | /usr/bin/tr '[:upper:]' '[:lower:]')"
@@ -841,7 +853,7 @@ status_cmd() {
     prelogin_probe_current=1
   fi
   prelogin_probe_ready=0
-  if [ "$prelogin_probe_current" = "1" ] && [ "$prelogin_probe_overall" = "PASS" ] && [ "$prelogin_probe_capture" = "PASS" ] && [ "$prelogin_probe_input_corehid" = "PASS" ]; then
+  if [ "$prelogin_probe_current" = "1" ] && [ "$prelogin_probe_overall" = "PASS" ] && [ "$prelogin_probe_capture" = "PASS" ] && [ "$prelogin_probe_input_result" = "PASS" ]; then
     prelogin_probe_ready=1
   fi
   ssh_unlock=0
@@ -882,7 +894,12 @@ status_cmd() {
   printf 'prelogin_probe_ready=%s\n' "$prelogin_probe_ready"
   printf 'prelogin_probe_overall=%s\n' "$prelogin_probe_overall"
   printf 'prelogin_probe_capture=%s\n' "$prelogin_probe_capture"
+  printf 'prelogin_probe_input_result=%s\n' "$prelogin_probe_input_result"
+  printf 'prelogin_probe_input_selected=%s\n' "$prelogin_probe_input_selected"
   printf 'prelogin_probe_input_corehid=%s\n' "$prelogin_probe_input_corehid"
+  printf 'prelogin_probe_input_userdevice=%s\n' "$prelogin_probe_input_userdevice"
+  printf 'prelogin_probe_input_iohidsystem=%s\n' "$prelogin_probe_input_iohidsystem"
+  printf 'prelogin_probe_input_quartz=%s\n' "$prelogin_probe_input_quartz"
   printf 'prelogin_probe_input_legacy=%s\n' "$prelogin_probe_input_legacy"
   printf 'auto_start_server=%s\n' "$auto_start"
   printf 'launch_at_login=%s\n' "$launch_at_login"

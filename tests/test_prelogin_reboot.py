@@ -51,9 +51,9 @@ assert 'max_width = min(max_width, 1920)' in server
 assert 'fps = min(fps, 30.0)' in server
 assert 'LoginWindowInput' in server
 
-# Production LoginWindow input prefers CoreHID HIDVirtualDevice and carries the
-# bundled IOHIDSystem/kCGSessionEventTap fallback so an unavailable CoreHID
-# device cannot tear down the pre-login control/video session.
+# Production LoginWindow input probes every native backend independently and
+# selects only a path whose keyboard/pointer delivery is actually observed in
+# the LoginWindow session. Input failure must not tear down control/video.
 assert 'HIDVirtualDevice(properties:' in corehid
 assert 'zmb_corehid_input_key' in corehid
 assert 'zmb_corehid_input_pointer' in corehid
@@ -62,8 +62,13 @@ assert 'ZMBCoreHIDInput.swift' in build
 assert 'ZMBLoginInput.c' in build
 assert 'ZMBLoginInput.o' in build
 assert '-framework IOKit' in build
-assert 'zmb_login_input_open' in server
-assert "self.backend = 'legacy'" in server
+assert 'zmb_login_input_open_backend' in server
+assert '_probe_keyboard_delivery' in server
+assert '_probe_pointer_delivery' in server
+assert "('corehid', 0)" in server
+assert "('userdevice', 1)" in server
+assert "('iohidsystem', 2)" in server
+assert "('quartz', 3)" in server
 assert 'IOHIDPostEvent' in native_c
 assert 'scripts/build-macos-streamer.sh' in gate
 assert 'scripts/verify-macos-native-gate.sh' in workflow

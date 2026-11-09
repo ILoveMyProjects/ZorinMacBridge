@@ -69,12 +69,16 @@ assert 'ZorinMacBridge LoginWindow Keyboard' in corehid
 assert 'ZorinMacBridge LoginWindow Pointer' in corehid
 assert 'password' not in probe.lower()
 
-# Current IOHID/Quartz remains diagnostic comparison only and cannot make the
-# managed pre-login proof PASS without the production CoreHID path.
-assert 'zmb_login_input_open' in probe
-assert 'input_legacy_result' in probe
-assert 'if captureOK && coreHIDOK' in probe
-assert 'input_result", coreHIDOK ? "PASS" : "FAIL"' in probe
+# Reboot diagnostics now prove every native input path independently. A backend
+# counts only when keyboard AND pointer delivery are observed in LoginWindow.
+assert 'zmb_login_input_open_backend' in probe
+assert 'input_userdevice_result' in probe or 'name: "userdevice"' in probe
+assert 'name: "iohidsystem"' in probe
+assert 'name: "quartz"' in probe
+assert 'input_selected_backend' in probe
+assert 'let anyInputOK = selectedBackend != "none"' in probe
+assert 'if captureOK && anyInputOK' in probe
+assert 'input_result", anyInputOK ? "PASS" : "FAIL"' in probe
 
 # Probe remains remotely callable only through the restricted admin path.
 assert 'capability-probe' in admin

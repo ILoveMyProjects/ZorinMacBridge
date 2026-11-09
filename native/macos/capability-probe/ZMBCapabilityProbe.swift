@@ -10,10 +10,20 @@ import CryptoKit
 
 @_silgen_name("zmb_login_input_open")
 private func zmb_login_input_open() -> Int32
+@_silgen_name("zmb_login_input_open_backend")
+private func zmb_login_input_open_backend(_ backend: Int32) -> Int32
+@_silgen_name("zmb_login_input_backend")
+private func zmb_login_input_backend() -> Int32
 @_silgen_name("zmb_login_input_close")
 private func zmb_login_input_close()
+@_silgen_name("zmb_login_input_hid_key")
+private func zmb_login_input_hid_key(_ usage: UInt16, _ down: Int32) -> Int32
+@_silgen_name("zmb_login_input_hid_pointer")
+private func zmb_login_input_hid_pointer(_ x: Int32, _ y: Int32, _ buttons: UInt8, _ wheel: Int32) -> Int32
 @_silgen_name("zmb_login_input_key")
 private func zmb_login_input_key(_ keyCode: UInt16, _ down: Int32, _ flags: UInt32, _ modifier: Int32) -> Int32
+@_silgen_name("zmb_login_input_pointer")
+private func zmb_login_input_pointer(_ type: UInt32, _ x: Int32, _ y: Int32, _ button: Int32, _ flags: UInt32) -> Int32
 
 private final class ProbeResultBox<T>: @unchecked Sendable {
     private let lock = NSLock()
@@ -370,41 +380,117 @@ private func hexIOReturn(_ value: Int32) -> String {
     String(format: "0x%08x", UInt32(bitPattern: value))
 }
 
-private func runLegacyInputProbe(report: inout ProbeReport) -> Bool {
-    let openRC = zmb_login_input_open()
-    report.add("input_legacy_open_rc", hexIOReturn(openRC))
+private func legacyProbeAxis(_ value: CGFloat, origin: CGFloat, length: CGFloat) -> Int32 {
+    guard length > 1 else { return 16384 }
+    let normalized = min(1.0, max(0.0, Double((value - origin) / length)))
+    return Int32((normalized * 32767.0).rounded())
+}
+
+private func runExactLegacyInputProbe(
+    backend: Int32,
+    name: String,
+    report: inout ProbeReport
+) -> Bool {
+    let prefix = "input_\(name)"
+    let openRC = zmb_login_input_open_backend(backend)
+    report.add("\(prefix)_open_rc", hexIOReturn(openRC))
     guard openRC == 0 else {
-        report.add("input_legacy_result", "FAIL_OPEN")
+        report.add("\(prefix)_keyboard_result", "FAIL_OPEN")
+        report.add("\(prefix)_pointer_result", "FAIL_OPEN")
+        report.add("\(prefix)_result", "FAIL_OPEN")
         return false
     }
     defer { zmb_login_input_close() }
+    report.add("\(prefix)_active_backend", Int(zmb_login_input_backend()))
 
     let initialShift = CGEventSource.flagsState(.combinedSessionState).contains(.maskShift)
+    var keyboardOK = false
     if initialShift {
-        report.add("input_legacy_result", "INCONCLUSIVE_SHIFT_ALREADY_ACTIVE")
-        return false
-    }
-    let shiftFlags = UInt32(truncatingIfNeeded: CGEventFlags.maskShift.rawValue)
-    let downRC = zmb_login_input_key(56, 1, shiftFlags, 1)
-    usleep(150_000)
-    let downSeen = CGEventSource.flagsState(.combinedSessionState).contains(.maskShift)
-    let upRC = zmb_login_input_key(56, 0, 0, 1)
-    usleep(150_000)
-    let upSeen = !CGEventSource.flagsState(.combinedSessionState).contains(.maskShift)
-    report.add("input_legacy_shift_down_rc", hexIOReturn(downRC))
-    report.add("input_legacy_shift_up_rc", hexIOReturn(upRC))
-    report.add("input_legacy_shift_down_seen", downSeen)
-    report.add("input_legacy_shift_up_seen", upSeen)
-    if downRC == 0 && upRC == 0 && downSeen && upSeen {
-        report.add("input_legacy_result", "PASS")
-        return true
-    }
-    if downRC == 0 && upRC == 0 {
-        report.add("input_legacy_result", "UNCONFIRMED_DELIVERY")
+        report.add("\(prefix)_keyboard_result", "INCONCLUSIVE_SHIFT_ALREADY_ACTIVE")
     } else {
-        report.add("input_legacy_result", "FAIL")
+        let shiftFlags = UInt32(truncatingIfNeeded: CGEventFlags.maskShift.rawValue)
+        let downRC: Int32
+        let upRC: Int32
+        if backend == 1 {
+            downRC = zmb_login_input_hid_key(0xE1, 1)
+            usleep(150_000)
+            let downSeen = CGEventSource.flagsState(.combinedSessionState).contains(.maskShift)
+            upRC = zmb_login_input_hid_key(0xE1, 0)
+            usleep(150_000)
+            let upSeen = !CGEventSource.flagsState(.combinedSessionState).contains(.maskShift)
+            report.add("\(prefix)_shift_down_rc", hexIOReturn(downRC))
+            report.add("\(prefix)_shift_up_rc", hexIOReturn(upRC))
+            report.add("\(prefix)_shift_down_seen", downSeen)
+            report.add("\(prefix)_shift_up_seen", upSeen)
+            keyboardOK = downRC == 0 && upRC == 0 && downSeen && upSeen
+        } else {
+            downRC = zmb_login_input_key(56, 1, shiftFlags, 1)
+            usleep(150_000)
+            let downSeen = CGEventSource.flagsState(.combinedSessionState).contains(.maskShift)
+            upRC = zmb_login_input_key(56, 0, 0, 1)
+            usleep(150_000)
+            let upSeen = !CGEventSource.flagsState(.combinedSessionState).contains(.maskShift)
+            report.add("\(prefix)_shift_down_rc", hexIOReturn(downRC))
+            report.add("\(prefix)_shift_up_rc", hexIOReturn(upRC))
+            report.add("\(prefix)_shift_down_seen", downSeen)
+            report.add("\(prefix)_shift_up_seen", upSeen)
+            keyboardOK = downRC == 0 && upRC == 0 && downSeen && upSeen
+        }
+        report.add("\(prefix)_keyboard_result", keyboardOK ? "PASS" : "FAIL")
     }
-    return false
+
+    var pointerOK = false
+    if let beforeEvent = CGEvent(source: nil) {
+        let before = beforeEvent.location
+        let bounds = CGDisplayBounds(CGMainDisplayID())
+        if bounds.width > 40 && bounds.height > 40 {
+            let localX = before.x - bounds.origin.x
+            let targetLocalX = localX < bounds.width - 24 ? localX + 16 : max(8, localX - 16)
+            let target = CGPoint(x: bounds.origin.x + targetLocalX, y: before.y)
+            let pointerRC: Int32
+            let restoreRC: Int32
+            if backend == 1 {
+                pointerRC = zmb_login_input_hid_pointer(
+                    legacyProbeAxis(target.x, origin: bounds.origin.x, length: bounds.width),
+                    legacyProbeAxis(target.y, origin: bounds.origin.y, length: bounds.height),
+                    0, 0
+                )
+                usleep(180_000)
+                let after = CGEvent(source: nil)?.location ?? before
+                let moved = hypot(after.x - before.x, after.y - before.y) >= 2.0
+                restoreRC = zmb_login_input_hid_pointer(
+                    legacyProbeAxis(before.x, origin: bounds.origin.x, length: bounds.width),
+                    legacyProbeAxis(before.y, origin: bounds.origin.y, length: bounds.height),
+                    0, 0
+                )
+                usleep(120_000)
+                report.add("\(prefix)_pointer_moved", moved)
+                pointerOK = pointerRC == 0 && restoreRC == 0 && moved
+            } else {
+                pointerRC = zmb_login_input_pointer(
+                    UInt32(CGEventType.mouseMoved.rawValue),
+                    Int32(target.x.rounded()), Int32(target.y.rounded()), 0, 0
+                )
+                usleep(180_000)
+                let after = CGEvent(source: nil)?.location ?? before
+                let moved = hypot(after.x - before.x, after.y - before.y) >= 2.0
+                restoreRC = zmb_login_input_pointer(
+                    UInt32(CGEventType.mouseMoved.rawValue),
+                    Int32(before.x.rounded()), Int32(before.y.rounded()), 0, 0
+                )
+                usleep(120_000)
+                report.add("\(prefix)_pointer_moved", moved)
+                pointerOK = pointerRC == 0 && restoreRC == 0 && moved
+            }
+            report.add("\(prefix)_pointer_rc", hexIOReturn(pointerRC))
+            report.add("\(prefix)_pointer_restore_rc", hexIOReturn(restoreRC))
+        }
+    }
+    report.add("\(prefix)_pointer_result", pointerOK ? "PASS" : "FAIL")
+
+    let ok = keyboardOK && pointerOK
+    report.add("\(prefix)_result", ok ? "PASS" : (keyboardOK ? "KEYBOARD_ONLY" : "FAIL"))
+    return ok
 }
 
 private func writeReport(_ report: ProbeReport, to url: URL) throws {
@@ -433,18 +519,34 @@ public func zmb_capability_probe_run(
 
     let captureOK = runCaptureProbe(report: &report, imageURL: imageURL)
     let coreHIDOK = runCoreHIDProbe(report: &report)
-    let legacyOK = runLegacyInputProbe(report: &report)
-    // Stage 1 managed pre-login contract: legacy IOHID/Quartz remains diagnostic
-    // only.  Production remote login is allowed to become READY only when the
-    // Apple-managed CoreHID virtual-device path is proven on LoginWindow.
-    report.add("input_result", coreHIDOK ? "PASS" : "FAIL")
-    report.add("input_legacy_comparison", legacyOK ? "PASS" : "FAIL")
+    let userDeviceOK = runExactLegacyInputProbe(backend: 1, name: "userdevice", report: &report)
+    let ioHIDSystemOK = runExactLegacyInputProbe(backend: 2, name: "iohidsystem", report: &report)
+    let quartzOK = runExactLegacyInputProbe(backend: 3, name: "quartz", report: &report)
 
-    if captureOK && coreHIDOK {
+    let selectedBackend: String
+    if coreHIDOK {
+        selectedBackend = "corehid"
+    } else if userDeviceOK {
+        selectedBackend = "userdevice"
+    } else if ioHIDSystemOK {
+        selectedBackend = "iohidsystem"
+    } else if quartzOK {
+        selectedBackend = "quartz"
+    } else {
+        selectedBackend = "none"
+    }
+    let anyInputOK = selectedBackend != "none"
+    report.add("input_selected_backend", selectedBackend)
+    report.add("input_result", anyInputOK ? "PASS" : "FAIL")
+    report.add("input_legacy_result", (userDeviceOK || ioHIDSystemOK || quartzOK) ? "PASS" : "FAIL")
+
+    // Readiness is evidence-driven: a backend counts only when Shift and cursor
+    // movement were actually observed in the active LoginWindow session.
+    if captureOK && anyInputOK {
         report.add("overall", "PASS")
     } else if captureOK {
         report.add("overall", "CAPTURE_ONLY")
-    } else if coreHIDOK {
+    } else if anyInputOK {
         report.add("overall", "INPUT_ONLY")
     } else {
         let persistent = entitlementBool("com.apple.developer.persistent-content-capture") ?? false

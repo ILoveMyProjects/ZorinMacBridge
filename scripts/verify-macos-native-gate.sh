@@ -94,6 +94,10 @@ for symbol in \
   _zmb_corehid_input_key \
   _zmb_corehid_input_pointer \
   _zmb_login_input_open \
+  _zmb_login_input_open_backend \
+  _zmb_login_input_backend \
+  _zmb_login_input_hid_key \
+  _zmb_login_input_hid_pointer \
   _zmb_login_input_close \
   _zmb_login_input_key \
   _zmb_login_input_pointer \

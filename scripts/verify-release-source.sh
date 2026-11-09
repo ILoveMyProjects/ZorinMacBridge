@@ -121,6 +121,34 @@ grep -Fq 'zmb_login_input_open' mac_server.py || {
   echo 'ERROR: production LoginWindow input fallback is not wired.' >&2
   exit 1
 }
+grep -Fq 'zmb_login_input_open_backend' mac_server.py || {
+  echo 'ERROR: reboot LoginWindow input matrix cannot open exact native backends.' >&2
+  exit 1
+}
+grep -Fq '_probe_keyboard_delivery' mac_server.py || {
+  echo 'ERROR: reboot LoginWindow input matrix lost keyboard delivery proof.' >&2
+  exit 1
+}
+grep -Fq '_probe_pointer_delivery' mac_server.py || {
+  echo 'ERROR: reboot LoginWindow input matrix lost pointer delivery proof.' >&2
+  exit 1
+}
+grep -Fq 'Pre-login input check:' linux_client.py || {
+  echo 'ERROR: Linux client no longer exposes reboot input matrix results.' >&2
+  exit 1
+}
+grep -Fq 'IOHIDUserDeviceCreate' native/macos/ZMBLoginInput.c || {
+  echo 'ERROR: LoginWindow fallback lost its virtual IOHIDUserDevice path.' >&2
+  exit 1
+}
+grep -Fq 'zmb_login_input_hid_key' mac_server.py || {
+  echo 'ERROR: production LoginWindow keyboard is not wired to IOHIDUserDevice.' >&2
+  exit 1
+}
+grep -Fq 'zmb_login_input_hid_pointer' mac_server.py || {
+  echo 'ERROR: production LoginWindow pointer is not wired to IOHIDUserDevice.' >&2
+  exit 1
+}
 grep -Fq 'kCGSessionEventTap' native/macos/ZMBLoginInput.c || {
   echo 'ERROR: LoginWindow native fallback lost the session event-tap path.' >&2
   exit 1
@@ -133,6 +161,16 @@ grep -Fq 'input_corehid_pointer_result' native/macos/capability-probe/ZMBCapabil
   echo 'ERROR: physical capability probe no longer proves CoreHID pointer delivery.' >&2
   exit 1
 }
+grep -Fq 'input_selected_backend' native/macos/capability-probe/ZMBCapabilityProbe.swift || {
+  echo 'ERROR: physical capability probe no longer reports the proven LoginWindow input backend.' >&2
+  exit 1
+}
+for backend in userdevice iohidsystem quartz; do
+  grep -Fq "name: \"${backend}\"" native/macos/capability-probe/ZMBCapabilityProbe.swift || {
+    echo "ERROR: physical capability probe no longer checks ${backend}." >&2
+    exit 1
+  }
+done
 for symbol in zmb_corehid_input_open zmb_corehid_input_close zmb_corehid_input_key zmb_corehid_input_pointer; do
   if grep -Fq "@_silgen_name(\"${symbol}\")" native/macos/capability-probe/ZMBCapabilityProbe.swift; then
     echo "ERROR: capability probe redeclares same-module CoreHID symbol ${symbol}." >&2
@@ -152,3 +190,34 @@ echo "[release-source] resilient Aqua + LoginWindow native input fallback gate O
 
 # Marker used by readiness regression tests: pre-login READY requires Apple-managed Developer ID/provisioning.
 # resilient Aqua fallback remains supported alongside LoginWindow native input fallback.
+
+# Distribution license gate: tagged/source releases must preserve the project
+# no-sale policy and canonical source attribution.
+grep -Fq 'ZorinMacBridge No-Sale Source Attribution License 1.0' LICENSE || {
+  echo 'ERROR: project no-sale license is missing.' >&2
+  exit 1
+}
+grep -Fq 'NO SALE OR PAID REDISTRIBUTION' LICENSE || {
+  echo 'ERROR: no-sale license condition is missing.' >&2
+  exit 1
+}
+for file in LICENSE NOTICE README.md; do
+  grep -Fq 'https://github.com/ILoveMyProjects/ZorinMacBridge' "$file" || {
+    echo "ERROR: canonical source attribution missing from $file." >&2
+    exit 1
+  }
+done
+if grep -Fq 'MIT License' LICENSE || grep -Fq 'MIT — see [LICENSE](LICENSE).' README.md; then
+  echo 'ERROR: obsolete MIT distribution terms remain active.' >&2
+  exit 1
+fi
+for marker in \
+  'install -m 0644 LICENSE NOTICE "$PKG/usr/share/doc/zorinmacbridge/"' \
+  "--add-data 'LICENSE:.'" \
+  "--add-data 'NOTICE:.'" \
+  'cp LICENSE NOTICE build/dmgroot/'; do
+  grep -Fq -- "$marker" .github/workflows/release.yml || {
+    echo "ERROR: release package does not embed license/source attribution: $marker" >&2
+    exit 1
+  }
+done

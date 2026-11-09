@@ -27,7 +27,7 @@ from pathlib import Path, PurePosixPath
 
 from zmb_session_lifecycle import (
     PRELOGIN_CONTROL_REPLACEMENT_GRACE_SECONDS, PreloginControlLease,
-    PreloginSessionCoordinator, make_capture_backend_state, make_capture_failure_state, make_handoff_state, make_pipeline_state,
+    PreloginSessionCoordinator, make_capture_backend_state, make_capture_failure_state, make_handoff_state, make_input_probe_state, make_pipeline_state,
 )
 
 from protocol import (
@@ -383,6 +383,12 @@ class MacInput:
         self.cg.CGEventCreateMouseEvent.restype = ctypes.c_void_p
         self.cg.CGEventCreateKeyboardEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_bool]
         self.cg.CGEventCreateKeyboardEvent.restype = ctypes.c_void_p
+        self.cg.CGEventCreate.argtypes = [ctypes.c_void_p]
+        self.cg.CGEventCreate.restype = ctypes.c_void_p
+        self.cg.CGEventGetLocation.argtypes = [ctypes.c_void_p]
+        self.cg.CGEventGetLocation.restype = CGPoint
+        self.cg.CGEventSourceFlagsState.argtypes = [ctypes.c_int32]
+        self.cg.CGEventSourceFlagsState.restype = ctypes.c_uint64
         self.cg.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
         self.cg.CGEventSetFlags.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
         self.cg.CGEventKeyboardSetUnicodeString.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_uint16)]
@@ -391,6 +397,22 @@ class MacInput:
         self.cg.CGEventCreateScrollWheelEvent.restype = ctypes.c_void_p
         self.held_buttons: set[int] = set()
         self.held_modifiers: set[str] = set()
+
+    def _combined_session_flags(self) -> int:
+        # kCGEventSourceStateCombinedSessionState == 0.  Querying this state is
+        # how the pre-login input matrix proves that a modifier report was
+        # actually observed by WindowServer/LoginWindow rather than merely
+        # accepted by an injection API.
+        return int(self.cg.CGEventSourceFlagsState(ctypes.c_int32(0)))
+
+    def _cursor_location(self) -> CGPoint | None:
+        event = self.cg.CGEventCreate(None)
+        if not event:
+            return None
+        try:
+            return self.cg.CGEventGetLocation(event)
+        finally:
+            self.cf.CFRelease(event)
 
     def _bounds(self) -> CGRect:
         display = active_input_display() or int(self.cg.CGMainDisplayID())
@@ -498,14 +520,14 @@ class MacInput:
 
 
 class LoginWindowInput(MacInput):
-    """LoginWindow input with automatic native fallback.
+    """LoginWindow input selected by observed delivery, not API success.
 
-    CoreHID HIDVirtualDevice remains the preferred path because it provides a
-    real virtual keyboard/pointer when the running process is entitled for it.
-    If CoreHID device creation is unavailable, ZMB falls back in-process to its
-    native IOHIDSystem bridge, which itself degrades to kCGSessionEventTap when
-    IOHIDSystem is denied.  Failure to create CoreHID must never tear down the
-    Desktop control session by itself.
+    Every native candidate is tested independently in the real LoginWindow
+    session. A harmless Shift transition must be visible in combined-session
+    flags, and pointer delivery is verified by a small move+restore. CoreHID,
+    IOHIDUserDevice, IOHIDSystem and Quartz are all checked without silent
+    fallback. Failure of every backend remains non-fatal to Desktop/video so
+    diagnostics stay visible instead of entering a reconnect loop.
     """
 
     HID_USAGES = {
@@ -546,39 +568,196 @@ class LoginWindowInput(MacInput):
         '\t': 'Tab', '\n': 'Return', '\r': 'Return',
     }
 
+    BACKEND_ORDER = (
+        ('corehid', 0),
+        ('userdevice', 1),
+        ('iohidsystem', 2),
+        ('quartz', 3),
+    )
+    BACKEND_LABELS = {
+        'corehid': 'CoreHID HIDVirtualDevice',
+        'userdevice': 'IOHIDUserDevice virtual HID',
+        'iohidsystem': 'IOHIDSystem/IOHIDPostEvent',
+        'quartz': 'kCGSessionEventTap',
+        'unavailable': 'unavailable',
+    }
+
     def __init__(self) -> None:
-        # MacInput owns the CoreGraphics geometry helpers used by the legacy
-        # absolute-pointer path.  It does not post any event during init.
+        # Keep the already-working LoginWindow capture/wake path untouched.
+        # This object is only responsible for discovering a proven input path.
         super().__init__()
         self.native = NativeStreamerLibrary()
         self.backend = 'unavailable'
-        self.corehid_open_rc = int(self.native.lib.zmb_corehid_input_open())
+        self.legacy_backend: int | None = None
+        self.corehid_open_rc: int | None = None
         self.legacy_open_rc: int | None = None
-        if self.corehid_open_rc == 0:
-            self.backend = 'corehid'
-        else:
-            self.legacy_open_rc = int(self.native.lib.zmb_login_input_open())
-            if self.legacy_open_rc == 0:
-                self.backend = 'legacy'
+        self.input_probe_results: list[dict[str, object]] = []
         self.last_nx = 0.5
         self.last_ny = 0.5
+        self._probe_and_select_backend()
+
+    @staticmethod
+    def _rc_text(rc: int | None) -> str:
+        if rc is None:
+            return 'not-run'
+        value = int(rc)
+        return f'{value} (0x{value & 0xffffffff:08x})'
+
+    def _close_probe_backend(self, backend: str) -> None:
+        try:
+            if backend == 'corehid':
+                self.native.lib.zmb_corehid_input_close()
+            else:
+                self.native.lib.zmb_login_input_close()
+        except Exception:
+            pass
+
+    def _open_probe_backend(self, backend: str, backend_id: int) -> int:
+        if backend == 'corehid':
+            return int(self.native.lib.zmb_corehid_input_open())
+        return int(self.native.lib.zmb_login_input_open_backend(int(backend_id)))
+
+    def _probe_key_report(self, backend: str, down: bool) -> int:
+        if backend == 'corehid':
+            return int(self.native.lib.zmb_corehid_input_key(0xE1, 1 if down else 0))
+        if backend == 'userdevice':
+            return int(self.native.lib.zmb_login_input_hid_key(0xE1, 1 if down else 0))
+        flags = self.MOD_FLAGS['Shift_L'] if down else 0
+        return int(self.native.lib.zmb_login_input_key(
+            self.KEYCODES['Shift_L'], 1 if down else 0, ctypes.c_uint32(flags), 1
+        ))
+
+    def _probe_pointer_report(self, backend: str, x: float, y: float) -> int:
+        bounds = self._bounds()
+        width = max(1.0, float(bounds.size.width))
+        height = max(1.0, float(bounds.size.height))
+        if backend in ('corehid', 'userdevice'):
+            nx = (float(x) - float(bounds.origin.x)) / width
+            ny = (float(y) - float(bounds.origin.y)) / height
+            ax, ay = self._axis(nx), self._axis(ny)
+            if backend == 'corehid':
+                return int(self.native.lib.zmb_corehid_input_pointer(ax, ay, 0, 0))
+            return int(self.native.lib.zmb_login_input_hid_pointer(ax, ay, 0, 0))
+        return int(self.native.lib.zmb_login_input_pointer(
+            ctypes.c_uint32(self.MOUSE_MOVED), int(round(x)), int(round(y)), 0, ctypes.c_uint32(0)
+        ))
+
+    def _probe_keyboard_delivery(self, backend: str) -> tuple[str, str]:
+        shift_mask = int(self.MOD_FLAGS['Shift_L'])
+        if self._combined_session_flags() & shift_mask:
+            return 'INCONCLUSIVE', 'Shift already active before probe'
+        down_rc = self._probe_key_report(backend, True)
+        time.sleep(0.15)
+        down_seen = bool(self._combined_session_flags() & shift_mask)
+        up_rc = self._probe_key_report(backend, False)
+        time.sleep(0.15)
+        up_seen = not bool(self._combined_session_flags() & shift_mask)
+        ok = down_rc == 0 and up_rc == 0 and down_seen and up_seen
+        detail = (
+            f'down_rc={self._rc_text(down_rc)},down_seen={int(down_seen)},'
+            f'up_rc={self._rc_text(up_rc)},up_seen={int(up_seen)}'
+        )
+        return ('PASS' if ok else 'FAIL'), detail
+
+    def _probe_pointer_delivery(self, backend: str) -> tuple[str, str]:
+        before = self._cursor_location()
+        if before is None:
+            return 'INCONCLUSIVE', 'cursor location unavailable'
+        bounds = self._bounds()
+        if float(bounds.size.width) <= 40 or float(bounds.size.height) <= 40:
+            return 'INCONCLUSIVE', 'display bounds unavailable'
+        local_x = float(before.x) - float(bounds.origin.x)
+        if local_x < float(bounds.size.width) - 24:
+            target_x = float(before.x) + 16.0
+        else:
+            target_x = float(before.x) - 16.0
+        target_y = float(before.y)
+        move_rc = self._probe_pointer_report(backend, target_x, target_y)
+        time.sleep(0.18)
+        after = self._cursor_location() or before
+        moved = ((float(after.x) - float(before.x)) ** 2 + (float(after.y) - float(before.y)) ** 2) ** 0.5 >= 2.0
+        restore_rc = self._probe_pointer_report(backend, float(before.x), float(before.y))
+        time.sleep(0.12)
+        ok = move_rc == 0 and restore_rc == 0 and moved
+        detail = (
+            f'move_rc={self._rc_text(move_rc)},moved={int(moved)},'
+            f'restore_rc={self._rc_text(restore_rc)}'
+        )
+        return ('PASS' if ok else 'FAIL'), detail
+
+    def _probe_and_select_backend(self) -> None:
+        results: list[dict[str, object]] = []
+        for backend, backend_id in self.BACKEND_ORDER:
+            # Never allow one successful API call to hide another backend's
+            # failure. Each candidate is opened, exercised and closed alone.
+            self._close_probe_backend('corehid')
+            self._close_probe_backend('userdevice')
+            open_rc = self._open_probe_backend(backend, backend_id)
+            row: dict[str, object] = {
+                'backend': backend,
+                'label': self.BACKEND_LABELS[backend],
+                'open_rc': open_rc,
+                'keyboard': 'FAIL_OPEN' if open_rc != 0 else 'NOT_RUN',
+                'pointer': 'FAIL_OPEN' if open_rc != 0 else 'NOT_RUN',
+                'keyboard_detail': '',
+                'pointer_detail': '',
+                'selected': False,
+            }
+            if backend == 'corehid':
+                self.corehid_open_rc = open_rc
+            if open_rc == 0:
+                row['keyboard'], row['keyboard_detail'] = self._probe_keyboard_delivery(backend)
+                row['pointer'], row['pointer_detail'] = self._probe_pointer_delivery(backend)
+            self._close_probe_backend(backend)
+            results.append(row)
+
+        # Prefer a backend that proves BOTH keyboard and pointer delivery.
+        # If none proves pointer delivery, keyboard-only proof is still useful
+        # for the actual password entry path and is reported explicitly.
+        selected = next(
+            (row for row in results if row['keyboard'] == 'PASS' and row['pointer'] == 'PASS'),
+            None,
+        )
+        if selected is None:
+            selected = next((row for row in results if row['keyboard'] == 'PASS'), None)
+
+        if selected is not None:
+            name = str(selected['backend'])
+            backend_id = dict(self.BACKEND_ORDER)[name]
+            final_rc = self._open_probe_backend(name, backend_id)
+            selected['final_open_rc'] = final_rc
+            if final_rc == 0:
+                self.backend = name
+                selected['selected'] = True
+                if name != 'corehid':
+                    self.legacy_backend = int(backend_id)
+                    self.legacy_open_rc = final_rc
+            else:
+                selected['selected'] = False
+                selected['selection_error'] = f'final reopen failed: {self._rc_text(final_rc)}'
+        self.input_probe_results = results
 
     def backend_summary(self) -> str:
-        if self.backend == 'corehid':
-            return 'CoreHID HIDVirtualDevice'
-        if self.backend == 'legacy':
-            return f'IOHIDSystem/kCGSessionEventTap fallback (CoreHID rc={self.corehid_open_rc})'
+        label = self.BACKEND_LABELS.get(self.backend, self.backend)
+        selected = next((row for row in self.input_probe_results if row.get('selected')), None)
+        if selected is None:
+            return 'unavailable — no backend proved LoginWindow keyboard delivery'
         return (
-            'unavailable '
-            f'(CoreHID rc={self.corehid_open_rc}, legacy rc={self.legacy_open_rc})'
+            f'{label}; keyboard={selected.get("keyboard")}; '
+            f'pointer={selected.get("pointer")}; delivery-probed'
         )
+
+    def input_probe_states(self) -> list[dict[str, object]]:
+        return [dict(row) for row in self.input_probe_results]
 
     def _ensure_backend(self) -> None:
         if self.backend == 'unavailable':
-            raise RuntimeError(
-                f'LoginWindow input unavailable: CoreHID rc={self.corehid_open_rc}, '
-                f'legacy rc={self.legacy_open_rc}'
+            matrix = '; '.join(
+                f'{row.get("backend")}:open={self._rc_text(row.get("open_rc"))},'
+                f'kbd={row.get("keyboard")},ptr={row.get("pointer")}'
+                for row in self.input_probe_results
             )
+            raise RuntimeError(f'LoginWindow input unavailable after delivery matrix: {matrix}')
 
     @staticmethod
     def _check(rc: int, operation: str) -> None:
@@ -615,6 +794,12 @@ class LoginWindowInput(MacInput):
             )
             self._check(rc, 'login-window CoreHID pointer report')
             return
+        if self.backend == 'userdevice':
+            rc = self.native.lib.zmb_login_input_hid_pointer(
+                self._axis(self.last_nx), self._axis(self.last_ny), self._button_mask(), int(wheel)
+            )
+            self._check(rc, 'login-window IOHIDUserDevice pointer report')
+            return
         if wheel:
             rc = self.native.lib.zmb_login_input_scroll(0, int(wheel), ctypes.c_uint32(self._flags()))
             self._check(rc, 'login-window legacy scroll report')
@@ -644,7 +829,7 @@ class LoginWindowInput(MacInput):
         self.last_nx = min(1.0, max(0.0, float(nx)))
         self.last_ny = min(1.0, max(0.0, float(ny)))
         button_num = int(button_num)
-        if self.backend == 'legacy':
+        if self.backend in ('iohidsystem', 'quartz'):
             self._ensure_backend()
             if button_num == 1:
                 etype, button = (self.LEFT_DOWN if down else self.LEFT_UP), 0
@@ -670,7 +855,7 @@ class LoginWindowInput(MacInput):
 
     def scroll(self, dx: int, dy: int) -> None:
         self._ensure_backend()
-        if self.backend == 'legacy':
+        if self.backend in ('iohidsystem', 'quartz'):
             rc = self.native.lib.zmb_login_input_scroll(int(dx), int(dy), ctypes.c_uint32(self._flags()))
             self._check(rc, 'login-window legacy scroll report')
             return
@@ -687,14 +872,18 @@ class LoginWindowInput(MacInput):
             self.held_modifiers.add(keysym)
         elif is_mod and not down:
             self.held_modifiers.discard(keysym)
-        if self.backend == 'corehid':
+        if self.backend in ('corehid', 'userdevice'):
             usage = self.HID_USAGES.get(keysym)
             if usage is None and len(keysym) == 1:
                 usage = self.HID_USAGES.get(keysym.lower())
             if usage is None:
                 return
-            rc = self.native.lib.zmb_corehid_input_key(int(usage), 1 if down else 0)
-            self._check(rc, 'login-window CoreHID keyboard report')
+            if self.backend == 'corehid':
+                rc = self.native.lib.zmb_corehid_input_key(int(usage), 1 if down else 0)
+                self._check(rc, 'login-window CoreHID keyboard report')
+            else:
+                rc = self.native.lib.zmb_login_input_hid_key(int(usage), 1 if down else 0)
+                self._check(rc, 'login-window IOHIDUserDevice keyboard report')
             return
         code = self.KEYCODES.get(keysym)
         if code is None and len(keysym) == 1:
@@ -744,7 +933,7 @@ class LoginWindowInput(MacInput):
         try:
             if self.backend == 'corehid':
                 self.native.lib.zmb_corehid_input_close()
-            elif self.backend == 'legacy':
+            elif self.backend in ('userdevice', 'iohidsystem', 'quartz'):
                 self.native.lib.zmb_login_input_close()
         except Exception:
             pass
@@ -864,6 +1053,14 @@ class NativeStreamerLibrary:
         # cannot be created (for example on an ad-hoc/Aqua release).
         self.lib.zmb_login_input_open.argtypes = []
         self.lib.zmb_login_input_open.restype = ctypes.c_int32
+        self.lib.zmb_login_input_open_backend.argtypes = [ctypes.c_int32]
+        self.lib.zmb_login_input_open_backend.restype = ctypes.c_int32
+        self.lib.zmb_login_input_backend.argtypes = []
+        self.lib.zmb_login_input_backend.restype = ctypes.c_int32
+        self.lib.zmb_login_input_hid_key.argtypes = [ctypes.c_uint16, ctypes.c_int32]
+        self.lib.zmb_login_input_hid_key.restype = ctypes.c_int32
+        self.lib.zmb_login_input_hid_pointer.argtypes = [ctypes.c_int32, ctypes.c_int32, ctypes.c_uint8, ctypes.c_int32]
+        self.lib.zmb_login_input_hid_pointer.restype = ctypes.c_int32
         self.lib.zmb_login_input_close.argtypes = []
         self.lib.zmb_login_input_close.restype = None
         self.lib.zmb_login_input_key.argtypes = [ctypes.c_uint16, ctypes.c_int32, ctypes.c_uint32, ctypes.c_int32]
@@ -937,7 +1134,7 @@ def available_displays(*, log=print) -> list[dict]:
         return []
 
 
-def _read_exact_file(stream, size: int, *, timeout: float = 15.0, disconnect_sock: ssl.SSLSocket | None = None, idle_callback=None) -> bytes:
+def _read_exact_file(stream, size: int, *, timeout: float | None = 15.0, disconnect_sock: ssl.SSLSocket | None = None, idle_callback=None) -> bytes:
     """Read native pipe bytes while also noticing a closed video client.
 
     Reconfiguration closes the old TLS video socket before opening the next one.
@@ -947,18 +1144,22 @@ def _read_exact_file(stream, size: int, *, timeout: float = 15.0, disconnect_soc
     soon as the old client disconnects.
     """
     out = bytearray()
-    deadline = time.monotonic() + max(0.5, float(timeout))
+    deadline = None if timeout is None else time.monotonic() + max(0.5, float(timeout))
     fd = stream.fileno()
     while len(out) < size:
         if idle_callback is not None:
             idle_callback()
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError(f'native streamer pipe stalled for {timeout:g}s')
+        if deadline is None:
+            wait_for = 0.1 if idle_callback is not None else 0.5
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f'native streamer pipe stalled for {timeout:g}s')
+            wait_for = min(0.1 if idle_callback is not None else 0.5, remaining)
         watchers = [fd]
         if disconnect_sock is not None:
             watchers.append(disconnect_sock)
-        readable, _, _ = select.select(watchers, [], [], min(0.1 if idle_callback is not None else 0.5, remaining))
+        readable, _, _ = select.select(watchers, [], [], wait_for)
         if not readable:
             continue
         if disconnect_sock is not None and disconnect_sock in readable:
@@ -990,6 +1191,39 @@ def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, prelogin_lea
         backend_summary = getattr(inp, 'backend_summary', None)
         backend_name = backend_summary() if callable(backend_summary) else type(inp).__name__
         log(f'[control] LoginWindow input backend: {backend_name}')
+        probe_states = getattr(inp, 'input_probe_states', None)
+        if callable(probe_states):
+            for row in probe_states():
+                keyboard = str(row.get('keyboard') or '')
+                pointer = str(row.get('pointer') or '')
+                open_rc = LoginWindowInput._rc_text(row.get('open_rc'))
+                selected = bool(row.get('selected'))
+                if keyboard == 'PASS' and pointer == 'PASS':
+                    result = 'PASS'
+                elif keyboard == 'PASS':
+                    result = 'KEYBOARD_ONLY'
+                elif str(row.get('keyboard')) == 'FAIL_OPEN':
+                    result = 'FAIL_OPEN'
+                else:
+                    result = 'FAIL'
+                reason = '; '.join(filter(None, [
+                    str(row.get('keyboard_detail') or ''),
+                    str(row.get('pointer_detail') or ''),
+                    str(row.get('selection_error') or ''),
+                ]))
+                log(
+                    '[prelogin/input-probe] '
+                    f'backend={row.get("backend")} open={open_rc} '
+                    f'keyboard={keyboard} pointer={pointer} selected={int(selected)}'
+                )
+                try:
+                    sock.sendall(pack_json(SESSION_STATE, make_input_probe_state(
+                        str(row.get('backend') or ''),
+                        result=result, keyboard=keyboard, pointer=pointer,
+                        open_rc=open_rc, selected=selected, reason=reason,
+                    )))
+                except OSError:
+                    raise ConnectionError('client disconnected while receiving pre-login input matrix')
         clipboard = None
     else:
         log('[control] initializing CoreGraphics input')
@@ -1180,7 +1414,7 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
     try:
         with os.fdopen(data_r, 'rb', buffering=0) as stream:
             while True:
-                startup_timeout = VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS if frames == 0 else 15.0
+                startup_timeout = VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS if frames == 0 else None
                 try:
                     header = _read_exact_file(stream, 4, timeout=startup_timeout, disconnect_sock=sock, idle_callback=flush_pipeline_events)
                 except EOFError:

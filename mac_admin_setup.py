@@ -169,11 +169,16 @@ def _prelogin_probe_state() -> dict[str, str | bool]:
         and proof.get('app_version') == version
         and proof.get('app_cdhash', '').lower() == cdhash.lower()
     )
+    input_result = proof.get('input_result')
+    if not input_result:
+        # Backward compatibility with proof files created before the reboot
+        # delivery matrix existed.
+        input_result = 'PASS' if proof.get('input_corehid_result') == 'PASS' else 'FAIL'
     ready = bool(
         current
         and proof.get('overall') == 'PASS'
         and proof.get('capture_result') == 'PASS'
-        and proof.get('input_corehid_result') == 'PASS'
+        and input_result == 'PASS'
     )
     return {
         'prelogin_probe_present': bool(proof),
@@ -181,7 +186,12 @@ def _prelogin_probe_state() -> dict[str, str | bool]:
         'prelogin_probe_ready': ready,
         'prelogin_probe_overall': proof.get('overall', 'never'),
         'prelogin_probe_capture': proof.get('capture_result', 'unknown'),
+        'prelogin_probe_input_result': input_result,
+        'prelogin_probe_input_selected': proof.get('input_selected_backend', 'unknown'),
         'prelogin_probe_input_corehid': proof.get('input_corehid_result', 'unknown'),
+        'prelogin_probe_input_userdevice': proof.get('input_userdevice_result', 'unknown'),
+        'prelogin_probe_input_iohidsystem': proof.get('input_iohidsystem_result', 'unknown'),
+        'prelogin_probe_input_quartz': proof.get('input_quartz_result', 'unknown'),
         'prelogin_probe_input_legacy': proof.get('input_legacy_result', 'unknown'),
     }
 

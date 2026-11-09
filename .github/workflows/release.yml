@@ -81,6 +81,7 @@ jobs:
           mkdir -p "$PKG/DEBIAN" "$APP/assets" \
                    "$PKG/usr/bin" \
                    "$PKG/usr/share/applications" \
+                   "$PKG/usr/share/doc/zorinmacbridge" \
                    "$PKG/usr/share/icons/hicolor/256x256/apps"
 
           chmod 0755 "$PKG/DEBIAN"
@@ -89,6 +90,7 @@ jobs:
             tray_icon.py updates.py settings.py secret_store.py zmb_admin_backend.py zmb_pairing_state.py zmb_system_page.py zmb_xcode_page.py zmb_xcode_data.py zmb_shell_backend.py zmb_terminal_page.py zmb_project_data.py zmb_projects_page.py zmb_sync_backend.py zmb_video_policy.py zmb_recovery.py zmb_shutdown.py zmb_session_lifecycle.py zmb_client_runtime.py "$APP/"
           install -m 0644 VERSION "$APP/VERSION"
           install -m 0644 assets/client.png "$APP/assets/client.png"
+          install -m 0644 LICENSE NOTICE "$PKG/usr/share/doc/zorinmacbridge/"
 
           # Import the client from the exact staged package tree before building the DEB.
           # This catches missing local modules such as the 0.14.15 zmb_shutdown.py regression.
@@ -130,6 +132,8 @@ jobs:
           dpkg-deb --info release/ZorinMacBridge-Client_linux-amd64.deb
           dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/linux_client_gtk.py'
           dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/share/applications/zorinmacbridge.desktop'
+          dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/share/doc/zorinmacbridge/LICENSE'
+          dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/share/doc/zorinmacbridge/NOTICE'
           dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_admin_backend.py'
           dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_pairing_state.py'
           dpkg-deb --contents release/ZorinMacBridge-Client_linux-amd64.deb | grep -F 'usr/lib/zorinmacbridge/zmb_system_page.py'
@@ -266,6 +270,8 @@ jobs:
             --icon build/server.icns \
             --add-data 'assets/server.png:assets' \
             --add-data 'VERSION:.' \
+            --add-data 'LICENSE:.' \
+            --add-data 'NOTICE:.' \
             --add-data 'native/macos/admin:native/macos/admin' \
             --add-binary 'build/libzmb_streamer.dylib:.' \
             --add-binary 'build/libzmb_capability_probe.dylib:.' \
@@ -305,6 +311,7 @@ jobs:
           fi
           mkdir -p release build/dmgroot
           cp -R 'dist/ZorinMacBridge Server.app' build/dmgroot/
+          cp LICENSE NOTICE build/dmgroot/
           ln -s /Applications build/dmgroot/Applications
           hdiutil create -volname 'ZorinMacBridge Server' \
             -srcfolder build/dmgroot \

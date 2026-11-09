@@ -680,6 +680,12 @@ class ClientApp:
             reader = PacketReader()
             sock = self._secure_connect('desktop', desktop_extra, auth_reader=reader)
             prefetched_control_packets = reader.drain_pending()
+            if self.prelogin_session:
+                self._log(
+                    'INFO',
+                    'Pre-login reboot checks: TLS/auth=PASS, LoginWindow endpoint=PASS; '
+                    'awaiting capture first frame and native input delivery matrix.'
+                )
             if self.remember_credentials_active:
                 try:
                     if self._connect_snapshot is None:
@@ -738,6 +744,18 @@ class ClientApp:
                                 self._log('INFO', f'Pre-login handoff requested by Mac (generation={generation}, user={user or "unknown"}).')
                                 self.ui_queue.put(('prelogin_handoff', user, generation))
                                 break
+                            elif event.kind == 'input-probe':
+                                marker = 'SELECTED' if event.selected else 'checked'
+                                self._log(
+                                    'INFO',
+                                    'Pre-login input check: '
+                                    f'{event.backend} open={event.open_rc or "unknown"} '
+                                    f'keyboard={event.keyboard or "unknown"} '
+                                    f'pointer={event.pointer or "unknown"} '
+                                    f'result={event.result or "unknown"} [{marker}].'
+                                )
+                                if event.reason:
+                                    self._log('DEBUG', f'Pre-login input check detail ({event.backend}): {event.reason}')
                         elif kind == ERROR:
                             server_error = payload.decode('utf-8', 'replace')
                             last_server_error = server_error
@@ -1001,6 +1019,8 @@ class ClientApp:
                                                 if transition.missing:
                                                     self._log('WARNING', 'Pre-login pipeline reached client-decoded with missing stages: ' + ', '.join(transition.missing))
                                             self._log('INFO', f'First H.264 frame decoded: {img.width}x{img.height}.')
+                                            if self.prelogin_session:
+                                                self._log('INFO', f'Pre-login reboot check: capture/video first frame=PASS ({img.width}x{img.height}).')
                             elif kind == SESSION_STATE:
                                 try:
                                     event = parse_session_state(unpack_json(payload))

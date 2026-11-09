@@ -12,10 +12,14 @@ gtk = (ROOT / 'linux_client_gtk.py').read_text(encoding='utf-8')
 assert 'status != .complete && status != .started' in swift
 assert 'first sample after startCapture()' in swift
 
-# IOHID open/post rejection must have a LoginWindow-session Quartz fallback.
-assert 'g_zmb_quartz_only' in native
+# CoreHID failure must prefer a real virtual HID device before legacy event injection.
+assert 'IOHIDUserDeviceCreate' in native
+assert 'IOHIDUserDeviceHandleReport' in native
+assert 'ZMB_LOGIN_INPUT_USER_DEVICE' in native
+assert 'zmb_login_input_hid_key' in native
+assert 'zmb_login_input_hid_pointer' in native
+# Older IOHIDSystem and Quartz paths remain only after the virtual-device path.
 assert 'kIOReturnNotPrivileged' in native
-assert 'enter Quartz-session mode' in native
 assert 'kCGSessionEventTap' in native
 assert 'zmb_quartz_pointer' in native
 assert 'zmb_quartz_key' in native

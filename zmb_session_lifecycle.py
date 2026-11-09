@@ -155,6 +155,11 @@ class SessionStateEvent:
     user: str = ''
     backend: str = ''
     reason: str = ''
+    result: str = ''
+    keyboard: str = ''
+    pointer: str = ''
+    open_rc: str = ''
+    selected: bool = False
     generation: int | None = None
 
 
@@ -173,6 +178,21 @@ def make_capture_backend_state(backend: str) -> dict[str, str]:
 
 def make_capture_failure_state(reason: str) -> dict[str, str]:
     return {'state': 'capture-failure', 'reason': str(reason or '')}
+
+
+def make_input_probe_state(
+    backend: str, *, result: str, keyboard: str, pointer: str, open_rc: str, selected: bool, reason: str = ''
+) -> dict[str, Any]:
+    return {
+        'state': 'input-probe',
+        'backend': str(backend or ''),
+        'result': str(result or ''),
+        'keyboard': str(keyboard or ''),
+        'pointer': str(pointer or ''),
+        'open_rc': str(open_rc or ''),
+        'selected': bool(selected),
+        'reason': str(reason or ''),
+    }
 
 
 def make_pipeline_state(stage: str) -> dict[str, str]:
@@ -202,6 +222,20 @@ def parse_session_state(value: Any) -> SessionStateEvent:
         if reason:
             return SessionStateEvent('capture-failure', reason=reason)
         return SessionStateEvent('unknown')
+    if state == 'input-probe':
+        backend = str(value.get('backend') or '')
+        if not backend:
+            return SessionStateEvent('unknown')
+        return SessionStateEvent(
+            'input-probe',
+            backend=backend,
+            result=str(value.get('result') or ''),
+            keyboard=str(value.get('keyboard') or ''),
+            pointer=str(value.get('pointer') or ''),
+            open_rc=str(value.get('open_rc') or ''),
+            selected=bool(value.get('selected')),
+            reason=str(value.get('reason') or ''),
+        )
     if state == 'handoff' and str(value.get('target') or '') == 'aqua':
         generation = value.get('generation')
         try:

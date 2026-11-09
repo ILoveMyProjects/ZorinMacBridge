@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SERVER = (ROOT / 'mac_server.py').read_text()
+CLIENT = (ROOT / 'linux_client.py').read_text()
+GTK = (ROOT / 'linux_client_gtk.py').read_text()
+LIFECYCLE = (ROOT / 'zmb_session_lifecycle.py').read_text()
+C = (ROOT / 'native/macos/ZMBLoginInput.c').read_text()
+PROBE = (ROOT / 'native/macos/capability-probe/ZMBCapabilityProbe.swift').read_text()
+ADMIN = (ROOT / 'native/macos/admin/zmb-admin').read_text()
+GATE = (ROOT / 'scripts/verify-macos-native-gate.sh').read_text()
+SOURCE_GATE = (ROOT / 'scripts/verify-release-source.sh').read_text()
+# Preserve the already-working LoginWindow capture/wake path: this release only
+# changes input proof/selection and diagnostics.
+assert 'prelogin-backend=screencapturekit-persistent' in (ROOT / 'native/macos/ZMBStreamerLib.swift').read_text()
+assert 'ScreenCaptureKit reported no display; requesting one-shot display wake through paired P0.' in GTK
+
+# Runtime checks all four native input mechanisms independently.
+for marker in (
+    "('corehid', 0)",
+    "('userdevice', 1)",
+    "('iohidsystem', 2)",
+    "('quartz', 3)",
+    '_probe_keyboard_delivery',
+    '_probe_pointer_delivery',
+    'zmb_login_input_open_backend',
+    'delivery-probed',
+):
+    assert marker in SERVER, marker
+
+# C exact-open API prevents IOHIDSystem from silently falling through to Quartz
+# while it is being tested.
+assert 'int32_t zmb_login_input_open_backend(int32_t backend)' in C
+assert 'zmb_open_backend_locked' in C
+assert 'if (backend == ZMB_LOGIN_INPUT_QUARTZ)' in C
+assert '_zmb_login_input_open_backend' in GATE
+
+# Results travel over the existing SESSION_STATE channel and are visible on the
+# Zorin client after one reboot/connect attempt.
+assert "'state': 'input-probe'" in LIFECYCLE
+assert "event.kind == 'input-probe'" in CLIENT
+assert 'Pre-login input check:' in CLIENT
+assert 'make_input_probe_state' in SERVER
+
+# Physical capability probe uses the same exact matrix and reports selection.
+assert 'runExactLegacyInputProbe(backend: 1, name: "userdevice"' in PROBE
+assert 'runExactLegacyInputProbe(backend: 2, name: "iohidsystem"' in PROBE
+assert 'runExactLegacyInputProbe(backend: 3, name: "quartz"' in PROBE
+assert 'input_selected_backend' in PROBE
+assert 'let anyInputOK = selectedBackend != "none"' in PROBE
+
+# Admin status exposes the last physical matrix instead of only CoreHID.
+for key in (
+    'prelogin_probe_input_result',
+    'prelogin_probe_input_selected',
+    'prelogin_probe_input_corehid',
+    'prelogin_probe_input_userdevice',
+    'prelogin_probe_input_iohidsystem',
+    'prelogin_probe_input_quartz',
+):
+    assert key in ADMIN, key
+
+assert 'reboot LoginWindow input matrix' in SOURCE_GATE
+print('reboot LoginWindow evidence matrix regression tests: OK')

@@ -25,5 +25,6 @@ assert 'encodeImageBuffer(activeCompression, imageBuffer: imageBuffer' in swift
 # Python keeps a bounded server-side first-access-unit timeout and diagnostics.
 assert 'VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS = 6.0' in server
 assert 'no first H.264 access unit within {startup_timeout:g}s; native={detail}' in server
+assert 'startup_timeout = VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS if frames == 0 else None' in server
 
 print('Aqua + managed LoginWindow ScreenCaptureKit regression tests: OK')

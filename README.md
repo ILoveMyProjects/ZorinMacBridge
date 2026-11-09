@@ -1,3 +1,13 @@
+## 0.15.33 reboot LoginWindow evidence matrix
+
+0.15.33 keeps the working ScreenCaptureKit/VideoToolbox LoginWindow capture and sleep/wake recovery unchanged. After a reboot, the pre-login control path now tests **CoreHID HIDVirtualDevice**, **IOHIDUserDevice**, **IOHIDSystem/IOHIDPostEvent**, and **kCGSessionEventTap** independently. A backend is not trusted because `open()` or a send call returned success: ZorinMacBridge requires an observed Shift transition in the combined LoginWindow session and checks pointer move+restore before selecting it. The complete matrix is sent to the Zorin client log as `Pre-login input check: ...`. If no backend proves delivery, control/video remain connected so the failure is diagnosable instead of collapsing into an ownerless reconnect loop.
+
+The reboot acceptance sequence is documented in `docs/acceptance/0.15.33_REBOOT_LOGIN_MATRIX.md`. No re-pairing, reconfiguration, VNC, Screen Sharing, or third-party remote desktop is introduced.
+
+## 0.15.32 IOHIDUserDevice LoginWindow fallback
+
+0.15.32 fixes the remaining design flaw in the 0.15.30 fallback. A successful `CGEventPost(kCGSessionEventTap)` call does not prove that LoginWindow accepted the event, so Quartz is no longer the first fallback after CoreHID failure. The production pre-login input order is now CoreHID `HIDVirtualDevice` -> IOKit `IOHIDUserDevice` virtual keyboard/pointer -> IOHIDSystem -> Quartz as last-resort diagnostics. IOHIDUserDevice sends USB HID reports through the kernel HID stack and keeps the existing ZMB control/video session and LoginWindow-to-Aqua handoff unchanged.
+
 ## 0.15.30 LoginWindow native input fallback
 
 0.15.30 fixes the real post-reboot loop observed on the Mac where Desktop authentication reached `macOS login window`, CoreHID device creation returned `rc=-11`, the control owner was closed, and pre-login video was then rejected because no active Desktop owner remained. CoreHID stays primary. When it cannot be created, the production server now falls back automatically to the bundled IOHIDSystem bridge and then `kCGSessionEventTap`; CoreHID failure alone no longer tears down control/video.
@@ -591,7 +601,7 @@ If it says Accessibility is not granted, enable **ZorinMacBridge Server** under 
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+ZorinMacBridge is distributed under the custom **ZorinMacBridge No-Sale Source Attribution License 1.0** — see [LICENSE](LICENSE). Copies and modified versions may not be sold or redistributed for a fee, and redistribution must identify the original source repository: `https://github.com/ILoveMyProjects/ZorinMacBridge`. See also [NOTICE](NOTICE).
 
 ## macOS privacy permissions and updates
 

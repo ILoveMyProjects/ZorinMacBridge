@@ -22,18 +22,23 @@ assert 'native/macos/ZMBCoreHIDInput.swift' in BUILD
 assert 'native/macos/ZMBLoginInput.c' in BUILD
 assert 'build/ZMBLoginInput.o' in BUILD
 
-# LoginWindowInput prefers CoreHID and automatically falls back to native IOHID/Quartz.
+# LoginWindowInput independently probes every native backend and selects only observed delivery.
 start = SERVER.index('class LoginWindowInput(MacInput):')
 end = SERVER.index('\n\nclass MacClipboard:', start)
 login_input = SERVER[start:end]
 assert 'zmb_corehid_input_open' in login_input
 assert 'zmb_corehid_input_key' in login_input
 assert 'zmb_corehid_input_pointer' in login_input
-assert 'zmb_login_input_open' in login_input
+assert 'zmb_login_input_open_backend' in login_input
 assert 'zmb_login_input_key' in login_input
 assert 'zmb_login_input_pointer' in login_input
-assert "self.backend = 'legacy'" in login_input
-assert 'Failure to create CoreHID must never tear down' in login_input
+assert "('corehid', 0)" in login_input
+assert "('userdevice', 1)" in login_input
+assert "('iohidsystem', 2)" in login_input
+assert "('quartz', 3)" in login_input
+assert '_probe_keyboard_delivery' in login_input
+assert '_probe_pointer_delivery' in login_input
+assert 'Failure of every backend remains non-fatal' in login_input
 assert 'HID_USAGES' in login_input
 
 # Capability probe calls the same production CoreHID ABI and requires both a

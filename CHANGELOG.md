@@ -1,3 +1,27 @@
+## 0.15.33 - reboot LoginWindow evidence matrix
+
+- Preserves the existing ScreenCaptureKit/VideoToolbox pre-login capture path and all sleep/wake/display-recovery behavior from 0.15.32.
+- Replaces open-return-code-based LoginWindow input selection with an observed-delivery matrix across CoreHID, IOHIDUserDevice, IOHIDSystem, and Quartz.
+- Tests every input backend independently with a harmless Shift down/up observed through combined-session flags plus a small pointer move+restore observed through CoreGraphics. No backend can silently fall through to another while it is being tested.
+- Selects a production backend only after observed LoginWindow delivery; if none proves keyboard delivery, control/video remain alive and the full matrix is reported instead of entering a reconnect loop.
+- Sends every probe result to the Zorin client over the existing SESSION_STATE channel and exposes the same matrix through the physical capability probe and admin status.
+- Adds a reboot acceptance checklist so one physical reboot records transport, LoginWindow endpoint, capture first frame, all native input candidates, selected backend, password entry, and Aqua handoff without repeating setup/pairing.
+
+## 0.15.32 - IOHIDUserDevice LoginWindow fallback
+
+- Replaces the unproven Quartz-first LoginWindow fallback with a real IOKit `IOHIDUserDevice` virtual keyboard and absolute pointer after CoreHID `HIDVirtualDevice` creation fails.
+- Sends USB HID keyboard reports and pointer reports through the kernel HID stack instead of treating `CGEventPost(kCGSessionEventTap)` as proof of password-field delivery.
+- Keeps backend order explicit: CoreHID -> IOHIDUserDevice -> IOHIDSystem -> Quartz diagnostic fallback.
+- Adds native ABI/source gates and regression tests for the observed `CoreHID rc=-11` path selecting IOHIDUserDevice without dropping the pre-login control/video owner.
+- Keeps ScreenCaptureKit/VideoToolbox, TLS, pairing, handoff, no-VNC/no-Screen-Sharing architecture, and the 0.15.31 license policy unchanged.
+
+## 0.15.31 - no-sale source attribution license
+
+- Replaces the MIT license for this release and later source snapshots with the project-specific **ZorinMacBridge No-Sale Source Attribution License 1.0**.
+- Prohibits selling, paid redistribution, or fee-based bundling of ZorinMacBridge or modified copies without separate written permission from the copyright holder.
+- Requires every redistributed copy or modified version to preserve the license/copyright notice and identify the original source repository as `https://github.com/ILoveMyProjects/ZorinMacBridge`.
+- Adds a top-level `NOTICE` with the canonical source attribution. Runtime behavior is unchanged from 0.15.30.
+
 ## 0.15.30 - LoginWindow native input fallback
 
 - Fixes the real post-reboot failure where LoginWindow Desktop authentication succeeded but `HIDVirtualDevice` creation returned `rc=-11`, causing the control owner to disconnect and every pre-login video socket to be rejected as ownerless.

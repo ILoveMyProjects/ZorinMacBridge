@@ -1,21 +1,55 @@
-MIT License
+ZorinMacBridge No-Sale Source Attribution License 1.0
 
 Copyright (c) 2026 ILoveMyProjects
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+Permission is granted to use, copy, modify, and redistribute this software and
+its associated documentation (the "Software"), in source or binary form,
+subject to all of the following conditions:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. NO SALE OR PAID REDISTRIBUTION
+   You may not sell, rent, lease, sublicense for a fee, or otherwise charge for
+   copies of the Software, modified versions of the Software, or substantial
+   portions of the Software. You may not include the Software or a modified
+   version as a material component of a product, bundle, or service whose
+   distribution or access is sold for a fee, unless you have prior written
+   permission from the copyright holder.
+
+2. SOURCE ATTRIBUTION REQUIRED
+   Every copy or redistribution of the Software, including modified versions
+   and binary distributions, must preserve this license and the copyright
+   notice and must prominently identify the original source repository as:
+
+       Source: https://github.com/ILoveMyProjects/ZorinMacBridge
+
+   The source attribution must be reasonably visible in accompanying
+   documentation, an About/Credits screen, a NOTICE file, or another place
+   normally used for copyright and license notices.
+
+3. MODIFIED VERSIONS
+   If you distribute a modified version, you must clearly state that it has
+   been modified and must not represent it as an official ILoveMyProjects or
+   ZorinMacBridge release. The source attribution in Section 2 must still be
+   retained.
+
+4. THIRD-PARTY COMPONENTS
+   This license applies only to copyrightable material in ZorinMacBridge that
+   is owned by the ZorinMacBridge copyright holder. Third-party components,
+   libraries, and other separately licensed material remain subject to their
+   own license terms.
+
+5. NO TRADEMARK LICENSE
+   This license does not grant permission to use trade names, trademarks,
+   service marks, or logos except as necessary to provide the source
+   attribution required by Section 2.
+
+6. ADDITIONAL PERMISSION
+   Any permission to sell, commercially redistribute, or distribute without
+   the attribution required above must be granted separately in writing by the
+   copyright holder.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

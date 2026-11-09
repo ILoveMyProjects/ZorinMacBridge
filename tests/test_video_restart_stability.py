@@ -30,14 +30,17 @@ assert 'previous video session did not stop within {VIDEO_REPLACEMENT_GRACE_SECO
 # fail quickly with native diagnostics instead of monopolising the global lock.
 assert 'VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS = 6.0' in server
 assert 'no first H.264 access unit within {startup_timeout:g}s; native={detail}' in server
+assert 'startup_timeout = VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS if frames == 0 else None' in server
 
-# Native pipe reads also monitor the TLS socket, so a client-side reconfigure does not
-# leave the old ScreenCaptureKit streamer alive for the full 15-second pipe timeout.
+# Native pipe reads also monitor the TLS socket. The first access unit remains
+# bounded, but after it arrives a static screen is allowed to stay idle forever
+# without a false 15-second streamer-stall restart.
 assert 'disconnect_sock: ssl.SSLSocket | None = None' in server
 assert 'watchers.append(disconnect_sock)' in server
 assert "raise ConnectionError('video client disconnected during native capture')" in server
 assert '_read_exact_file(stream, 4, timeout=startup_timeout, disconnect_sock=sock, idle_callback=flush_pipeline_events)' in server
 assert '_read_exact_file(stream, size, timeout=startup_timeout, disconnect_sock=sock, idle_callback=flush_pipeline_events)' in server
-assert "select.select(watchers, [], [], min(0.1 if idle_callback is not None else 0.5, remaining))" in server
+assert 'deadline = None if timeout is None' in server
+assert 'readable, _, _ = select.select(watchers, [], [], wait_for)' in server
 
 print('video restart stability regression tests: OK')

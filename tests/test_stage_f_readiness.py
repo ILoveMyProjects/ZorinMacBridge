@@ -84,7 +84,12 @@ def main() -> None:
             'app_cdhash=abc123\n'
             'overall=PASS\n'
             'capture_result=PASS\n'
-            'input_corehid_result=FAIL\n'
+            'input_result=PASS\n'
+            'input_selected_backend=userdevice\n'
+            'input_corehid_result=FAIL_OPEN\n'
+            'input_userdevice_result=PASS\n'
+            'input_iohidsystem_result=FAIL\n'
+            'input_quartz_result=FAIL\n'
             'input_legacy_result=PASS\n',
             encoding='utf-8',
         )
@@ -92,7 +97,9 @@ def main() -> None:
              mock.patch.object(mac_admin_setup, '_installed_app_identity', return_value=(CURRENT_VERSION, 'abc123')):
             state = mac_admin_setup._prelogin_probe_state()
             assert state['prelogin_probe_current'] is True
-            assert state['prelogin_probe_ready'] is False
+            assert state['prelogin_probe_ready'] is True
+            assert state['prelogin_probe_input_selected'] == 'userdevice'
+            assert state['prelogin_probe_input_userdevice'] == 'PASS'
         with mock.patch.object(mac_admin_setup, 'CAPABILITY_STATUS', proof), \
              mock.patch.object(mac_admin_setup, '_installed_app_identity', return_value=(CURRENT_VERSION, 'different')):
             state = mac_admin_setup._prelogin_probe_state()

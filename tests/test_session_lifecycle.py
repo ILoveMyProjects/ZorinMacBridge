@@ -12,6 +12,7 @@ from zmb_session_lifecycle import (
     make_capture_backend_state,
     make_capture_failure_state,
     make_handoff_state,
+    make_input_probe_state,
     make_pipeline_state,
     parse_session_state,
     reconnect_delay_seconds,
@@ -82,6 +83,19 @@ def test_session_state_round_trip():
     failure = parse_session_state(make_capture_failure_state('system-screencapture-failed: denied'))
     assert failure.kind == 'capture-failure'
     assert failure.reason == 'system-screencapture-failed: denied'
+
+    input_probe = parse_session_state(make_input_probe_state(
+        'userdevice', result='PASS', keyboard='PASS', pointer='PASS',
+        open_rc='0 (0x00000000)', selected=True, reason='observed',
+    ))
+    assert input_probe.kind == 'input-probe'
+    assert input_probe.backend == 'userdevice'
+    assert input_probe.result == 'PASS'
+    assert input_probe.keyboard == 'PASS'
+    assert input_probe.pointer == 'PASS'
+    assert input_probe.open_rc == '0 (0x00000000)'
+    assert input_probe.selected is True
+    assert input_probe.reason == 'observed'
 
     future = make_pipeline_state('future-native-stage')
     assert future == {'state': 'pipeline', 'stage': 'future-native-stage'}
