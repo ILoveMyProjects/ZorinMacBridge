@@ -31,14 +31,17 @@ if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
   fi
 fi
 
-# A free Aqua-only release path remains mandatory. Developer ID is optional for
-# normal Aqua operation, but reboot-to-LoginWindow READY requires the managed
-# pre-login capabilities carried by the Developer ID provisioning path.
+# Release publication must be resilient: Aqua/ad-hoc remains a working fallback,
+# while a valid Developer ID + provisioning profile upgrades the same artifact
+# to the managed pre-login capability tier. Managed-signing setup failure must
+# not abort the whole tagged release.
 for marker in \
   'MACOS_RELEASE_SIGNING_MODE=adhoc' \
-  'Apple Developer credentials not configured; using free ad-hoc transport signing.' \
+  'Managed Developer ID signing unavailable or invalid; falling back to the working Aqua/ad-hoc macOS artifact.' \
   "scripts/sign-macos-transport.sh 'dist/ZorinMacBridge Server.app'" \
-  'MACOS_RELEASE_SIGNING_MODE=developer-id'; do
+  'MACOS_RELEASE_SIGNING_MODE=developer-id' \
+  'continue-on-error: true' \
+  'steps.managed_signing.outcome'; do
   grep -Fq -- "$marker" .github/workflows/release.yml || {
     echo "ERROR: free/optional macOS signing marker missing from workflow: $marker" >&2
     exit 1
@@ -86,6 +89,43 @@ grep -Fq "proof.get('input_corehid_result') == 'PASS'" mac_admin_setup.py || {
   echo 'ERROR: pre-login proof still permits a non-CoreHID input path.' >&2
   exit 1
 }
+
+# Production LoginWindow must use the exact managed mechanisms proven by the
+# physical capability probe: ScreenCaptureKit SCStream for video and CoreHID
+# HIDVirtualDevice for keyboard/pointer. The old system-screenshot and legacy
+# IOHID/Quartz paths are diagnostic-only and must never return as production.
+grep -Fq 'prelogin-backend=screencapturekit-persistent' native/macos/ZMBStreamerLib.swift || {
+  echo 'ERROR: production pre-login video is not using managed ScreenCaptureKit.' >&2
+  exit 1
+}
+grep -Fq 'startPreloginStreamBounded' native/macos/ZMBStreamerLib.swift || {
+  echo 'ERROR: pre-login SCStream startup lost its bounded startup contract.' >&2
+  exit 1
+}
+if grep -Fq 'screencapture-cli' native/macos/ZMBStreamerLib.swift || grep -Fq '/usr/sbin/screencapture' native/macos/ZMBStreamerLib.swift; then
+  echo 'ERROR: obsolete LoginWindow system-screenshot backend returned to production.' >&2
+  exit 1
+fi
+grep -Fq 'native/macos/ZMBCoreHIDInput.swift' scripts/build-macos-streamer.sh || {
+  echo 'ERROR: production streamer no longer compiles the CoreHID LoginWindow input backend.' >&2
+  exit 1
+}
+grep -Fq 'zmb_corehid_input_open' mac_server.py || {
+  echo 'ERROR: production LoginWindow input is not wired to CoreHID.' >&2
+  exit 1
+}
+grep -Fq 'zmb_corehid_input_pointer' mac_server.py || {
+  echo 'ERROR: production LoginWindow pointer is not wired to CoreHID.' >&2
+  exit 1
+}
+grep -Fq 'capture_scstream_first_frame' native/macos/capability-probe/ZMBCapabilityProbe.swift || {
+  echo 'ERROR: physical capability probe no longer proves an SCStream first frame.' >&2
+  exit 1
+}
+grep -Fq 'input_corehid_pointer_result' native/macos/capability-probe/ZMBCapabilityProbe.swift || {
+  echo 'ERROR: physical capability probe no longer proves CoreHID pointer delivery.' >&2
+  exit 1
+}
 grep -Fq 'Refusing to replace a pre-login-capable Developer ID installation with a free/ad-hoc build.' updates.py || {
   echo 'ERROR: updater can silently downgrade a pre-login-capable installation.' >&2
   exit 1
@@ -95,5 +135,5 @@ grep -Fq 'Refusing to replace a pre-login-capable Developer ID installation with
   exit 1
 }
 
-echo "[release-source] free Aqua-only signing path + managed pre-login capability gate OK"
+echo "[release-source] resilient Aqua fallback + managed pre-login capability gate OK"
 # Marker used by regression tests: pre-login READY requires Apple-managed Developer ID/provisioning.

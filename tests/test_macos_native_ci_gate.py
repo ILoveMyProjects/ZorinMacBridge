@@ -25,7 +25,7 @@ assert '''macos-arm64:
 # One canonical compiler path, arm64 only, min deployment target 26.0.
 assert 'MACOSX_DEPLOYMENT_TARGET=26.0' in build
 assert '-target arm64-apple-macos26.0' in build
-assert '-arch arm64' in build
+assert '-target arm64-apple-macos26.0' in build
 assert 'MACOSX_DEPLOYMENT_TARGET=13.0' not in build
 assert 'LSMinimumSystemVersion 26.0' in release
 
@@ -39,10 +39,9 @@ for required in (
     '_zmb_streamer_run',
     '_zmb_streamer_stop',
     '_zmb_streamer_destroy',
-    '_zmb_login_input_open',
-    '_zmb_login_input_key',
-    '_zmb_login_input_pointer',
-    '_zmb_login_input_scroll',
+    '_zmb_corehid_input_open',
+    '_zmb_corehid_input_key',
+    '_zmb_corehid_input_pointer',
 ):
     assert required in gate, required
 

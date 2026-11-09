@@ -1,15 +1,16 @@
-> **0.15.20 correction:** Stage F originally made the LoginWindow agent and capability proof part of global READY. That was too strict. From 0.15.20, normal Aqua READY and reboot-to-LoginWindow verification are separate states.
+> **0.15.20 correction:** normal Aqua READY and reboot-to-LoginWindow verification are separate states.
 
 # Stage F — Pre-login verification contract
 
-Stage F does not alter the Stage D capture/input/handoff runtime. It records whether the reboot-to-LoginWindow path has been proven for the exact installed Mac app build.
-
-Normal Aqua READY is evaluated independently from pre-login verification. A logged-in Mac can be READY for Desktop, Files, System, Terminal and Projects without signing out or rebooting just to run a capability probe.
+Stage F records whether the reboot-to-LoginWindow path has been proven for the exact installed Mac app build. Normal Aqua READY remains independent.
 
 Pre-login verification checks:
 
 1. `/Library/LaunchAgents/com.ilovemyprojects.zorinmacbridge.prelogin.plist` has the expected LoginWindow contract.
-2. Stage B `capability-probe` has produced `overall=PASS` for the exact installed build, including `capture_result=PASS` and either CoreHID or legacy input `PASS`.
+2. The installed app has the managed Developer ID/provisioning identity required by the pre-login capability tier.
+3. Stage B `capability-probe` has produced `overall=PASS` for the exact installed build, including `capture_result=PASS` and `input_corehid_result=PASS`.
+
+Starting with 0.15.27, `input_corehid_result=PASS` means both the production CoreHID keyboard proof and production absolute-pointer proof passed. Legacy IOHID/Quartz is comparison data only and cannot satisfy readiness.
 
 The proof lives at:
 
@@ -21,11 +22,11 @@ The proof is **Mac/build-scoped, not client-scoped**. One successful capability 
 
 `zmb-admin status` exposes the proof fields as `prelogin_probe_present`, `prelogin_probe_current`, `prelogin_probe_ready`, `prelogin_probe_overall`, `prelogin_probe_capture`, `prelogin_probe_input_corehid`, and `prelogin_probe_input_legacy`.
 
-UI policy from 0.15.20:
+UI policy:
 
 - normal requirements missing -> global REQUIRED / not READY;
 - normal requirements satisfied -> global READY;
-- pre-login agent + proof current -> `Pre-login after reboot: VERIFIED`;
-- agent present but proof missing/stale/failed -> `UNVERIFIED`;
-- agent contract missing/broken -> `NOT READY`;
+- managed identity + LoginWindow agent + current production-aligned proof -> `Pre-login after reboot: VERIFIED`;
+- proof missing/stale/failed -> `UNVERIFIED`;
+- managed identity or agent contract missing/broken -> `NOT READY`;
 - none of these pre-login states blocks normal Aqua READY.

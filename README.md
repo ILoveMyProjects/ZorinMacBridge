@@ -1,3 +1,15 @@
+## 0.15.27 production managed pre-login runtime
+
+The actual LoginWindow runtime now uses the same Apple-managed mechanisms that the physical capability probe verifies. Pre-login video uses bounded ScreenCaptureKit `SCStream` with Persistent Content Capture; pre-login keyboard and pointer use CoreHID `HIDVirtualDevice`. The old `/usr/sbin/screencapture` workaround and production IOHIDSystem/Quartz injection are removed. The probe now requires a real SCStream first frame plus CoreHID keyboard and pointer proof for the exact installed build. The existing TLS protocol, pairing, VideoToolbox/H.264 transport, single-owner pre-login session and automatic LoginWindow → Aqua handoff remain unchanged. No VNC, Screen Sharing, port 5900, or third-party remote desktop backend is used.
+
+## 0.15.26 resilient macOS release
+
+Tagged releases no longer fail only because managed Apple signing is unavailable or misconfigured. The macOS job first attempts the Developer ID/provisioning path with the managed pre-login capabilities. If that validation succeeds, the normal DMG is pre-login-capability signed; otherwise the same release continues with the working Aqua/ad-hoc path. The published `ZorinMacBridge-Server_macOS-arm64-signing.txt` identifies which signing tier was produced. LoginWindow READY still requires the managed identity plus a current physical capture/CoreHID capability proof. No VNC, Screen Sharing, port 5900, or third-party backend is introduced.
+
+## 0.15.25 managed-only macOS release gate
+
+Official tagged macOS releases now require the Developer ID/provisioning path with both Apple-managed pre-login capabilities. GitHub Actions fails instead of publishing an Aqua-only/ad-hoc DMG when the required signing secrets are absent. The installer also reads interactive terminal setup from `/dev/tty`, so `curl ... | bash` no longer loses its prompts to the script pipe. No VNC, Screen Sharing or port 5900 is introduced.
+
 ## 0.15.23 LoginWindow direct capture fix
 
 0.15.23 keeps the 0.15.22 reboot/wake recovery and fixes the remaining LoginWindow first-frame hang. The pre-login process no longer waits for `SCShareableContent` or `SCStream.startCapture()` before trying the system capture path. It reads the main display geometry through CoreGraphics, starts the existing VideoToolbox H.264 encoder, and immediately uses bounded `/usr/sbin/screencapture -m` capture inside the LoginWindow launchd/Mach bootstrap session. Normal logged-in Aqua desktop capture remains on continuous ScreenCaptureKit `SCStream`. Capture backend, pipeline and failure states continue to reach the client. No VNC, Screen Sharing or port 5900 is introduced.
@@ -154,6 +166,8 @@ curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/mast
 The macOS server supports **Apple Silicon (arm64) only**. The installer verifies the Mac architecture, downloads the arm64 `.dmg`, verifies SHA-256, and installs **ZorinMacBridge Server** into `/Applications`. Intel Macs are not supported.
 
 Starting with **0.15.19**, normal logged-in Aqua operation still has a certificate-free path: GitHub Actions can use ad-hoc transport signing and installation/update applies one stable per-Mac local ad-hoc designated requirement. Starting with **0.15.24**, reboot-to-LoginWindow remote login is a separate stricter capability tier: it can become READY only on a Developer ID provisioned build carrying the Apple-managed Persistent Content Capture and CoreHID Virtual Device entitlements, followed by a physical LoginWindow capability proof for that exact build.
+
+Starting with **0.15.27**, those managed capabilities are wired into the actual production LoginWindow runtime: video uses bounded ScreenCaptureKit `SCStream`, while keyboard and pointer input use CoreHID `HIDVirtualDevice`. The physical capability probe now proves the same SCStream-first-frame and CoreHID keyboard/pointer mechanisms used by the live pre-login session. Legacy IOHID/Quartz remains diagnostic-only.
 
 ## Remote desktop architecture
 

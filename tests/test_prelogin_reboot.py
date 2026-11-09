@@ -17,6 +17,7 @@ build = (ROOT / 'scripts/build-macos-streamer.sh').read_text(encoding='utf-8')
 workflow = (ROOT / '.github/workflows/release.yml').read_text(encoding='utf-8')
 gate = (ROOT / 'scripts/verify-macos-native-gate.sh').read_text(encoding='utf-8')
 native_c = (ROOT / 'native/macos/ZMBLoginInput.c').read_text(encoding='utf-8')
+corehid = (ROOT / 'native/macos/ZMBCoreHIDInput.swift').read_text(encoding='utf-8')
 
 plist_path = ROOT / 'native/macos/admin/com.ilovemyprojects.zorinmacbridge.prelogin.plist'
 plist = plistlib.loads(plist_path.read_bytes())
@@ -50,15 +51,15 @@ assert 'max_width = min(max_width, 1920)' in server
 assert 'fps = min(fps, 30.0)' in server
 assert 'LoginWindowInput' in server
 
-# LoginWindow input is a native IOHID path, not ordinary CGEvent injection.
-assert 'IOServiceMatching(kIOHIDSystemClass)' in native_c
-assert 'IOServiceOpen' in native_c
+# Production LoginWindow input is CoreHID HIDVirtualDevice. The old IOHID/Quartz
+# shim remains only in the capability-probe dylib as a diagnostic comparison.
+assert 'HIDVirtualDevice(properties:' in corehid
+assert 'zmb_corehid_input_key' in corehid
+assert 'zmb_corehid_input_pointer' in corehid
+assert '-framework CoreHID' in build
+assert 'ZMBCoreHIDInput.swift' in build
+assert 'ZMBLoginInput.o' not in build
 assert 'IOHIDPostEvent' in native_c
-assert 'zmb_login_input_key' in native_c
-assert 'zmb_login_input_pointer' in native_c
-assert 'zmb_login_input_scroll' in native_c
-assert '-framework IOKit' in build
-assert 'ZMBLoginInput.o' in build
 assert 'scripts/build-macos-streamer.sh' in gate
 assert 'scripts/verify-macos-native-gate.sh' in workflow
 
@@ -89,7 +90,7 @@ assert "action = 'recover-prelogin' if no_gui else 'recover-desktop'" in gtk
 assert 'self.selected_system_available = bool(server.admin_available and not server.paired_only)' in gtk
 
 # This feature must not weaken login/FileVault policy.
-affected = '\n'.join([gui, server, install, admin, native_c])
+affected = '\n'.join([gui, server, install, admin, native_c, corehid])
 assert 'autoLoginUser' not in affected
 assert 'DisableFDEAutoLogin' not in affected
 assert 'fdesetup disable' not in affected

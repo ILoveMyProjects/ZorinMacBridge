@@ -1,12 +1,10 @@
 # macOS code signing
 
-ZorinMacBridge has two distinct macOS capability tiers.
+ZorinMacBridge has two macOS capability tiers. Starting with 0.15.26, official tagged releases always preserve a working Aqua artifact: the workflow upgrades it to managed Developer ID/provisioning when those credentials validate, and otherwise publishes the Aqua/ad-hoc fallback instead of failing the whole release.
 
-## 1. Normal Aqua Desktop — free path remains supported
+## 1. Normal Aqua Desktop — local/manual free path remains supported
 
-Normal logged-in Desktop/Files/System/Terminal operation does **not** require Developer ID. When Apple signing credentials are not configured, GitHub Actions may build the arm64 app/DMG with the existing ad-hoc transport signature. Installation/update then applies the stable per-Mac local ad-hoc designated requirement from `mac_local_signing.py`.
-
-This path remains intentionally supported for normal Aqua operation. It must not be reported as reboot-to-LoginWindow capable.
+Normal logged-in Desktop/Files/System/Terminal operation does **not** technically require Developer ID. The stable per-Mac local ad-hoc identity in `mac_local_signing.py` remains available for Aqua-only installs. Starting with 0.15.26, tagged GitHub releases try managed Developer ID signing first and fall back to the working Aqua/ad-hoc artifact if managed signing is unavailable or invalid; that fallback does not claim reboot-to-LoginWindow capability.
 
 ## 2. Reboot-to-LoginWindow remote login — managed capability path
 
@@ -21,13 +19,13 @@ Starting with 0.15.24, pre-login READY requires the installed application to pas
 - `com.apple.developer.hid.virtual.device = true`;
 - the same entitlement values present in the final signed application.
 
-The release workflow uses this path only when all three maintainer secrets are configured:
+The managed pre-login release tier uses all three maintainer secrets when they are available and valid:
 
 - `MACOS_DEVELOPER_ID_P12_BASE64`
 - `MACOS_DEVELOPER_ID_P12_PASSWORD`
 - `MACOS_DEVELOPER_ID_PROFILE_BASE64`
 
-A partially configured Developer ID setup fails rather than producing an ambiguous build. When no Apple credentials are configured, the workflow still produces the free Aqua-only build.
+A missing, partial, or invalid managed signing setup does not destroy the whole release: the workflow publishes the Aqua/ad-hoc tier instead. Only a successfully validated Developer ID + provisioning build can become pre-login VERIFIED.
 
 ## Installer and updater behavior
 
@@ -40,6 +38,16 @@ The macOS installer verifies the downloaded app before copying it into `/Applica
 The automatic updater follows the same rule. Migration from Aqua-only ad-hoc to the managed Developer ID build is allowed; the reverse transition is refused.
 
 The root unattended installer configures everything root can configure locally: the P0 helpers, LoginWindow LaunchAgent, ownership/permissions, SSH prerequisites, update service and persistent state. It also reports `PRELOGIN_MANAGED_CAPABILITIES=ready|blocked`. Root access does not synthesize Apple-managed entitlements; those must already be present in the signed/provisioned application.
+
+## Production LoginWindow runtime (0.15.27+)
+
+The managed capability tier is now the actual production backend, not just a readiness gate:
+
+- video: ScreenCaptureKit `SCStream` with bounded content discovery, bounded stream startup and a first-frame watchdog;
+- input: CoreHID `HIDVirtualDevice` virtual keyboard + absolute pointer;
+- legacy IOHIDSystem/Quartz: diagnostic comparison only inside the capability-probe dylib.
+
+The physical probe exercises an actual SCStream first frame and the same CoreHID input source before the build can be marked VERIFIED.
 
 ## Physical capability proof is still mandatory
 

@@ -1,3 +1,28 @@
+## 0.15.27 - production managed pre-login runtime
+
+- Replaces the failed LoginWindow `/usr/sbin/screencapture` production workaround with a bounded ScreenCaptureKit `SCStream` path. Persistent Content Capture is now used by the real LoginWindow video runtime rather than existing only as a signing/readiness contract.
+- Adds a production CoreHID `HIDVirtualDevice` keyboard and absolute pointer backend. LoginWindow keyboard, mouse buttons, pointer movement and wheel input no longer use the legacy IOHIDSystem/Quartz path.
+- Makes the physical capability probe exercise an actual `SCStream` first frame and the same production CoreHID keyboard/pointer implementation before it can report `input_corehid_result=PASS` / `overall=PASS`.
+- Adds bounded ScreenCaptureKit content/start/first-frame failure reporting so a blocked LoginWindow capture fails explicitly instead of hanging behind the client watchdog.
+- Keeps legacy IOHID/Quartz only inside the diagnostic probe for comparison; it is no longer linked into the production streamer dylib.
+- Preserves the existing single-owner pre-login session, TLS transport, VideoToolbox/H.264 pipeline, LoginWindow-to-Aqua handoff, resilient Aqua release fallback, and no-VNC/no-Screen-Sharing/no-port-5900 architecture.
+
+## 0.15.26 - resilient release publication
+
+- Restores a non-blocking Aqua/ad-hoc macOS release fallback so a missing, partial, or invalid managed Apple signing setup cannot make the entire tagged release fail.
+- Tries Developer ID + managed provisioning first; when validation succeeds the published macOS artifact keeps the pre-login-capable identity, otherwise the workflow publishes the working Aqua artifact and records the signing tier in `ZorinMacBridge-Server_macOS-arm64-signing.txt`.
+- Keeps `com.apple.developer.persistent-content-capture` and `com.apple.developer.hid.virtual.device` mandatory for the managed pre-login tier and keeps the physical LoginWindow capability probe as the readiness proof.
+- Preserves the `/dev/tty` terminal-setup fix from 0.15.25, so `curl ... | bash` can still answer interactive setup prompts.
+- Does not add VNC, Screen Sharing, port 5900, or any third-party remote desktop backend.
+
+## 0.15.25 - managed-only macOS releases
+
+- Makes every official tagged macOS release require Developer ID signing plus an all-Macs provisioning profile containing both `com.apple.developer.persistent-content-capture` and `com.apple.developer.hid.virtual.device`; missing GitHub signing secrets now fail the release instead of publishing an Aqua-only DMG.
+- Removes the ad-hoc transport-signing fallback from the GitHub macOS release job while retaining the local ad-hoc signer for legacy/manual Aqua-only installation paths.
+- Keeps post-sign verification mandatory so the final `.app` must still pass `--verify-release-app` before the DMG is produced.
+- Makes terminal setup read textual prompts from `/dev/tty`, fixing `curl ... | bash` installs that previously ended with `EOFError` at the automatic-update/session-password questions.
+- Preserves the no-VNC/no-Screen-Sharing/no-port-5900 architecture; this release hardens distribution of the native ZorinMacBridge pre-login capability path.
+
 ## 0.15.24 - managed pre-login capability gate
 
 - Makes reboot-to-LoginWindow readiness require a verified Developer ID build whose embedded all-Macs provisioning profile and signed app contain both `com.apple.developer.persistent-content-capture` and `com.apple.developer.hid.virtual.device`. Normal logged-in Aqua operation remains available on the free stable ad-hoc path.

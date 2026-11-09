@@ -96,11 +96,14 @@ manifest = (ROOT / 'native/macos/signing/ZorinMacBridge.release-entitlements.pli
 for marker in (
     'MACOS_RELEASE_SIGNING_MODE=adhoc',
     'MACOS_RELEASE_SIGNING_MODE=developer-id',
-    'Apple Developer credentials not configured; using free ad-hoc transport signing.',
+    'Apple Developer credentials not configured; managed pre-login signing is unavailable for this run.',
     "scripts/sign-macos-transport.sh 'dist/ZorinMacBridge Server.app'",
     'scripts/sign-macos-release.sh',
 ):
     assert marker in workflow, marker
+assert 'continue-on-error: true' in workflow
+assert 'steps.managed_signing.outcome' in workflow
+assert 'falling back to the working Aqua/ad-hoc macOS artifact' in workflow
 for forbidden in (
     'Missing secret: MACOS_DEVELOPER_ID_P12_BASE64',
     'Missing secret: MACOS_DEVELOPER_ID_P12_PASSWORD',

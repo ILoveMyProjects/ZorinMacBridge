@@ -47,6 +47,8 @@ def main() -> None:
     assert 'MACOS_RELEASE_SIGNING_MODE=adhoc' in workflow
     assert 'MACOS_RELEASE_SIGNING_MODE=developer-id' in workflow
     assert "scripts/sign-macos-transport.sh 'dist/ZorinMacBridge Server.app'" in workflow
+    assert 'continue-on-error: true' in workflow
+    assert 'steps.managed_signing.outcome' in workflow
     assert 'scripts/sign-macos-release.sh' in workflow
     assert 'Missing secret: MACOS_DEVELOPER_ID_P12_BASE64' not in workflow
     print('support tests: OK')

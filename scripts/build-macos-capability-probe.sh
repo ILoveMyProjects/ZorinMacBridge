@@ -27,6 +27,9 @@ SWIFT_ARGS=(
   -emit-library
   -framework ScreenCaptureKit
   -framework CoreGraphics
+  -framework CoreImage
+  -framework CoreMedia
+  -framework CoreVideo
   -framework ImageIO
   -framework Security
   -framework CryptoKit
@@ -44,6 +47,7 @@ echo 'Capability probe: CoreHID SDK support required (macOS 26+ target).'
 
 MACOSX_DEPLOYMENT_TARGET=26.0 swiftc "${SWIFT_ARGS[@]}" \
   "$ROOT/native/macos/capability-probe/ZMBCapabilityProbe.swift" \
+  "$ROOT/native/macos/ZMBCoreHIDInput.swift" \
   "$ROOT/build/ZMBLoginInput.o" \
   -o "$ROOT/build/libzmb_capability_probe.dylib"
 chmod 0755 "$ROOT/build/libzmb_capability_probe.dylib"

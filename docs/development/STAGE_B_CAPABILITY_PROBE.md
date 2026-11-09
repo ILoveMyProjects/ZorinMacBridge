@@ -1,6 +1,6 @@
 # Stage B — LoginWindow capability proof
 
-Stage B is a diagnostic milestone, not another remote-desktop workaround. Its job is to prove on the physical Mac, inside the actual `LoginWindow` launchd session and under the exact `ZorinMacBridge Server.app` process identity, which capture and input capabilities macOS really grants.
+Stage B proves on the physical Mac, inside the actual `LoginWindow` launchd session and under the exact `ZorinMacBridge Server.app` process identity, that the same native mechanisms used by the production pre-login runtime are accepted by macOS.
 
 ## What it measures
 
@@ -9,13 +9,13 @@ The probe records the current code-signing identifier and the effective values o
 - `com.apple.developer.persistent-content-capture`
 - `com.apple.developer.hid.virtual.device`
 
-For capture it calls ScreenCaptureKit directly, captures one `CGImage` with `SCScreenshotManager`, writes `/var/tmp/zmb-capability-probe.png`, records its dimensions and SHA-256, and downsamples it to verify that the frame is not uniformly black. `CGPreflightScreenCaptureAccess()` is recorded as a diagnostic only; it is **not** used as a gate because macOS 27 has a distinct Remote Desktop privacy category without a public silent authorization query.
+For capture it creates a real ScreenCaptureKit `SCStream`, waits for the first `.started`/`.complete` screen sample with bounded startup/first-frame deadlines, converts that frame to a `CGImage`, writes `/var/tmp/zmb-capability-probe.png`, records dimensions/SHA-256, and rejects a uniformly black frame. This mirrors the production LoginWindow video backend introduced in 0.15.27. `CGPreflightScreenCaptureAccess()` remains diagnostic only.
 
-For input it creates a CoreHID `HIDVirtualDevice` keyboard and dispatches only a left-Shift down/up report. It proves delivery by checking that the combined session modifier state toggles and returns to normal. It never types text and never sends a password. The existing IOHID/Quartz path is also measured as a comparison.
+For input it calls the same `ZMBCoreHIDInput.swift` implementation compiled into the production streamer. The probe creates the production CoreHID virtual keyboard and absolute pointer, proves a harmless left-Shift down/up transition, moves the pointer a small bounded distance, verifies that movement, then restores the pointer. It never types text and never sends a password. The old IOHID/Quartz path is still measured only as a diagnostic comparison.
 
 ## How it runs
 
-The native code is a separate `libzmb_capability_probe.dylib`, but it is loaded into the existing frozen server process through `--capability-probe`. This is intentional: a standalone helper would have a different TCC/code-signing identity and could produce a false Screen Recording result.
+The native probe is `libzmb_capability_probe.dylib`, loaded into the existing frozen server process through `--capability-probe`. A standalone helper would have a different TCC/code-signing identity and could produce a false result.
 
 The restricted P0 command `zmb-admin capability-probe` creates a one-shot `LoginWindow` LaunchAgent for the installed app, waits for the structured result, then removes the temporary job. The probe refuses to run unless `/dev/console` is currently owned by `loginwindow`/root.
 
@@ -28,38 +28,23 @@ The structured output is stored at:
 
 Files are handed back to the configured target user with mode `0600` where possible.
 
-## Running remotely from Zorin
-
-With the paired System profile already installed, a source checkout can run:
-
-```bash
-PYTHONPATH=. python3 - <<'PY'
-from zmb_admin_backend import list_profiles, run_action_for_profile
-profiles = list_profiles()
-if len(profiles) != 1:
-    raise SystemExit(f"expected one paired Mac, found {len(profiles)}")
-result = run_action_for_profile(profiles[0], "capability-probe", timeout=45)
-print(result.stdout, end="")
-if result.stderr:
-    print(result.stderr, end="")
-raise SystemExit(result.returncode)
-PY
-```
-
-The Mac must currently be showing LoginWindow. The command does not require a GUI user session and does not type the login password.
-
 ## Interpretation
 
-`overall=PASS` means a non-uniform LoginWindow frame was captured and at least one input path toggled Shift in the LoginWindow session.
+`overall=PASS` means all production prerequisites proved on LoginWindow for that exact build:
 
-`overall=CAPTURE_ONLY` means the image path is proven but input is not. If `entitlement_hid_virtual_device=0`, Stage C must obtain/configure the CoreHID virtual-device entitlement before treating CoreHID failure as an implementation bug.
+- `capture_result=PASS` — actual `SCStream` produced a usable first frame;
+- `input_corehid_keyboard_result=PASS` — production CoreHID keyboard report was observed;
+- `input_corehid_pointer_result=PASS` — production CoreHID pointer movement was observed/restored;
+- `input_corehid_result=PASS` — both keyboard and pointer passed.
 
-`capture_result=BLOCKED_MISSING_ENTITLEMENT` or a ScreenCaptureKit missing-entitlements error means Stage C must address Persistent Content Capture signing/provisioning.
+`overall=CAPTURE_ONLY` means video passed but production input did not.
 
-`capture_result=BLOCKED_PERMISSION` means the current app identity lacks the privacy authorization required by ScreenCaptureKit.
+`capture_result=BLOCKED_MISSING_ENTITLEMENT` or a ScreenCaptureKit missing-entitlements error is a signing/provisioning blocker for Persistent Content Capture.
 
-`capture_result=FAIL_BLACK_OR_UNIFORM` means the API returned a frame object but not a usable LoginWindow image.
+`capture_result=BLOCKED_PERMISSION` means the installed app identity lacks the privacy authorization required by ScreenCaptureKit.
 
-`input_legacy_result=UNCONFIRMED_DELIVERY` means the legacy IOHID/Quartz call returned success but the session modifier state did not prove delivery; it must not be treated as working login input.
+`capture_result=FAIL_BLACK_OR_UNIFORM` means ScreenCaptureKit delivered a frame object but not a usable LoginWindow image.
 
-Stage B does not change the normal Desktop streamer, LoginWindow streamer, authentication, reconnect, handoff, or input runtime paths.
+`input_legacy_result=UNCONFIRMED_DELIVERY` remains diagnostic only. Legacy IOHID/Quartz cannot make production pre-login VERIFIED.
+
+Starting with 0.15.27, Stage B and the production LoginWindow runtime intentionally share the same ScreenCaptureKit/CoreHID mechanism class; the probe is no longer a proof of a different fallback path.

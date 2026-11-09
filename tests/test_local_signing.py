@@ -34,14 +34,17 @@ def main() -> None:
     local_signing = Path('mac_local_signing.py').read_text(encoding='utf-8')
     release_signing = Path('mac_release_signing.py').read_text(encoding='utf-8')
 
-    # 0.15.19: the default release path is free/ad-hoc. Developer ID support is
-    # retained only as an optional branch when all maintainer secrets exist.
+    # 0.15.26: tagged releases keep the working Aqua/ad-hoc fallback while
+    # upgrading to managed Developer ID when Apple credentials validate.
     assert 'MACOS_RELEASE_SIGNING_MODE=adhoc' in workflow
     assert 'MACOS_RELEASE_SIGNING_MODE=developer-id' in workflow
     assert "scripts/sign-macos-transport.sh 'dist/ZorinMacBridge Server.app'" in workflow
     assert 'Missing secret: MACOS_DEVELOPER_ID_P12_BASE64' not in workflow
     assert 'Missing secret: MACOS_DEVELOPER_ID_PROFILE_BASE64' not in workflow
     assert 'scripts/sign-macos-release.sh' in workflow  # optional paid branch only
+    assert 'continue-on-error: true' in workflow
+    assert 'steps.managed_signing.outcome' in workflow
+    assert 'falling back to the working Aqua/ad-hoc macOS artifact' in workflow
     assert 'embedded.provisionprofile' in release_signing
     assert 'com.apple.developer.persistent-content-capture' in release_signing
     assert 'com.apple.developer.hid.virtual.device' in release_signing
@@ -67,7 +70,7 @@ def main() -> None:
     assert 'ZMBLocalIdentity' in local_signing
     assert 'TOKEN_PATH' in local_signing
 
-    print('free local-DR release path + optional Developer ID tests: OK')
+    print('resilient Aqua fallback + optional managed Developer ID tests: OK')
 
 
 if __name__ == '__main__':

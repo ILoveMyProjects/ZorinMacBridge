@@ -498,13 +498,37 @@ class MacInput:
 
 
 class LoginWindowInput(MacInput):
-    """Inject input into the macOS LoginWindow session through IOHIDSystem.
+    """Inject LoginWindow input through the production CoreHID virtual devices.
 
-    CGEvent mouse movement can appear to work at loginwindow while clicks and
-    keyboard events are silently discarded.  Keep a cached display rectangle
-    from session startup and avoid further WindowServer queries during input.
+    This is deliberately the same Apple-managed mechanism verified by the
+    capability probe.  Legacy IOHIDSystem/Quartz remains diagnostic only and is
+    not used for production remote login.
     """
 
+    HID_USAGES = {
+        **{chr(ord('a') + i): 0x04 + i for i in range(26)},
+        '1': 0x1E, '2': 0x1F, '3': 0x20, '4': 0x21, '5': 0x22,
+        '6': 0x23, '7': 0x24, '8': 0x25, '9': 0x26, '0': 0x27,
+        'Return': 0x28, 'Escape': 0x29, 'BackSpace': 0x2A, 'Tab': 0x2B,
+        'space': 0x2C, 'minus': 0x2D, 'equal': 0x2E,
+        'bracketleft': 0x2F, 'bracketright': 0x30, 'backslash': 0x31,
+        'semicolon': 0x33, 'apostrophe': 0x34, 'grave': 0x35,
+        'comma': 0x36, 'period': 0x37, 'slash': 0x38, 'Caps_Lock': 0x39,
+        'F1': 0x3A, 'F2': 0x3B, 'F3': 0x3C, 'F4': 0x3D,
+        'F5': 0x3E, 'F6': 0x3F, 'F7': 0x40, 'F8': 0x41,
+        'F9': 0x42, 'F10': 0x43, 'F11': 0x44, 'F12': 0x45,
+        'Home': 0x4A, 'Prior': 0x4B, 'Delete': 0x4C, 'End': 0x4D,
+        'Next': 0x4E, 'Right': 0x4F, 'Left': 0x50, 'Down': 0x51, 'Up': 0x52,
+        'Num_Lock': 0x53, 'KP_Divide': 0x54, 'KP_Multiply': 0x55,
+        'KP_Subtract': 0x56, 'KP_Add': 0x57, 'KP_Enter': 0x58,
+        'KP_1': 0x59, 'KP_2': 0x5A, 'KP_3': 0x5B, 'KP_4': 0x5C,
+        'KP_5': 0x5D, 'KP_6': 0x5E, 'KP_7': 0x5F, 'KP_8': 0x60,
+        'KP_9': 0x61, 'KP_0': 0x62, 'KP_Decimal': 0x63, 'KP_Equal': 0x67,
+        'F13': 0x68, 'F14': 0x69, 'F15': 0x6A, 'F16': 0x6B,
+        'F17': 0x6C, 'F18': 0x6D, 'F19': 0x6E, 'F20': 0x6F,
+        'Control_L': 0xE0, 'Shift_L': 0xE1, 'Alt_L': 0xE2, 'Meta_L': 0xE3,
+        'Control_R': 0xE4, 'Shift_R': 0xE5, 'Alt_R': 0xE6, 'Meta_R': 0xE7,
+    }
     _SHIFTED_ASCII = {
         '!': '1', '@': '2', '#': '3', '$': '4', '%': '5', '^': '6',
         '&': '7', '*': '8', '(': '9', ')': '0', '_': 'minus', '+': 'equal',
@@ -521,105 +545,77 @@ class LoginWindowInput(MacInput):
 
     def __init__(self) -> None:
         self.native = NativeStreamerLibrary()
-        rc = int(self.native.lib.zmb_login_input_open())
+        rc = int(self.native.lib.zmb_corehid_input_open())
         if rc != 0:
-            raise RuntimeError(f'IOHIDSystem login-window input unavailable (IOReturn=0x{rc & 0xffffffff:08x})')
-        try:
-            # Cache geometry before ScreenCaptureKit starts.  Some macOS releases are
-            # hostile to extra WindowServer calls from a loginwindow helper once the
-            # capture connection exists.
-            cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
-            cg.CGMainDisplayID.restype = ctypes.c_uint32
-            cg.CGDisplayBounds.argtypes = [ctypes.c_uint32]
-            cg.CGDisplayBounds.restype = CGRect
-            main = int(cg.CGMainDisplayID())
-            bounds = cg.CGDisplayBounds(ctypes.c_uint32(main))
-            if bounds.size.width <= 0 or bounds.size.height <= 0:
-                raise RuntimeError('LoginWindow display bounds are unavailable')
-            self.origin_x = float(bounds.origin.x)
-            self.origin_y = float(bounds.origin.y)
-            self.width = float(bounds.size.width)
-            self.height = float(bounds.size.height)
-        except Exception:
-            self.native.lib.zmb_login_input_close()
-            raise
+            raise RuntimeError(f'CoreHID LoginWindow input unavailable (rc={rc})')
         self.held_buttons: set[int] = set()
         self.held_modifiers: set[str] = set()
         self.last_nx = 0.5
         self.last_ny = 0.5
 
-    def _flags(self) -> int:
-        flags = 0
-        for key in self.held_modifiers:
-            flags |= self.MOD_FLAGS.get(key, 0)
-        return flags
-
     @staticmethod
     def _check(rc: int, operation: str) -> None:
         if int(rc) != 0:
-            raise RuntimeError(f'{operation} failed through IOHIDSystem (IOReturn=0x{int(rc) & 0xffffffff:08x})')
+            raise RuntimeError(f'{operation} failed through CoreHID HIDVirtualDevice (rc={int(rc)})')
 
-    def _point(self, nx: float, ny: float) -> tuple[int, int]:
-        self.last_nx = min(1.0, max(0.0, float(nx)))
-        self.last_ny = min(1.0, max(0.0, float(ny)))
-        x = int(round(self.origin_x + self.last_nx * max(0.0, self.width - 1.0)))
-        y = int(round(self.origin_y + self.last_ny * max(0.0, self.height - 1.0)))
-        return x, y
+    @staticmethod
+    def _axis(value: float) -> int:
+        return int(round(min(1.0, max(0.0, float(value))) * 32767.0))
+
+    def _button_mask(self) -> int:
+        mask = 0
+        if 1 in self.held_buttons:
+            mask |= 0x01
+        if 3 in self.held_buttons:
+            mask |= 0x02
+        if 2 in self.held_buttons:
+            mask |= 0x04
+        return mask
+
+    def _pointer_report(self, *, wheel: int = 0) -> None:
+        rc = self.native.lib.zmb_corehid_input_pointer(
+            self._axis(self.last_nx), self._axis(self.last_ny), self._button_mask(), int(wheel)
+        )
+        self._check(rc, 'login-window pointer report')
 
     def move(self, nx: float, ny: float) -> None:
-        x, y = self._point(nx, ny)
-        if 1 in self.held_buttons:
-            etype, button = self.LEFT_DRAGGED, 0
-        elif 3 in self.held_buttons:
-            etype, button = self.RIGHT_DRAGGED, 1
-        elif 2 in self.held_buttons:
-            etype, button = self.OTHER_DRAGGED, 2
-        else:
-            etype, button = self.MOUSE_MOVED, 0
-        rc = self.native.lib.zmb_login_input_pointer(etype, x, y, button, self._flags())
-        self._check(rc, 'login-window pointer move')
+        self.last_nx = min(1.0, max(0.0, float(nx)))
+        self.last_ny = min(1.0, max(0.0, float(ny)))
+        self._pointer_report()
 
     def button(self, button_num: int, down: bool, nx: float, ny: float) -> None:
-        x, y = self._point(nx, ny)
-        cg_button = self.BUTTONS.get(int(button_num))
-        if cg_button is None:
+        if int(button_num) not in (1, 2, 3):
             return
-        if button_num == 1:
-            etype = self.LEFT_DOWN if down else self.LEFT_UP
-        elif button_num == 3:
-            etype = self.RIGHT_DOWN if down else self.RIGHT_UP
-        else:
-            etype = self.OTHER_DOWN if down else self.OTHER_UP
-        rc = self.native.lib.zmb_login_input_pointer(etype, x, y, cg_button, self._flags())
-        self._check(rc, 'login-window mouse button')
+        self.last_nx = min(1.0, max(0.0, float(nx)))
+        self.last_ny = min(1.0, max(0.0, float(ny)))
         if down:
             self.held_buttons.add(int(button_num))
         else:
             self.held_buttons.discard(int(button_num))
+        self._pointer_report()
 
     def scroll(self, dx: int, dy: int) -> None:
-        rc = self.native.lib.zmb_login_input_scroll(int(dx), int(dy), self._flags())
-        self._check(rc, 'login-window scroll')
+        remaining = int(dy)
+        while remaining:
+            step = max(-127, min(127, remaining))
+            self._pointer_report(wheel=step)
+            remaining -= step
 
     def key(self, keysym: str, down: bool) -> None:
-        code = self.KEYCODES.get(keysym)
-        if code is None and len(keysym) == 1:
-            code = self.KEYCODES.get(keysym.lower())
-        if code is None:
+        usage = self.HID_USAGES.get(keysym)
+        if usage is None and len(keysym) == 1:
+            usage = self.HID_USAGES.get(keysym.lower())
+        if usage is None:
             return
-        is_mod = keysym in self.MOD_FLAGS
-        if is_mod and down:
-            self.held_modifiers.add(keysym)
-        elif is_mod and not down:
-            self.held_modifiers.discard(keysym)
-        rc = self.native.lib.zmb_login_input_key(int(code), 1 if down else 0, self._flags(), 1 if is_mod else 0)
-        self._check(rc, 'login-window keyboard event')
+        if keysym in self.MOD_FLAGS:
+            if down:
+                self.held_modifiers.add(keysym)
+            else:
+                self.held_modifiers.discard(keysym)
+        rc = self.native.lib.zmb_corehid_input_key(int(usage), 1 if down else 0)
+        self._check(rc, 'login-window keyboard report')
 
     def text(self, text: str) -> None:
-        # Normal printable keys arrive through KEY. TEXT is the Unicode fallback.
-        # Support the complete printable ASCII password set here without using
-        # clipboard/CGEvent at loginwindow; reject non-ASCII rather than silently
-        # typing the wrong password.
         for char in text:
             shift = False
             if 'a' <= char <= 'z' or '0' <= char <= '9':
@@ -647,15 +643,15 @@ class LoginWindowInput(MacInput):
                 self.key(key, False)
             except Exception:
                 pass
-        for button in list(self.held_buttons):
+        self.held_modifiers.clear()
+        if self.held_buttons:
+            self.held_buttons.clear()
             try:
-                self.button(button, False, self.last_nx, self.last_ny)
+                self._pointer_report()
             except Exception:
                 pass
-        self.held_modifiers.clear()
-        self.held_buttons.clear()
         try:
-            self.native.lib.zmb_login_input_close()
+            self.native.lib.zmb_corehid_input_close()
         except Exception:
             pass
 
@@ -680,10 +676,10 @@ class MacClipboard:
 def capability_probe_library() -> Path:
     """Return the Stage-B diagnostic dylib without loading it during normal runtime.
 
-    Keeping CoreHID in a separate dylib prevents the diagnostic-only macOS 26+
-    dependency from changing the normal Desktop/LoginWindow streamer path.  The
-    dylib is loaded into the existing app process so TCC and code-signing checks
-    observe the exact ZorinMacBridge Server identity, not a helper executable.
+    The probe dylib is loaded into the existing app process so TCC and
+    code-signing checks observe the exact ZorinMacBridge Server identity. Its
+    CoreHID implementation is the same source file used by the production
+    LoginWindow streamer payload.
     """
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
         candidate = Path(getattr(sys, '_MEIPASS')) / 'libzmb_capability_probe.dylib'
@@ -760,19 +756,16 @@ class NativeStreamerLibrary:
         self.lib.zmb_display_list_json.restype = ctypes.c_void_p
         self.lib.zmb_string_free.argtypes = [ctypes.c_void_p]
         self.lib.zmb_string_free.restype = None
-        # LoginWindow input uses IOHIDSystem rather than CGEvent.  These C
-        # shims are compiled into the same dylib as the streamer so the frozen
-        # app has one native payload to sign and validate.
-        self.lib.zmb_login_input_open.argtypes = []
-        self.lib.zmb_login_input_open.restype = ctypes.c_int32
-        self.lib.zmb_login_input_close.argtypes = []
-        self.lib.zmb_login_input_close.restype = None
-        self.lib.zmb_login_input_key.argtypes = [ctypes.c_uint16, ctypes.c_int32, ctypes.c_uint32, ctypes.c_int32]
-        self.lib.zmb_login_input_key.restype = ctypes.c_int32
-        self.lib.zmb_login_input_pointer.argtypes = [ctypes.c_uint32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, ctypes.c_uint32]
-        self.lib.zmb_login_input_pointer.restype = ctypes.c_int32
-        self.lib.zmb_login_input_scroll.argtypes = [ctypes.c_int32, ctypes.c_int32, ctypes.c_uint32]
-        self.lib.zmb_login_input_scroll.restype = ctypes.c_int32
+        # LoginWindow production input is an Apple-managed CoreHID virtual
+        # keyboard/pointer compiled into the same signed native payload.
+        self.lib.zmb_corehid_input_open.argtypes = []
+        self.lib.zmb_corehid_input_open.restype = ctypes.c_int32
+        self.lib.zmb_corehid_input_close.argtypes = []
+        self.lib.zmb_corehid_input_close.restype = None
+        self.lib.zmb_corehid_input_key.argtypes = [ctypes.c_uint16, ctypes.c_int32]
+        self.lib.zmb_corehid_input_key.restype = ctypes.c_int32
+        self.lib.zmb_corehid_input_pointer.argtypes = [ctypes.c_int32, ctypes.c_int32, ctypes.c_uint8, ctypes.c_int32]
+        self.lib.zmb_corehid_input_pointer.restype = ctypes.c_int32
 
     def _owned_string(self, fn) -> str:
         pointer = fn()

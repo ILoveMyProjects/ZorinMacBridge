@@ -1,10 +1,12 @@
 import Foundation
 import CoreGraphics
 import ScreenCaptureKit
+import CoreImage
+import CoreMedia
+import CoreVideo
 import ImageIO
 import Security
 import CryptoKit
-import CoreHID
 
 @_silgen_name("zmb_login_input_open")
 private func zmb_login_input_open() -> Int32
@@ -12,6 +14,14 @@ private func zmb_login_input_open() -> Int32
 private func zmb_login_input_close()
 @_silgen_name("zmb_login_input_key")
 private func zmb_login_input_key(_ keyCode: UInt16, _ down: Int32, _ flags: UInt32, _ modifier: Int32) -> Int32
+@_silgen_name("zmb_corehid_input_open")
+private func zmb_corehid_input_open() -> Int32
+@_silgen_name("zmb_corehid_input_close")
+private func zmb_corehid_input_close()
+@_silgen_name("zmb_corehid_input_key")
+private func zmb_corehid_input_key(_ usage: UInt16, _ down: Int32) -> Int32
+@_silgen_name("zmb_corehid_input_pointer")
+private func zmb_corehid_input_pointer(_ x: Int32, _ y: Int32, _ buttons: UInt8, _ wheel: Int32) -> Int32
 
 private final class ProbeResultBox<T>: @unchecked Sendable {
     private let lock = NSLock()
@@ -32,23 +42,57 @@ private final class ProbeResultBox<T>: @unchecked Sendable {
     }
 }
 
-private final class ProbeHIDDelegate: HIDVirtualDeviceDelegate, @unchecked Sendable {
-    func hidVirtualDevice(
-        _ device: HIDVirtualDevice,
-        receivedSetReportRequestOfType type: HIDReportType,
-        id: HIDReportID?,
-        data: Data
-    ) async throws {
-        // The capability probe does not expose writable output reports.
+private final class ProbeStreamReceiver: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private let frameSemaphore = DispatchSemaphore(value: 0)
+    private var imageBuffer: CVPixelBuffer?
+    private var streamError: Error?
+    private var completed = false
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
+        guard outputType == .screen, sampleBuffer.isValid else { return }
+        if let attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
+           let attachments = attachmentsArray.first,
+           let raw = attachments[.status] as? Int,
+           let status = SCFrameStatus(rawValue: raw),
+           status != .complete && status != .started {
+            return
+        }
+        guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        lock.lock()
+        if !completed {
+            completed = true
+            imageBuffer = buffer
+            lock.unlock()
+            frameSemaphore.signal()
+            return
+        }
+        lock.unlock()
     }
 
-    func hidVirtualDevice(
-        _ device: HIDVirtualDevice,
-        receivedGetReportRequestOfType type: HIDReportType,
-        id: HIDReportID?,
-        maxSize: Int
-    ) async throws -> Data {
-        Data(repeating: 0, count: min(maxSize, 8))
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        lock.lock()
+        if !completed {
+            completed = true
+            streamError = error
+            lock.unlock()
+            frameSemaphore.signal()
+            return
+        }
+        lock.unlock()
+    }
+
+    func wait(timeout: TimeInterval) throws -> CVPixelBuffer {
+        guard frameSemaphore.wait(timeout: .now() + timeout) == .success else {
+            throw ProbeError.timeout("SCStream first frame")
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        if let streamError { throw streamError }
+        guard let imageBuffer else {
+            throw NSError(domain: "ZorinMacBridgeCapabilityProbe", code: 14, userInfo: [NSLocalizedDescriptionKey: "SCStream callback returned no image buffer"])
+        }
+        return imageBuffer
     }
 }
 
@@ -126,23 +170,35 @@ private func waitForShareableContent(timeout: TimeInterval) throws -> SCShareabl
     return content
 }
 
-private func waitForScreenshot(filter: SCContentFilter, config: SCStreamConfiguration, timeout: TimeInterval) throws -> CGImage {
-    let semaphore = DispatchSemaphore(value: 0)
-    let box = ProbeResultBox<CGImage>()
-    SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) { image, error in
-        box.finish(value: image, error: error)
-        semaphore.signal()
+private func waitForStreamFrame(filter: SCContentFilter, config: SCStreamConfiguration, timeout: TimeInterval) throws -> CGImage {
+    let receiver = ProbeStreamReceiver()
+    let queue = DispatchQueue(label: "com.ilovemyprojects.zorinmacbridge.probe.capture")
+    let stream = SCStream(filter: filter, configuration: config, delegate: receiver)
+    try stream.addStreamOutput(receiver, type: .screen, sampleHandlerQueue: queue)
+
+    let startSemaphore = DispatchSemaphore(value: 0)
+    let startBox = ProbeResultBox<Bool>()
+    stream.startCapture { error in
+        startBox.finish(value: error == nil, error: error)
+        startSemaphore.signal()
     }
-    guard semaphore.wait(timeout: .now() + timeout) == .success else {
-        throw ProbeError.timeout("SCScreenshotManager.captureImage")
+    guard startSemaphore.wait(timeout: .now() + 4.0) == .success else {
+        stream.stopCapture(completionHandler: nil)
+        throw ProbeError.timeout("SCStream.startCapture")
     }
-    let (image, error) = box.snapshot()
-    if let error { throw error }
-    guard let image else {
-        throw NSError(domain: "ZorinMacBridgeCapabilityProbe", code: 11, userInfo: [NSLocalizedDescriptionKey: "screenshot callback returned no CGImage"])
+    let (_, startError) = startBox.snapshot()
+    if let startError { throw startError }
+
+    defer { stream.stopCapture(completionHandler: nil) }
+    let buffer = try receiver.wait(timeout: timeout)
+    let ciImage = CIImage(cvPixelBuffer: buffer)
+    let context = CIContext(options: nil)
+    guard let image = context.createCGImage(ciImage, from: ciImage.extent) else {
+        throw NSError(domain: "ZorinMacBridgeCapabilityProbe", code: 15, userInfo: [NSLocalizedDescriptionKey: "could not convert SCStream frame to CGImage"])
     }
     return image
 }
+
 
 private func imageLumaRange(_ image: CGImage) -> Int {
     let width = 64
@@ -214,8 +270,11 @@ private func runCaptureProbe(report: inout ProbeReport, imageURL: URL) -> Bool {
         config.showsCursor = true
         config.pixelFormat = kCVPixelFormatType_32BGRA
         let filter = SCContentFilter(display: display, excludingWindows: [])
-        let image = try waitForScreenshot(filter: filter, config: config, timeout: 8.0)
-        report.add("capture_screenshot", "PASS")
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 30)
+        config.queueDepth = 2
+        config.capturesAudio = false
+        let image = try waitForStreamFrame(filter: filter, config: config, timeout: 5.0)
+        report.add("capture_scstream_first_frame", "PASS")
         report.add("capture_width", image.width)
         report.add("capture_height", image.height)
         let lumaRange = imageLumaRange(image)
@@ -245,90 +304,75 @@ private func runCaptureProbe(report: inout ProbeReport, imageURL: URL) -> Bool {
     }
 }
 
-private func coreHIDShiftProbe() async -> (String, String) {
-    let descriptor = Data([
-        0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,
-        0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7,
-        0x15, 0x00, 0x25, 0x01, 0x75, 0x01,
-        0x95, 0x08, 0x81, 0x02,
-        0x95, 0x01, 0x75, 0x08, 0x81, 0x01,
-        0x95, 0x05, 0x75, 0x01, 0x05, 0x08,
-        0x19, 0x01, 0x29, 0x05, 0x91, 0x02,
-        0x95, 0x01, 0x75, 0x03, 0x91, 0x01,
-        0x95, 0x06, 0x75, 0x08, 0x15, 0x00,
-        0x25, 0x65, 0x05, 0x07, 0x19, 0x00,
-        0x29, 0x65, 0x81, 0x00, 0xC0
-    ])
-    let properties = HIDVirtualDevice.Properties(
-        descriptor: descriptor,
-        vendorID: 0x5A4D,
-        productID: 0x0001,
-        transport: nil,
-        product: "ZMB Capability Probe Keyboard",
-        manufacturer: "ZorinMacBridge",
-        modelNumber: nil,
-        versionNumber: 1,
-        serialNumber: "stage-b",
-        uniqueID: "zmb-stage-b-keyboard",
-        locationID: nil,
-        localizationCode: nil,
-        extraProperties: nil
-    )
-    guard let device = HIDVirtualDevice(properties: properties) else {
-        return ("FAIL_CREATE", "HIDVirtualDevice initializer returned nil")
-    }
-    let delegate = ProbeHIDDelegate()
-    await device.activate(delegate: delegate)
-
-    do {
-        let clock = SuspendingClock()
-        let before = CGEventSource.flagsState(.combinedSessionState).contains(.maskShift)
-        guard !before else {
-            return ("INCONCLUSIVE", "Shift modifier was already active before the probe")
-        }
-
-        try await device.dispatchInputReport(
-            data: Data([0x02, 0, 0, 0, 0, 0, 0, 0]),
-            timestamp: clock.now
-        )
-        try await Task.sleep(nanoseconds: 150_000_000)
-        let downSeen = CGEventSource.flagsState(.combinedSessionState).contains(.maskShift)
-        try await device.dispatchInputReport(
-            data: Data(repeating: 0, count: 8),
-            timestamp: clock.now
-        )
-        try await Task.sleep(nanoseconds: 150_000_000)
-        let upSeen = !CGEventSource.flagsState(.combinedSessionState).contains(.maskShift)
-        if downSeen && upSeen {
-            return ("PASS", "virtual HID Shift changed combined session modifier state and released cleanly")
-        }
-        return ("FAIL_STATE", "virtual HID report dispatched but modifier state did not toggle as expected down=\(downSeen ? 1 : 0) up=\(upSeen ? 1 : 0)")
-    } catch {
-        return ("FAIL_DISPATCH", errorText(error))
-    }
+private func coreHIDAxis(_ value: CGFloat, origin: CGFloat, length: CGFloat) -> Int32 {
+    guard length > 1 else { return 16384 }
+    let normalized = min(1.0, max(0.0, Double((value - origin) / length)))
+    return Int32((normalized * 32767.0).rounded())
 }
 
 private func runCoreHIDProbe(report: inout ProbeReport) -> Bool {
-    let semaphore = DispatchSemaphore(value: 0)
-    let box = ProbeResultBox<(String, String)>()
-    Task {
-        let result = await coreHIDShiftProbe()
-        box.finish(value: result, error: nil)
-        semaphore.signal()
-    }
-    guard semaphore.wait(timeout: .now() + 8.0) == .success else {
-        report.add("input_corehid_result", "TIMEOUT")
+    let openRC = zmb_corehid_input_open()
+    report.add("input_corehid_open_rc", Int(openRC))
+    guard openRC == 0 else {
+        report.add("input_corehid_result", "FAIL_OPEN")
         return false
     }
-    let (value, _) = box.snapshot()
-    guard let value else {
-        report.add("input_corehid_result", "FAIL_NO_RESULT")
+    defer { zmb_corehid_input_close() }
+
+    let initialShift = CGEventSource.flagsState(.combinedSessionState).contains(.maskShift)
+    guard !initialShift else {
+        report.add("input_corehid_keyboard_result", "INCONCLUSIVE_SHIFT_ALREADY_ACTIVE")
+        report.add("input_corehid_result", "INCONCLUSIVE")
         return false
     }
-    report.add("input_corehid_result", value.0)
-    report.add("input_corehid_detail", value.1)
-    return value.0 == "PASS"
+
+    let downRC = zmb_corehid_input_key(0xE1, 1)
+    usleep(150_000)
+    let downSeen = CGEventSource.flagsState(.combinedSessionState).contains(.maskShift)
+    let upRC = zmb_corehid_input_key(0xE1, 0)
+    usleep(150_000)
+    let upSeen = !CGEventSource.flagsState(.combinedSessionState).contains(.maskShift)
+    report.add("input_corehid_shift_down_rc", Int(downRC))
+    report.add("input_corehid_shift_up_rc", Int(upRC))
+    report.add("input_corehid_shift_down_seen", downSeen)
+    report.add("input_corehid_shift_up_seen", upSeen)
+    let keyboardOK = downRC == 0 && upRC == 0 && downSeen && upSeen
+    report.add("input_corehid_keyboard_result", keyboardOK ? "PASS" : "FAIL")
+
+    var pointerOK = false
+    if let beforeEvent = CGEvent(source: nil) {
+        let before = beforeEvent.location
+        let bounds = CGDisplayBounds(CGMainDisplayID())
+        if bounds.width > 40 && bounds.height > 40 {
+            let localX = before.x - bounds.origin.x
+            let targetLocalX = localX < bounds.width - 24 ? localX + 16 : max(8, localX - 16)
+            let target = CGPoint(x: bounds.origin.x + targetLocalX, y: before.y)
+            let targetX = coreHIDAxis(target.x, origin: bounds.origin.x, length: bounds.width)
+            let targetY = coreHIDAxis(target.y, origin: bounds.origin.y, length: bounds.height)
+            let pointerRC = zmb_corehid_input_pointer(targetX, targetY, 0, 0)
+            usleep(180_000)
+            let after = CGEvent(source: nil)?.location ?? before
+            let moved = hypot(after.x - before.x, after.y - before.y) >= 2.0
+            let restoreX = coreHIDAxis(before.x, origin: bounds.origin.x, length: bounds.width)
+            let restoreY = coreHIDAxis(before.y, origin: bounds.origin.y, length: bounds.height)
+            let restoreRC = zmb_corehid_input_pointer(restoreX, restoreY, 0, 0)
+            usleep(120_000)
+            report.add("input_corehid_pointer_rc", Int(pointerRC))
+            report.add("input_corehid_pointer_restore_rc", Int(restoreRC))
+            report.add("input_corehid_pointer_moved", moved)
+            pointerOK = pointerRC == 0 && restoreRC == 0 && moved
+        }
+    }
+    report.add("input_corehid_pointer_result", pointerOK ? "PASS" : "FAIL")
+
+    let ok = keyboardOK && pointerOK
+    report.add("input_corehid_result", ok ? "PASS" : "FAIL")
+    report.add("input_corehid_detail", ok
+        ? "production CoreHID keyboard and absolute pointer reports were observed by LoginWindow"
+        : "production CoreHID keyboard and/or pointer proof failed")
+    return ok
 }
+
 
 private func hexIOReturn(_ value: Int32) -> String {
     String(format: "0x%08x", UInt32(bitPattern: value))

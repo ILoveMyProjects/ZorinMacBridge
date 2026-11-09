@@ -12,6 +12,20 @@ from settings import load_server_password_verifier, save_server_password, update
 MIN_SESSION_PASSWORD = 12
 
 
+def _prompt_text(prompt: str) -> str:
+    """Read interactive installer input from the controlling terminal when stdin is a pipe."""
+    try:
+        with open('/dev/tty', 'r+', encoding='utf-8', buffering=1) as tty:
+            tty.write(prompt)
+            tty.flush()
+            line = tty.readline()
+            if line == '':
+                raise EOFError(f'No terminal input available for prompt: {prompt}')
+            return line.rstrip('\n')
+    except OSError:
+        return input(prompt)
+
+
 def _required(message: str) -> None:
     prefix = '\033[1;31mREQUIRED\033[0m' if sys.stderr.isatty() else 'REQUIRED'
     print(f'{prefix}: {message}', file=sys.stderr)
@@ -24,7 +38,7 @@ def _prompt_auto_update_mode() -> str:
     print('  2) Notify only         — check every 6 hours; install only from Zorin')
     print('  3) Install automatically — check every 6 hours and install verified official releases')
     while True:
-        answer = input('Choose [1/2/3, default 3]: ').strip() or '3'
+        answer = _prompt_text('Choose [1/2/3, default 3]: ').strip() or '3'
         mode = {'1': 'off', '2': 'notify', '3': 'install'}.get(answer)
         if mode:
             proc = subprocess.run(
@@ -91,7 +105,7 @@ def run_terminal_setup() -> int:
     if existing is None:
         _prompt_session_password()
     else:
-        answer = input('A ZorinMacBridge session password is already configured. Replace it? [y/N]: ').strip().lower()
+        answer = _prompt_text('A ZorinMacBridge session password is already configured. Replace it? [y/N]: ').strip().lower()
         if answer in {'y', 'yes'}:
             _prompt_session_password()
         else:

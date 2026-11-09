@@ -7,7 +7,7 @@ installer = (ROOT / 'install-macos.sh').read_text(encoding='utf-8')
 updater = (ROOT / 'updates.py').read_text(encoding='utf-8')
 source_gate = (ROOT / 'scripts/verify-release-source.sh').read_text(encoding='utf-8')
 
-# No paid Apple secret may be mandatory.
+# Managed Apple signing is optional and may never make the whole tagged release unavailable.
 for forbidden in (
     'Missing secret: MACOS_DEVELOPER_ID_P12_BASE64',
     'Missing secret: MACOS_DEVELOPER_ID_P12_PASSWORD',
@@ -23,6 +23,10 @@ assert 'release/ZorinMacBridge-Server_macOS-arm64.dmg' in workflow
 # Developer ID is optional, not removed.
 assert 'MACOS_RELEASE_SIGNING_MODE=developer-id' in workflow
 assert 'scripts/sign-macos-release.sh' in workflow
+assert 'continue-on-error: true' in workflow
+assert 'steps.managed_signing.outcome' in workflow
+assert 'falling back to the working Aqua/ad-hoc macOS artifact' in workflow
+assert 'ZorinMacBridge-Server_macOS-arm64-signing.txt' in workflow
 
 # Install/update converts free transport signing into one stable per-Mac ad-hoc DR.
 assert '--local-sign-app "$STAGED"' in installer
@@ -33,6 +37,6 @@ assert 'stage_and_sign' in updater
 assert "'prelogin_release_identity'" in requirements
 assert "'prelogin_release_identity_ready'" in requirements
 assert 'pre-login READY requires Apple-managed Developer ID/provisioning' in source_gate
-assert 'free Aqua-only signing path' in source_gate
+assert 'resilient Aqua fallback' in source_gate
 
-print('free Aqua signing + managed pre-login gate regression checks: OK')
+print('resilient Aqua release + managed pre-login upgrade regression checks: OK')
