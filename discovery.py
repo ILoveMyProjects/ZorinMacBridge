@@ -73,7 +73,10 @@ def desktop_connect_strategy(*, desktop_available: bool, system_available: bool,
     misleading and ineffective.  Wake is reserved for a saved/offline Mac
     where no live System service is visible.
     """
-    if desktop_available and not paired_only:
+    # A successful live TCP probe is stronger evidence than the historical
+    # saved/offline discovery flag. Once Desktop is reachable, connect directly
+    # even if Bonjour has not yet refreshed the paired-only row after reboot.
+    if desktop_available:
         return 'connect'
     if system_available and not paired_only:
         return 'recover-online'

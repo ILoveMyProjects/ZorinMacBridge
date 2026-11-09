@@ -10,6 +10,7 @@ from zmb_session_lifecycle import (
     PipelineProgress,
     PreloginSessionCoordinator,
     make_capture_backend_state,
+    make_capture_failure_state,
     make_handoff_state,
     make_pipeline_state,
     parse_session_state,
@@ -77,6 +78,10 @@ def test_session_state_round_trip():
     backend = parse_session_state(make_capture_backend_state('scstream'))
     assert backend.kind == 'capture-backend'
     assert backend.backend == 'scstream'
+
+    failure = parse_session_state(make_capture_failure_state('system-screencapture-failed: denied'))
+    assert failure.kind == 'capture-failure'
+    assert failure.reason == 'system-screencapture-failed: denied'
 
     future = make_pipeline_state('future-native-stage')
     assert future == {'state': 'pipeline', 'stage': 'future-native-stage'}

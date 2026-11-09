@@ -952,6 +952,8 @@ class ClientApp:
 
                 stat_started = adapt_started = time.monotonic()
                 stat_bytes = stat_decoded = stat_dropped = 0
+                video_generation_frames = 0
+                first_frame_deadline = time.monotonic() + 10.0 if self.prelogin_session else None
                 adapt_decoded = adapt_dropped = 0
                 server_stats = {}
 
@@ -984,6 +986,7 @@ class ClientApp:
                                         self.remote_image_size = (img.width, img.height)
                                         dropped = bool(self._queue_video_image(img))
                                         total_frames += 1
+                                        video_generation_frames += 1
                                         stat_decoded += 1
                                         adapt_decoded += 1
                                         if dropped:
@@ -1013,6 +1016,9 @@ class ClientApp:
                                 elif event.kind == 'capture-backend' and event.backend:
                                     self._log('INFO', f'Pre-login capture backend: {event.backend}.')
                                     self.ui_queue.put(('prelogin_capture_backend', event.backend))
+                                elif event.kind == 'capture-failure' and event.reason:
+                                    self._log('ERROR', f'Pre-login capture failed: {event.reason}.')
+                                    self.ui_queue.put(('prelogin_capture_failure', event.reason))
                             elif kind == VIDEO_STATS:
                                 try:
                                     decoded_stats = unpack_json(payload)
@@ -1028,6 +1034,8 @@ class ClientApp:
                         break
 
                     now = time.monotonic()
+                    if first_frame_deadline is not None and video_generation_frames == 0 and now >= first_frame_deadline:
+                        raise TimeoutError('Pre-login video produced no first frame within 10 seconds')
                     stat_elapsed = now - stat_started
                     if stat_elapsed >= 2.0:
                         local_fps = stat_decoded / max(0.001, stat_elapsed)

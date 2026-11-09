@@ -1431,8 +1431,9 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                 if sid and live_host:
                     save_profile(sid, live_host, active_profile)
             self.selected_desktop_available = True
+            self.selected_paired_only = False
             self.status_var.set('Mac woke up — connecting Desktop…')
-            self._log('INFO', 'Wake-on-Connect: Mac/Desktop became reachable; continuing normal Desktop connection.')
+            self._log('INFO', 'Wake-on-Connect: Mac/Desktop became reachable; clearing saved/offline state and continuing normal Desktop connection.')
             GLib.timeout_add(100, lambda: (self.connect_remote(), GLib.SOURCE_REMOVE)[1])
             return False
 
@@ -1636,8 +1637,15 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                     if self.connected and self.prelogin_session and not self.prelogin_video_ready:
                         if backend == 'scstream':
                             self.status_var.set('Connected — starting LoginWindow SCStream…')
+                        elif backend == 'screencapture-cli':
+                            self.status_var.set('Connected — trying macOS LoginWindow system capture…')
                         elif backend == 'screenshot-manager':
                             self.status_var.set('Connected — trying LoginWindow screenshot fallback…')
+                elif kind == 'prelogin_capture_failure':
+                    reason = str(item[1] or '') if len(item) > 1 else 'unknown capture failure'
+                    if self.connected and self.prelogin_session and not self.prelogin_video_ready:
+                        self.status_var.set('LoginWindow video unavailable — ' + reason)
+                    self._log('ERROR', 'LoginWindow capture failed: ' + reason)
                 elif kind == 'prelogin_video_ready':
                     self.prelogin_video_ready = True
                     if self.connected and self.prelogin_session:

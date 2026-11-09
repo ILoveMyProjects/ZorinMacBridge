@@ -9,7 +9,9 @@ CLIENT = (ROOT / 'linux_client.py').read_text(encoding='utf-8')
 assert 'CGDisplayStream' not in SWIFT
 assert 'runPreloginSCStreamWithScreenshotFallback' in SWIFT
 assert 'SCStream(filter: filter, configuration: configuration, delegate: self)' in SWIFT
-assert 'SCScreenshotManager.captureSampleBuffer' in SWIFT
+assert '/usr/sbin/screencapture' in SWIFT
+assert 'process.arguments = ["-x", "-m", "-t", "png", fileURL.path]' in SWIFT
+assert 'makePixelBuffer(from: image' in SWIFT
 
 # The Python/native ABI tells Swift which capture mode it is in.
 assert '1 if prelogin else 0' in SERVER
@@ -21,6 +23,8 @@ assert 'permission = None if prelogin else' not in SERVER
 
 # Backend selection is forwarded to the client for real-device diagnostics.
 assert "line.startswith('prelogin-backend=')" in SERVER
+assert "line.startswith('prelogin-failure=')" in SERVER
 assert "Pre-login capture backend: {event.backend}." in CLIENT
+assert "Pre-login capture failed: {event.reason}." in CLIENT
 
 print('pre-login ScreenCaptureKit recovery regression tests: OK')

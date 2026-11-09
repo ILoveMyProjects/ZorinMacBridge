@@ -8,6 +8,7 @@ sys.path.insert(0, str(ROOT))
 from discovery import desktop_connect_strategy
 
 assert desktop_connect_strategy(desktop_available=True, system_available=True) == "connect"
+assert desktop_connect_strategy(desktop_available=True, system_available=False, paired_only=True) == "connect"
 assert desktop_connect_strategy(desktop_available=False, system_available=True) == "recover-online"
 assert desktop_connect_strategy(desktop_available=False, system_available=False) == "wake"
 assert desktop_connect_strategy(desktop_available=False, system_available=True, paired_only=True) == "wake"
@@ -51,6 +52,8 @@ gtk = (ROOT / "linux_client_gtk.py").read_text(encoding="utf-8")
 assert "def _wake_sleeping_mac_then_connect" in gtk
 assert "send_wake_on_lan(mac, rounds=5)" in gtk
 assert "Mac woke up — connecting Desktop…" in gtk
+assert "self.selected_paired_only = False" in gtk
+assert "clearing saved/offline state" in gtk
 assert "if self._wake_sleeping_mac_then_connect():" in gtk
 assert "desktop_connect_strategy(" in gtk
 assert "if strategy == 'recover-online':" in gtk

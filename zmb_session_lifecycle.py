@@ -154,6 +154,7 @@ class SessionStateEvent:
     target: str = ''
     user: str = ''
     backend: str = ''
+    reason: str = ''
     generation: int | None = None
 
 
@@ -168,6 +169,10 @@ def make_handoff_state(*, user: str, generation: int) -> dict[str, Any]:
 
 def make_capture_backend_state(backend: str) -> dict[str, str]:
     return {'state': 'capture-backend', 'backend': str(backend or '')}
+
+
+def make_capture_failure_state(reason: str) -> dict[str, str]:
+    return {'state': 'capture-failure', 'reason': str(reason or '')}
 
 
 def make_pipeline_state(stage: str) -> dict[str, str]:
@@ -191,6 +196,11 @@ def parse_session_state(value: Any) -> SessionStateEvent:
         backend = str(value.get('backend') or '')
         if backend:
             return SessionStateEvent('capture-backend', backend=backend)
+        return SessionStateEvent('unknown')
+    if state == 'capture-failure':
+        reason = str(value.get('reason') or '')
+        if reason:
+            return SessionStateEvent('capture-failure', reason=reason)
         return SessionStateEvent('unknown')
     if state == 'handoff' and str(value.get('target') or '') == 'aqua':
         generation = value.get('generation')

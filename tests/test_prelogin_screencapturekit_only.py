@@ -8,15 +8,17 @@ server = (ROOT / 'mac_server.py').read_text(encoding='utf-8')
 # entirely on supported ScreenCaptureKit APIs.
 assert 'CGDisplayStream' not in swift
 assert 'SCStream(filter: filter, configuration: configuration, delegate: self)' in swift
-assert 'SCScreenshotManager.captureSampleBuffer' in swift
+assert '/usr/sbin/screencapture' in swift
 
-# LoginWindow uses continuous SCStream first and falls back only if the initial
+# LoginWindow uses continuous SCStream first and falls back to the system
+# screencapture utility in the same LoginWindow bootstrap session if the initial
 # frame/encode proof does not arrive quickly.
 assert 'runPreloginSCStreamWithScreenshotFallback' in swift
 assert 'prelogin-backend=scstream' in swift
 assert 'prelogin-scstream-no-frame-within=2s' in swift
-assert 'prelogin-backend=screenshot-manager' in swift
-assert 'prelogin-screenshot-fallback-started' in swift
+assert 'prelogin-backend=screencapture-cli' in swift
+assert 'prelogin-screencapture-cli-started' in swift
+assert 'prelogin-failure=system-screencapture-failed:' in swift
 
 # Both backends feed the existing VideoToolbox pipeline and Stage D progress.
 for stage in ('capture-frame', 'pixel-buffer', 'encode-submit', 'h264-written'):

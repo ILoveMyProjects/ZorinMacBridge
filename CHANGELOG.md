@@ -1,3 +1,11 @@
+## 0.15.22 - reboot recovery fix
+
+- Fixes the post-reboot `saved/offline -> Wake -> reachable -> Wake` loop: a confirmed live Desktop endpoint now wins over stale paired-only discovery state, and successful wake recovery clears `selected_paired_only` before reconnect.
+- Keeps LoginWindow `SCStream` as the primary capture backend but no longer depends on a second ScreenCaptureKit API when the first frame never arrives.
+- Adds a free LoginWindow fallback through `/usr/sbin/screencapture -m` in the existing LoginWindow launchd/Mach bootstrap session, converts the resulting image to a `CVPixelBuffer`, and reuses the existing VideoToolbox/H.264 transport.
+- Adds bounded system-capture attempts and explicit `capture-failure` session state so the client reports a real failure instead of remaining indefinitely on `waiting for first frame`.
+- Preserves the macOS 26+/Apple-Silicon target, free signing path, GitHub-built `.deb`/`.dmg`, Stage D control/token/handoff logic, and the no-VNC/no-port-5900 architecture.
+
 ## 0.15.21 - recover LoginWindow first-frame capture
 
 - Uses supported ScreenCaptureKit `SCStream` as the primary LoginWindow capture backend on macOS 26+.

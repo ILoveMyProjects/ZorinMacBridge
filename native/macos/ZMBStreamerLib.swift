@@ -564,16 +564,16 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         } catch {
             clearStreamIfCurrent(primary)
             log("prelogin-scstream-start-error=\(error.localizedDescription)")
-            log("prelogin-backend=screenshot-manager")
-            try await runPreloginScreenshotLoop(filter: filter, configuration: configuration)
+            try await runPreloginSystemScreenshotLoop(width: width, height: height)
             return
         }
 
-        // SCStream is the supported continuous-capture API and is the primary
-        // LoginWindow backend.  Give it a short proof window for the initial
-        // .started/.complete sample.  A static login screen must still produce
-        // the first sample; if WindowServer does not deliver one, fall back to
-        // the one-shot ScreenCaptureKit API instead of hanging forever.
+        // LoginWindow can accept SCStream.startCapture() yet never deliver the
+        // initial frame. Do not leave the remote client on "waiting for first
+        // frame" forever: after a short proof window switch to the system
+        // screencapture utility, which is designed to operate in loginwindow's
+        // Mach bootstrap hierarchy and therefore gives us a second, independent
+        // capture path without Screen Sharing/port 5900 or paid services.
         let proofDeadline = DispatchTime.now().uptimeNanoseconds + 2_000_000_000
         while true {
             let (isFinished, encodeSubmitted) = withStateLock {
@@ -581,7 +581,6 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             if isFinished { return }
             if encodeSubmitted {
-                // Keep the continuous stream alive until requestStop() closes it.
                 while !withStateLock({ finished }) {
                     try await Task.sleep(nanoseconds: 100_000_000)
                 }
@@ -594,13 +593,13 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         log("prelogin-scstream-no-frame-within=2s")
         try? await primary.stopCapture()
         clearStreamIfCurrent(primary)
-        log("prelogin-backend=screenshot-manager")
-        try await runPreloginScreenshotLoop(filter: filter, configuration: configuration)
+        try await runPreloginSystemScreenshotLoop(width: width, height: height)
     }
 
-    private func runPreloginScreenshotLoop(filter: SCContentFilter, configuration: SCStreamConfiguration) async throws {
-        log("prelogin-screenshot-fallback-started fps=\(min(fps, 10)) bitrate=\(bitrate)")
-        let pollFPS = max(1, min(Int(fps), 10))
+    private func runPreloginSystemScreenshotLoop(width: Int, height: Int) async throws {
+        log("prelogin-backend=screencapture-cli")
+        log("prelogin-screencapture-cli-started fps=2 bitrate=\(bitrate)")
+        let pollFPS = 2
         let duration = CMTime(value: 1, timescale: CMTimeScale(pollFPS))
         let sleepNS = UInt64(1_000_000_000 / pollFPS)
         var frameIndex: Int64 = 0
@@ -612,20 +611,12 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             if isFinished { return }
             guard let activeCompression else {
-                throw NSError(domain: "ZorinMacBridge", code: 41, userInfo: [NSLocalizedDescriptionKey: "VideoToolbox encoder disappeared during pre-login capture"])
+                throw NSError(domain: "ZorinMacBridge", code: 51, userInfo: [NSLocalizedDescriptionKey: "VideoToolbox encoder disappeared during LoginWindow system capture"])
             }
 
             do {
-                let sampleBuffer = try await SCScreenshotManager.captureSampleBuffer(
-                    contentFilter: filter,
-                    configuration: configuration
-                )
-                let stoppedAfterCapture = withStateLock { finished }
-                if stoppedAfterCapture { return }
-
-                guard sampleBuffer.isValid, let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-                    throw NSError(domain: "ZorinMacBridge", code: 42, userInfo: [NSLocalizedDescriptionKey: "ScreenCaptureKit screenshot contained no image buffer"])
-                }
+                let image = try await captureLoginWindowWithSystemTool(timeoutSeconds: 1.4)
+                let imageBuffer = try makePixelBuffer(from: image, width: width, height: height)
                 markPreloginStage("capture-frame")
                 markPreloginStage("pixel-buffer")
                 consecutiveFailures = 0
@@ -637,12 +628,107 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
             } catch {
                 consecutiveFailures += 1
-                log("prelogin-screenshot-error count=\(consecutiveFailures) error=\(error.localizedDescription)")
-                if consecutiveFailures >= 3 { throw error }
+                let clean = error.localizedDescription.replacingOccurrences(of: "\n", with: " ")
+                log("prelogin-screencapture-cli-error count=\(consecutiveFailures) error=\(clean)")
+                if consecutiveFailures >= 2 {
+                    log("prelogin-failure=system-screencapture-failed: \(clean)")
+                    throw error
+                }
             }
 
             try await Task.sleep(nanoseconds: sleepNS)
         }
+    }
+
+    private func captureLoginWindowWithSystemTool(timeoutSeconds: Double) async throws -> CGImage {
+        let fileURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("zmb-loginwindow-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        process.arguments = ["-x", "-m", "-t", "png", fileURL.path]
+        let stderr = Pipe()
+        process.standardError = stderr
+        process.standardOutput = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            throw NSError(domain: "ZorinMacBridge", code: 52, userInfo: [NSLocalizedDescriptionKey: "could not start /usr/sbin/screencapture: \(error.localizedDescription)"])
+        }
+
+        let deadline = Date().addingTimeInterval(max(0.5, timeoutSeconds))
+        while process.isRunning && Date() < deadline && !withStateLock({ finished }) {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        if process.isRunning {
+            process.terminate()
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            if process.isRunning {
+                _ = Darwin.kill(process.processIdentifier, SIGKILL)
+            }
+            process.waitUntilExit()
+            throw NSError(domain: "ZorinMacBridge", code: 53, userInfo: [NSLocalizedDescriptionKey: "system screencapture timed out in LoginWindow session"])
+        }
+        if withStateLock({ finished }) {
+            throw CancellationError()
+        }
+
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let data = stderr.fileHandleForReading.readDataToEndOfFile()
+            let detail = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            throw NSError(
+                domain: "ZorinMacBridge",
+                code: 54,
+                userInfo: [NSLocalizedDescriptionKey: detail.isEmpty ? "system screencapture exited with status \(process.terminationStatus)" : detail]
+            )
+        }
+        let imageData = try Data(contentsOf: fileURL)
+        guard let bitmap = NSBitmapImageRep(data: imageData), let cgImage = bitmap.cgImage else {
+            throw NSError(domain: "ZorinMacBridge", code: 55, userInfo: [NSLocalizedDescriptionKey: "system screencapture produced no readable image"])
+        }
+        return cgImage
+    }
+
+    private func makePixelBuffer(from image: CGImage, width: Int, height: Int) throws -> CVPixelBuffer {
+        var buffer: CVPixelBuffer?
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferCGImageCompatibilityKey: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+        ]
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            height,
+            kCVPixelFormatType_32BGRA,
+            attrs as CFDictionary,
+            &buffer
+        )
+        guard status == kCVReturnSuccess, let buffer else {
+            throw NSError(domain: "ZorinMacBridge", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "CVPixelBufferCreate failed for LoginWindow screenshot: \(status)"])
+        }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else {
+            throw NSError(domain: "ZorinMacBridge", code: 56, userInfo: [NSLocalizedDescriptionKey: "LoginWindow pixel buffer has no base address"])
+        }
+        guard let context = CGContext(
+            data: base,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else {
+            throw NSError(domain: "ZorinMacBridge", code: 57, userInfo: [NSLocalizedDescriptionKey: "could not create LoginWindow bitmap context"])
+        }
+        context.interpolationQuality = .high
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return buffer
     }
 
     private func installStreamUnlessFinished(_ newStream: SCStream) -> Bool {

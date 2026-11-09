@@ -27,7 +27,7 @@ from pathlib import Path, PurePosixPath
 
 from zmb_session_lifecycle import (
     PRELOGIN_CONTROL_REPLACEMENT_GRACE_SECONDS, PreloginControlLease,
-    PreloginSessionCoordinator, make_capture_backend_state, make_handoff_state, make_pipeline_state,
+    PreloginSessionCoordinator, make_capture_backend_state, make_capture_failure_state, make_handoff_state, make_pipeline_state,
 )
 
 from protocol import (
@@ -1049,6 +1049,8 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
                             session_events.put(make_pipeline_state(line.split('=', 1)[1]))
                         elif prelogin and line.startswith('prelogin-backend='):
                             session_events.put(make_capture_backend_state(line.split('=', 1)[1]))
+                        elif prelogin and line.startswith('prelogin-failure='):
+                            session_events.put(make_capture_failure_state(line.split('=', 1)[1]))
                         log('[video/native] ' + line)
         except Exception:
             pass
