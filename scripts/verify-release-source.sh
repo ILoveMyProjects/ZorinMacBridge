@@ -86,17 +86,24 @@ grep -Fq "'prelogin_release_identity_ready'" mac_requirements.py || {
   exit 1
 }
 
-# Production LoginWindow keeps managed ScreenCaptureKit/CoreHID as primary,
-# but CoreHID creation failure must not kill the control session.  The bundled
-# native IOHIDSystem/kCGSessionEventTap bridge is the in-process fallback.
-grep -Fq 'prelogin-backend=screencapturekit-persistent' native/macos/ZMBStreamerLib.swift || {
-  echo 'ERROR: production pre-login video is not using managed ScreenCaptureKit.' >&2
+# Production LoginWindow keeps ScreenCaptureKit SCStream/CoreHID as primary.
+# Capture may fall through supported ScreenCaptureKit screenshot APIs only after
+# the prior candidate fails to write a real H.264 access unit. Input fallback is
+# independently delivery-probed.
+grep -Fq 'screencapturekit-persistent' native/macos/ZMBStreamerLib.swift || {
+  echo 'ERROR: production pre-login video lost its primary ScreenCaptureKit backend.' >&2
   exit 1
 }
 grep -Fq 'startPreloginStreamBounded' native/macos/ZMBStreamerLib.swift || {
   echo 'ERROR: pre-login SCStream startup lost its bounded startup contract.' >&2
   exit 1
 }
+for marker in 'startPreloginCaptureMatrix()' 'SCScreenshotManager.captureSampleBuffer' 'SCScreenshotManager.captureImage(in: rect)' 'preloginAccessUnitWritten = true'; do
+  grep -Fq "$marker" native/macos/ZMBStreamerLib.swift || {
+    echo "ERROR: pre-login capture matrix marker missing: $marker" >&2
+    exit 1
+  }
+done
 if grep -Fq 'screencapture-cli' native/macos/ZMBStreamerLib.swift || grep -Fq '/usr/sbin/screencapture' native/macos/ZMBStreamerLib.swift; then
   echo 'ERROR: obsolete LoginWindow system-screenshot backend returned to production.' >&2
   exit 1
@@ -198,6 +205,18 @@ grep -Fq 'Refusing to replace a pre-login-capable Developer ID installation with
   exit 1
 }
 
+# 0.15.36: cold-boot LoginWindow must be supervised by system P0, not by a
+# client-triggered recover-prelogin request.
+grep -Fq 'autoheal_prelogin()' native/macos/admin/zmb-admin || {
+  echo 'ERROR: P0 no longer has autonomous LoginWindow autoheal.' >&2; exit 1;
+}
+grep -Fq 'PRELOGIN_AUTOHEAL_RECOVERED' native/macos/admin/zmb-admin || {
+  echo 'ERROR: P0 LoginWindow recovery no longer verifies restored readiness.' >&2; exit 1;
+}
+grep -Fq '/bin/sleep 5' native/macos/admin/zmb-system-daemon || {
+  echo 'ERROR: P0 boot supervision cadence regressed.' >&2; exit 1;
+}
+
 echo "[release-source] resilient Aqua + LoginWindow native input fallback gate OK"
 
 # Marker used by readiness regression tests: pre-login READY requires Apple-managed Developer ID/provisioning.
@@ -233,3 +252,17 @@ for marker in \
     exit 1
   }
 done
+
+# 0.15.36: never allow client/server version skew to become invisible again.
+grep -Fq "'runtime_version': runtime_version()" mac_server.py || {
+  echo 'ERROR: AUTH_OK no longer exposes Mac runtime_version.' >&2; exit 1;
+}
+grep -Fq 'Pre-login runtime version skew:' linux_client.py || {
+  echo 'ERROR: Linux client no longer reports pre-login runtime version skew.' >&2; exit 1;
+}
+grep -Fq '"version=$version"' native/macos/admin/zmb-system-daemon || {
+  echo 'ERROR: P0 Bonjour no longer advertises the installed Mac app version.' >&2; exit 1;
+}
+grep -Fq 'needs: [release-source-check, macos-native-gate]' .github/workflows/release.yml || {
+  echo 'ERROR: Linux release artifact is no longer gated by the macOS native build.' >&2; exit 1;
+}

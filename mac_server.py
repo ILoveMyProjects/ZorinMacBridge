@@ -25,6 +25,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
+from resources import resource_path
+
 from zmb_session_lifecycle import (
     PRELOGIN_CONTROL_REPLACEMENT_GRACE_SECONDS, PreloginControlLease,
     PreloginSessionCoordinator, make_capture_backend_state, make_capture_failure_state, make_handoff_state, make_input_probe_state, make_pipeline_state,
@@ -42,6 +44,14 @@ APP_DIR = Path.home() / '.zorin-mac-bridge'
 CERT_PATH = APP_DIR / 'server-cert.pem'
 KEY_PATH = APP_DIR / 'server-key.pem'
 DEFAULT_SHARE = Path.home() / 'ZorinMac-Share'
+
+
+def runtime_version() -> str:
+    try:
+        value = resource_path('VERSION').read_text(encoding='utf-8').strip()
+        return value or '0.0.0'
+    except Exception:
+        return '0.0.0'
 
 
 def configure_runtime_home(home: Path | str) -> None:
@@ -66,7 +76,7 @@ _VIDEO_SESSION_LOCK = threading.Lock()
 _VIDEO_SESSION_STATE_LOCK = threading.Lock()
 _ACTIVE_VIDEO_SOCKET: ssl.SSLSocket | None = None
 VIDEO_REPLACEMENT_GRACE_SECONDS = 4.0
-VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS = 6.0
+VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS = 35.0
 _PRELOGIN_SESSION_COORDINATOR = PreloginSessionCoordinator()
 
 
@@ -1767,7 +1777,7 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
                 sock.sendall(pack_packet(AUTH_FAIL, str(exc).encode('utf-8', 'replace')))
                 log(f'[prelogin/session] video token rejected for {peer_ip}: {exc}')
                 return
-        auth_ok = {'role': role, 'server': 'ZorinMac-Bridge', 'prelogin': bool(prelogin)}
+        auth_ok = {'role': role, 'server': 'ZorinMac-Bridge', 'prelogin': bool(prelogin), 'runtime_version': runtime_version()}
         if role == 'desktop':
             if prelogin:
                 if prelogin_control_lease is None:

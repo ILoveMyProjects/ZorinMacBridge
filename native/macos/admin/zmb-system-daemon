@@ -17,6 +17,18 @@ config_value() {
   [ -n "$line" ] && printf '%s\n' "$line" || printf '%s\n' "$default"
 }
 
+installed_app_version() {
+  local app='/Applications/ZorinMacBridge Server.app' version='' version_file=''
+  if [ -f "$app/Contents/Info.plist" ]; then
+    version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist" 2>/dev/null || true)"
+  fi
+  if [ -z "$version" ]; then
+    version_file="$(/usr/bin/find "$app/Contents" -maxdepth 4 -type f -name VERSION -print -quit 2>/dev/null || true)"
+    [ -z "$version_file" ] || version="$(/bin/cat "$version_file" 2>/dev/null | /usr/bin/tr -d '[:space:]')"
+  fi
+  printf '%s\n' "$version"
+}
+
 stop_advertiser() {
   if [ -n "$ADVERTISER_PID" ]; then
     /bin/kill "$ADVERTISER_PID" >/dev/null 2>&1 || true
@@ -29,12 +41,13 @@ stop_advertiser() {
 start_advertiser() {
   [ -x /usr/bin/dns-sd ] || return 0
   /bin/mkdir -p "$HEARTBEAT_DIR"
-  local sid name
+  local sid name version
   sid="$(config_value SERVER_ID '')"
   name="$(config_value SERVER_NAME 'Mac')"
+  version="$(installed_app_version)"
   [ -n "$sid" ] || return 0
   /usr/bin/dns-sd -R "$name" _zorinmacbridge-admin._tcp local 22 \
-    "app=ZorinMacBridge" "platform=macOS" "role=system" "server_id=$sid" "protocol=2" \
+    "app=ZorinMacBridge" "platform=macOS" "role=system" "server_id=$sid" "protocol=2" "version=$version" \
     >/dev/null 2>&1 &
   ADVERTISER_PID="$!"
   printf '%s\n' "$ADVERTISER_PID" > "$ADVERTISER_PID_FILE"
@@ -50,5 +63,5 @@ while true; do
     start_advertiser
   fi
   /usr/local/sbin/zmb-admin daemon-tick || true
-  /bin/sleep 15
+  /bin/sleep 5
 done

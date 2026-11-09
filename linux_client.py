@@ -31,7 +31,7 @@ import PIL._tkinter_finder  # noqa: F401
 from discovery import discover_servers
 from resources import resource_path, set_tk_icon
 from tray_icon import TrayController
-from updates import check_for_updates, install_update, updater_tls_self_test
+from updates import check_for_updates, current_version, install_update, updater_tls_self_test
 from settings import client_record, save_client_record
 from secret_store import get_password as get_saved_password, set_password as save_password_secret
 from zmb_video_policy import choose_adaptive_step, initial_tier_for_viewport, profile_for_tier
@@ -596,6 +596,28 @@ class ClientApp:
             auth_info = {}
         if role == 'desktop' and isinstance(auth_info, dict):
             self.prelogin_session = bool(auth_info.get('prelogin'))
+            self.server_runtime_version = str(auth_info.get('runtime_version') or '').strip()
+            client_runtime_version = current_version()
+            self.server_runtime_matches_client = (
+                bool(self.server_runtime_version) and self.server_runtime_version == client_runtime_version
+            )
+            if self.server_runtime_version:
+                self._log(
+                    'INFO',
+                    f'Mac runtime version: {self.server_runtime_version}; client version: {client_runtime_version}.'
+                )
+            else:
+                self._log(
+                    'WARNING',
+                    f'Mac runtime did not report a version; client version is {client_runtime_version}.'
+                )
+            if self.prelogin_session and not self.server_runtime_matches_client:
+                shown = self.server_runtime_version or 'legacy/unknown'
+                self._log(
+                    'ERROR',
+                    f'Pre-login runtime version skew: client={client_runtime_version}, Mac={shown}. '
+                    'Backend-matrix evidence from this connection is not valid until the Mac runs the same release.'
+                )
             if self.prelogin_session:
                 self.prelogin_video_ready = False
                 self._desktop_session_token = str(auth_info.get('session_token') or '')
@@ -681,11 +703,18 @@ class ClientApp:
             sock = self._secure_connect('desktop', desktop_extra, auth_reader=reader)
             prefetched_control_packets = reader.drain_pending()
             if self.prelogin_session:
-                self._log(
-                    'INFO',
-                    'Pre-login reboot checks: TLS/auth=PASS, LoginWindow endpoint=PASS; '
-                    'awaiting capture first frame and native input delivery matrix.'
-                )
+                if self.server_runtime_matches_client:
+                    self._log(
+                        'INFO',
+                        'Pre-login reboot checks: TLS/auth=PASS, LoginWindow endpoint=PASS, runtime-version=PASS; '
+                        'awaiting capture first frame and native input delivery matrix.'
+                    )
+                else:
+                    self._log(
+                        'ERROR',
+                        'Pre-login reboot checks: TLS/auth=PASS, LoginWindow endpoint=PASS, runtime-version=FAIL; '
+                        'the Mac is running a different/legacy server build, so input-matrix evidence is blocked.'
+                    )
             if self.remember_credentials_active:
                 try:
                     if self._connect_snapshot is None:
@@ -971,7 +1000,10 @@ class ClientApp:
                 stat_started = adapt_started = time.monotonic()
                 stat_bytes = stat_decoded = stat_dropped = 0
                 video_generation_frames = 0
-                first_frame_deadline = time.monotonic() + 10.0 if self.prelogin_session else None
+                first_frame_started = time.monotonic()
+                first_frame_hard_deadline = first_frame_started + 40.0 if self.prelogin_session else None
+                first_frame_deadline = first_frame_started + 10.0 if self.prelogin_session else None
+                first_frame_progress = 'video-authenticated'
                 adapt_decoded = adapt_dropped = 0
                 server_stats = {}
 
@@ -1026,6 +1058,11 @@ class ClientApp:
                                     event = parse_session_state(unpack_json(payload))
                                 except Exception:
                                     event = parse_session_state(None)
+                                if self.prelogin_session and video_generation_frames == 0 and event.kind in ('pipeline', 'capture-backend', 'capture-failure'):
+                                    now_progress = time.monotonic()
+                                    first_frame_progress = event.stage or event.backend or event.reason or event.kind
+                                    if first_frame_hard_deadline is not None:
+                                        first_frame_deadline = min(first_frame_hard_deadline, now_progress + 10.0)
                                 if event.kind == 'pipeline' and event.stage:
                                     if pipeline_progress is not None:
                                         transition = pipeline_progress.observe(event.stage)
@@ -1054,8 +1091,10 @@ class ClientApp:
                         break
 
                     now = time.monotonic()
+                    if first_frame_hard_deadline is not None and video_generation_frames == 0 and now >= first_frame_hard_deadline:
+                        raise TimeoutError(f'Pre-login video produced no first frame within 40 seconds; last progress={first_frame_progress}')
                     if first_frame_deadline is not None and video_generation_frames == 0 and now >= first_frame_deadline:
-                        raise TimeoutError('Pre-login video produced no first frame within 10 seconds')
+                        raise TimeoutError(f'Pre-login video made no capture progress for 10 seconds; last progress={first_frame_progress}')
                     stat_elapsed = now - stat_started
                     if stat_elapsed >= 2.0:
                         local_fps = stat_decoded / max(0.001, stat_elapsed)

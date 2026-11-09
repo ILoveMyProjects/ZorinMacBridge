@@ -1,3 +1,21 @@
+# 0.15.36 — Reboot LoginWindow boot + capture recovery
+
+- Makes the system P0 LaunchDaemon actively supervise the LoginWindow pre-login server after a cold reboot instead of returning early whenever the target Aqua session is absent.
+- P0 now repairs/registers the pre-login LaunchAgent, starts it in the active LoginWindow domain, verifies the configured Desktop port, and restarts only the pre-login helper after two failed readiness ticks.
+- Reduces the P0 recovery tick from 15 seconds to 5 seconds so LoginWindow recovery converges promptly after boot.
+- Replaces the single pre-login SCStream first-frame attempt with a bounded capture matrix: persistent SCStream, `SCScreenshotManager.captureSampleBuffer`, then `SCScreenshotManager.captureImage(in:)`.
+- A capture backend is selected only after a real VideoToolbox H.264 access unit is written to the server pipe; API/start success alone is not treated as PASS.
+- Makes the Linux first-frame watchdog progress-aware, with a 10-second no-progress window and a 40-second absolute bound, so later capture candidates are not killed before they run.
+- Keeps the normal Aqua SCStream path, sleep/wake display recovery, pairing/TLS, and the existing LoginWindow input-delivery matrix unchanged.
+
+# 0.15.35 — Runtime version skew guard
+
+- AUTH_OK now reports the exact Mac runtime version.
+- The Linux client explicitly rejects pre-login matrix evidence when client and Mac runtime versions differ or the Mac is legacy/unknown.
+- P0 Bonjour advertises the installed Mac application version while Desktop is absent.
+- Linux release artifacts are gated by the macOS native build, preventing a newer Linux CI artifact from being produced when the matching Mac runtime cannot compile.
+- No ScreenCaptureKit, wake/display recovery, H.264, or LoginWindow backend-selection logic changed.
+
 ## 0.15.34 - macOS 26 IOHIDUserDevice SDK build fix
 
 - Fixes the Xcode 26.6 native build failure caused by the SDK no longer shipping `IOKit/hid/IOHIDUserDevice.h`.

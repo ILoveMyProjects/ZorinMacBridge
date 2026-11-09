@@ -11,9 +11,8 @@ PROBE = (ROOT / 'native/macos/capability-probe/ZMBCapabilityProbe.swift').read_t
 ADMIN = (ROOT / 'native/macos/admin/zmb-admin').read_text()
 GATE = (ROOT / 'scripts/verify-macos-native-gate.sh').read_text()
 SOURCE_GATE = (ROOT / 'scripts/verify-release-source.sh').read_text()
-# Preserve the already-working LoginWindow capture/wake path: this release only
-# changes input proof/selection and diagnostics.
-assert 'prelogin-backend=screencapturekit-persistent' in (ROOT / 'native/macos/ZMBStreamerLib.swift').read_text()
+# Input matrix remains independent from the pre-login capture matrix and wake path.
+assert 'screencapturekit-persistent' in (ROOT / 'native/macos/ZMBStreamerLib.swift').read_text()
 assert 'ScreenCaptureKit reported no display; requesting one-shot display wake through paired P0.' in GTK
 
 # Runtime checks all four native input mechanisms independently.

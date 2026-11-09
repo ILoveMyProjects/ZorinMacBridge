@@ -76,6 +76,12 @@ The LoginWindow input path remains IOHIDSystem-first. macOS can still deny synth
 
 # ZorinMacBridge
 
+> **0.15.36 runtime consistency:** pre-login diagnostics are accepted only when the Linux client and Mac server report the same release version. P0 discovery also exposes the installed Mac version.
+
+> **0.15.36 boot pre-login supervisor:** the system P0 LaunchDaemon now actively starts/repairs the LoginWindow helper and verifies its Desktop listener after cold reboot; it no longer waits for an Aqua session or a manual `recover-prelogin` request.
+
+> **0.15.36 pre-login capture recovery:** LoginWindow capture now tries persistent SCStream, ScreenCaptureKit sample-buffer screenshots, then ScreenCaptureKit image screenshots; only a real H.264 pipe write counts as backend success. Aqua/sleep-wake capture remains on the existing path.
+
 ## 0.15.5 pre-login capture + activation fix
 
 0.15.5 combines the 0.15.4 LoginWindow screenshot-capture path with the missing pre-login update activation step. After `update-now` at LoginWindow, the old pre-login PID must exit and a new process from the updated `/Applications` bundle must reopen the Desktop port before the update can report success. The screenshot-capture fix from 0.15.4 remains unchanged. After a successful Mac update, the System page also triggers a fresh Bonjour scan so the UI reflects the newly running version instead of retaining a stale pre-update label.

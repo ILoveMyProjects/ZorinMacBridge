@@ -28,7 +28,7 @@ assert 'previous video session did not stop within {VIDEO_REPLACEMENT_GRACE_SECO
 
 # A video generation that authenticates but never produces an access unit must
 # fail quickly with native diagnostics instead of monopolising the global lock.
-assert 'VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS = 6.0' in server
+assert 'VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS = 35.0' in server
 assert 'no first H.264 access unit within {startup_timeout:g}s; native={detail}' in server
 assert 'startup_timeout = VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS if frames == 0 else None' in server
 
