@@ -4,10 +4,26 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / '.github' / 'workflows' / 'release.yml'
 
 
-def test_shutdown_module_is_packaged_and_verified() -> None:
+def test_deb_is_built_and_published() -> None:
     text = WORKFLOW.read_text(encoding='utf-8')
-    assert 'zmb_recovery.py zmb_shutdown.py "$APP/"' in text
-    assert "usr/lib/zorinmacbridge/zmb_shutdown.py" in text
+    assert 'linux-amd64:' in text
+    assert 'dpkg-deb --root-owner-group --build' in text
+    assert 'release/ZorinMacBridge-Client_linux-amd64.deb' in text
+    assert 'name: linux-amd64' in text
+    assert 'needs: [linux-amd64, macos-arm64]' in text
+
+
+def test_runtime_modules_are_packaged_and_verified() -> None:
+    text = WORKFLOW.read_text(encoding='utf-8')
+    required = (
+        'linux_client_gtk.py', 'linux_client.py', 'zmb_shutdown.py', 'zmb_recovery.py',
+        'zmb_admin_backend.py', 'zmb_session_lifecycle.py', 'zmb_client_runtime.py',
+    )
+    for name in required:
+        assert name in text, name
+        assert (ROOT / name).is_file(), name
+    assert "usr/lib/zorinmacbridge/zmb_session_lifecycle.py" in text
+    assert "usr/lib/zorinmacbridge/zmb_client_runtime.py" in text
 
 
 def test_release_smoke_imports_from_staged_package_tree() -> None:
@@ -15,18 +31,19 @@ def test_release_smoke_imports_from_staged_package_tree() -> None:
     assert 'PYTHONPATH="$APP" /usr/bin/python3 -c "import linux_client_gtk;' in text
 
 
-def test_runtime_import_has_packaged_provider() -> None:
-    client = (ROOT / 'linux_client_gtk.py').read_text(encoding='utf-8')
-    assert 'from zmb_shutdown import arm_hard_exit_watchdog' in client
-    assert (ROOT / 'zmb_shutdown.py').is_file()
+def test_dmg_is_built_and_published() -> None:
+    text = WORKFLOW.read_text(encoding='utf-8')
+    assert "hdiutil create -volname 'ZorinMacBridge Server'" in text
+    assert 'release/ZorinMacBridge-Server_macOS-arm64.dmg' in text
+    assert 'name: macos-arm64' in text
 
 
 def main() -> None:
-    test_shutdown_module_is_packaged_and_verified()
+    test_deb_is_built_and_published()
+    test_runtime_modules_are_packaged_and_verified()
     test_release_smoke_imports_from_staged_package_tree()
-    test_runtime_import_has_packaged_provider()
-    assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.7'
-    print('linux package manifest regression tests: OK')
+    test_dmg_is_built_and_published()
+    print('GitHub DEB/DMG release artifact regression tests: OK')
 
 
 if __name__ == '__main__':

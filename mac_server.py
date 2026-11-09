@@ -10,6 +10,7 @@ import ipaddress
 import json
 import os
 import platform
+import queue
 import shutil
 import socket
 import select
@@ -24,9 +25,14 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
+from zmb_session_lifecycle import (
+    PRELOGIN_CONTROL_REPLACEMENT_GRACE_SECONDS, PreloginControlLease,
+    PreloginSessionCoordinator, make_capture_backend_state, make_handoff_state, make_pipeline_state,
+)
+
 from protocol import (
     AUTH, AUTH_FAIL, AUTH_OK, CLIPBOARD_DATA, CLIPBOARD_GET, CLIPBOARD_SET,
-    DOWNLOAD_BEGIN, DOWNLOAD_CHUNK, DOWNLOAD_END, DOWNLOAD_REQ, ERROR, VIDEO_H264, VIDEO_STATS,
+    DOWNLOAD_BEGIN, DOWNLOAD_CHUNK, DOWNLOAD_END, DOWNLOAD_REQ, ERROR, SESSION_STATE, VIDEO_H264, VIDEO_STATS,
     KEY, LIST_REQ, LIST_RESP, MKDIR_OK, MKDIR_REQ, MOUSE_BUTTON, MOUSE_MOVE,
     PacketReader, SCROLL, TEXT, UPLOAD_BEGIN, UPLOAD_CHUNK, UPLOAD_END,
     pack_json, pack_packet, recv_one_blocking, unpack_json,
@@ -61,6 +67,16 @@ _VIDEO_SESSION_STATE_LOCK = threading.Lock()
 _ACTIVE_VIDEO_SOCKET: ssl.SSLSocket | None = None
 VIDEO_REPLACEMENT_GRACE_SECONDS = 4.0
 VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS = 6.0
+_PRELOGIN_SESSION_COORDINATOR = PreloginSessionCoordinator()
+
+
+def request_prelogin_handoff(user: str, *, log=print) -> PreloginControlLease | None:
+    """Notify the active LoginWindow client that Aqua is taking over."""
+    lease = _PRELOGIN_SESSION_COORDINATOR.request_handoff(str(user), log=log)
+    # Video has no useful work left once loginwindow hands off.  Interrupt it now
+    # so the Aqua server can acquire the native capture pipeline quickly.
+    _interrupt_active_video_session(log=log)
+    return lease
 
 
 def _set_active_video_socket(sock: ssl.SSLSocket | None) -> None:
@@ -508,21 +524,25 @@ class LoginWindowInput(MacInput):
         rc = int(self.native.lib.zmb_login_input_open())
         if rc != 0:
             raise RuntimeError(f'IOHIDSystem login-window input unavailable (IOReturn=0x{rc & 0xffffffff:08x})')
-        # Cache geometry before ScreenCaptureKit starts.  Some macOS releases are
-        # hostile to extra WindowServer calls from a loginwindow helper once the
-        # capture connection exists.
-        cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
-        cg.CGMainDisplayID.restype = ctypes.c_uint32
-        cg.CGDisplayBounds.argtypes = [ctypes.c_uint32]
-        cg.CGDisplayBounds.restype = CGRect
-        main = int(cg.CGMainDisplayID())
-        bounds = cg.CGDisplayBounds(ctypes.c_uint32(main))
-        if bounds.size.width <= 0 or bounds.size.height <= 0:
-            raise RuntimeError('LoginWindow display bounds are unavailable')
-        self.origin_x = float(bounds.origin.x)
-        self.origin_y = float(bounds.origin.y)
-        self.width = float(bounds.size.width)
-        self.height = float(bounds.size.height)
+        try:
+            # Cache geometry before ScreenCaptureKit starts.  Some macOS releases are
+            # hostile to extra WindowServer calls from a loginwindow helper once the
+            # capture connection exists.
+            cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+            cg.CGMainDisplayID.restype = ctypes.c_uint32
+            cg.CGDisplayBounds.argtypes = [ctypes.c_uint32]
+            cg.CGDisplayBounds.restype = CGRect
+            main = int(cg.CGMainDisplayID())
+            bounds = cg.CGDisplayBounds(ctypes.c_uint32(main))
+            if bounds.size.width <= 0 or bounds.size.height <= 0:
+                raise RuntimeError('LoginWindow display bounds are unavailable')
+            self.origin_x = float(bounds.origin.x)
+            self.origin_y = float(bounds.origin.y)
+            self.width = float(bounds.size.width)
+            self.height = float(bounds.size.height)
+        except Exception:
+            self.native.lib.zmb_login_input_close()
+            raise
         self.held_buttons: set[int] = set()
         self.held_modifiers: set[str] = set()
         self.last_nx = 0.5
@@ -657,6 +677,41 @@ class MacClipboard:
         return data.decode('utf-8', 'replace')
 
 
+def capability_probe_library() -> Path:
+    """Return the Stage-B diagnostic dylib without loading it during normal runtime.
+
+    Keeping CoreHID in a separate dylib prevents the diagnostic-only macOS 26+
+    dependency from changing the normal Desktop/LoginWindow streamer path.  The
+    dylib is loaded into the existing app process so TCC and code-signing checks
+    observe the exact ZorinMacBridge Server identity, not a helper executable.
+    """
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        candidate = Path(getattr(sys, '_MEIPASS')) / 'libzmb_capability_probe.dylib'
+    else:
+        candidate = Path(__file__).resolve().parent / 'build' / 'libzmb_capability_probe.dylib'
+    if not candidate.is_file():
+        raise RuntimeError(
+            'Stage-B capability probe library is missing. Release builds must bundle '
+            'libzmb_capability_probe.dylib; source builds can compile it with '
+            'scripts/build-macos-capability-probe.sh.'
+        )
+    return candidate
+
+
+class CapabilityProbeLibrary:
+    """Load the diagnostic-only native probe into the existing app process."""
+    def __init__(self) -> None:
+        self.path = capability_probe_library()
+        self.lib = ctypes.CDLL(str(self.path))
+        self.lib.zmb_capability_probe_run.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+        self.lib.zmb_capability_probe_run.restype = ctypes.c_int32
+
+    def run(self, output_path: Path, image_path: Path) -> int:
+        return int(self.lib.zmb_capability_probe_run(
+            os.fsencode(str(output_path)), os.fsencode(str(image_path))
+        ))
+
+
 def streamer_library() -> Path:
     """Return the bundled in-process ScreenCaptureKit/VideoToolbox library.
 
@@ -783,7 +838,7 @@ def available_displays(*, log=print) -> list[dict]:
         return []
 
 
-def _read_exact_file(stream, size: int, *, timeout: float = 15.0, disconnect_sock: ssl.SSLSocket | None = None) -> bytes:
+def _read_exact_file(stream, size: int, *, timeout: float = 15.0, disconnect_sock: ssl.SSLSocket | None = None, idle_callback=None) -> bytes:
     """Read native pipe bytes while also noticing a closed video client.
 
     Reconfiguration closes the old TLS video socket before opening the next one.
@@ -796,13 +851,15 @@ def _read_exact_file(stream, size: int, *, timeout: float = 15.0, disconnect_soc
     deadline = time.monotonic() + max(0.5, float(timeout))
     fd = stream.fileno()
     while len(out) < size:
+        if idle_callback is not None:
+            idle_callback()
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError(f'native streamer pipe stalled for {timeout:g}s')
         watchers = [fd]
         if disconnect_sock is not None:
             watchers.append(disconnect_sock)
-        readable, _, _ = select.select(watchers, [], [], min(0.5, remaining))
+        readable, _, _ = select.select(watchers, [], [], min(0.1 if idle_callback is not None else 0.5, remaining))
         if not readable:
             continue
         if disconnect_sock is not None and disconnect_sock in readable:
@@ -825,7 +882,7 @@ def _read_exact_file(stream, size: int, *, timeout: float = 15.0, disconnect_soc
     return bytes(out)
 
 
-def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, log=print) -> None:
+def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, prelogin_lease: PreloginControlLease | None = None, log=print) -> None:
     """Low-latency input/clipboard channel. Video is deliberately separate."""
     log('[control] connected')
     if prelogin:
@@ -842,6 +899,17 @@ def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, log=print) -
     sock.settimeout(0.25)
     try:
         while True:
+            if prelogin_lease is not None and prelogin_lease.handoff_event.is_set():
+                payload = make_handoff_state(
+                    user=prelogin_lease.handoff_user, generation=prelogin_lease.generation,
+                )
+                sock.sendall(pack_json(SESSION_STATE, payload))
+                prelogin_lease.handoff_sent_event.set()
+                log(
+                    f'[prelogin/handoff] control handoff sent generation={prelogin_lease.generation} '
+                    f'user={prelogin_lease.handoff_user or "unknown"}'
+                )
+                return
             try:
                 data = sock.recv(65536)
                 if not data:
@@ -959,6 +1027,7 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
 
     result: dict[str, int] = {'code': -999}
     native_messages: list[str] = []
+    session_events: queue.SimpleQueue[dict] = queue.SimpleQueue()
 
     def run_native() -> None:
         try:
@@ -976,9 +1045,23 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
                         native_messages.append(line)
                         if len(native_messages) > 20:
                             del native_messages[:-20]
+                        if prelogin and line.startswith('prelogin-stage='):
+                            session_events.put(make_pipeline_state(line.split('=', 1)[1]))
+                        elif prelogin and line.startswith('prelogin-backend='):
+                            session_events.put(make_capture_backend_state(line.split('=', 1)[1]))
                         log('[video/native] ' + line)
         except Exception:
             pass
+
+    def flush_pipeline_events() -> None:
+        if not prelogin:
+            return
+        while True:
+            try:
+                event = session_events.get_nowait()
+            except queue.Empty:
+                return
+            sock.sendall(pack_json(SESSION_STATE, event))
 
     runner = threading.Thread(target=run_native, name='zmb-native-video', daemon=True)
     logger = threading.Thread(target=log_worker, name='zmb-native-video-log', daemon=True)
@@ -996,7 +1079,7 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
             while True:
                 startup_timeout = VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS if frames == 0 else 15.0
                 try:
-                    header = _read_exact_file(stream, 4, timeout=startup_timeout, disconnect_sock=sock)
+                    header = _read_exact_file(stream, 4, timeout=startup_timeout, disconnect_sock=sock, idle_callback=flush_pipeline_events)
                 except EOFError:
                     runner.join(timeout=0.25)
                     code = result.get('code', -999)
@@ -1014,7 +1097,7 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
                 if not (1 <= size <= 16 * 1024 * 1024):
                     raise RuntimeError(f'invalid native H.264 access-unit size: {size}')
                 try:
-                    payload = _read_exact_file(stream, size, timeout=startup_timeout, disconnect_sock=sock)
+                    payload = _read_exact_file(stream, size, timeout=startup_timeout, disconnect_sock=sock, idle_callback=flush_pipeline_events)
                 except TimeoutError as exc:
                     if frames == 0:
                         detail = ' | '.join(native_messages[-6:]) or 'no native capture diagnostics'
@@ -1022,6 +1105,7 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
                             f'first H.264 access unit payload stalled for {startup_timeout:g}s; native={detail}'
                         ) from exc
                     raise
+                flush_pipeline_events()
                 sock.sendall(pack_packet(VIDEO_H264, payload))
                 frames += 1
                 stat_frames += 1
@@ -1298,6 +1382,8 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
         raw.close()
         return
     sock = None
+    prelogin_control_lease: PreloginControlLease | None = None
+    prelogin_video_token = ''
     try:
         log(f'[client {peer_ip}] TCP connection accepted')
         raw.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
@@ -1329,9 +1415,28 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
             sock.sendall(pack_packet(AUTH_FAIL, b'file role unavailable at macOS login window'))
             log(f'[client {peer_ip}] pre-login file role rejected')
             return
+        if prelogin and role == 'desktop':
+            try:
+                prelogin_control_lease = _PRELOGIN_SESSION_COORDINATOR.acquire_control(sock, peer_ip, log=log)
+            except Exception as exc:
+                sock.sendall(pack_packet(AUTH_FAIL, f'pre-login control busy: {exc}'.encode('utf-8', 'replace')))
+                log(f'[prelogin/session] control acquisition rejected for {peer_ip}: {type(exc).__name__}: {exc}')
+                return
+        if prelogin and role == 'video':
+            prelogin_video_token = str(auth.get('session_token', ''))
+            try:
+                _PRELOGIN_SESSION_COORDINATOR.validate_video_token(prelogin_video_token, peer_ip)
+            except PermissionError as exc:
+                sock.sendall(pack_packet(AUTH_FAIL, str(exc).encode('utf-8', 'replace')))
+                log(f'[prelogin/session] video token rejected for {peer_ip}: {exc}')
+                return
         auth_ok = {'role': role, 'server': 'ZorinMac-Bridge', 'prelogin': bool(prelogin)}
         if role == 'desktop':
             if prelogin:
+                if prelogin_control_lease is None:
+                    raise RuntimeError('pre-login control lease missing after successful acquisition')
+                auth_ok['session_token'] = prelogin_control_lease.token
+                auth_ok['session_generation'] = prelogin_control_lease.generation
                 auth_ok['remote_display'] = {
                     'ready': True, 'name': '1080p', 'virtual': False, 'display_id': 0,
                     'width': 0, 'height': 0, 'prelogin': True,
@@ -1345,7 +1450,7 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
         log(f'[client {peer_ip}] authenticated role={role}')
         if role == 'desktop':
             try:
-                control_session(sock, prelogin=prelogin, log=log)
+                control_session(sock, prelogin=prelogin, prelogin_lease=prelogin_control_lease, log=log)
             finally:
                 if not prelogin:
                     # The Aqua control channel owns the remote workspace. If it
@@ -1371,6 +1476,13 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
             )
             _acquire_video_session(sock, log=log)
             video_ownership_released = False
+            if prelogin:
+                # Close the AUTH -> native-lock race. If the control owner vanished
+                # while this video socket waited for the previous native streamer,
+                # this generation must not start with a stale token. The socket is
+                # already registered as active, so a later control release can also
+                # interrupt it deterministically.
+                _PRELOGIN_SESSION_COORDINATOR.validate_video_token(prelogin_video_token, peer_ip)
 
             def release_video_ownership() -> None:
                 nonlocal video_ownership_released
@@ -1397,6 +1509,12 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
         if sock is not None:
             send_error(sock, f'{type(exc).__name__}: {exc}')
     finally:
+        if prelogin_control_lease is not None:
+            # Interrupt video before publishing the control lease as free. Otherwise
+            # a replacement Desktop could acquire a new generation and start video
+            # in the tiny window before stale-owner cleanup shuts the active socket.
+            _interrupt_active_video_session(log=log)
+            _PRELOGIN_SESSION_COORDINATOR.release_control(prelogin_control_lease, log=log)
         try:
             if sock is not None:
                 sock.close()

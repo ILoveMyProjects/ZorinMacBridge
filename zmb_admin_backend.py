@@ -22,7 +22,7 @@ PROTOCOL_VERSION = "2"
 
 ADMIN_ACTIONS = {
     "status", "start-zmb", "stop-zmb", "restart-zmb", "recover-desktop", "recover-prelogin", "repair-launch-agent",
-    "pairing-list", "logs", "diagnose", "recover-all", "check-update", "update-now", "sleep", "reboot", "shutdown",
+    "pairing-list", "logs", "diagnose", "recover-all", "capability-probe", "check-update", "update-now", "sleep", "reboot", "shutdown",
     "xcode-overview", "xcode-open", "sim-open", "wake-display",
 }
 AUTO_UPDATE_MODES = {"off", "notify", "install"}
@@ -545,6 +545,8 @@ def _ssh_base(profile: dict) -> list[str]:
 
 def run_action_for_profile(profile: dict, action: str, *, arg: str | None = None, timeout: int = 18) -> subprocess.CompletedProcess[str]:
     ensure_tools()
+    if action == "capability-probe":
+        timeout = max(timeout, 45)
     return _run(_ssh_base(profile) + [_remote_command(action, arg)], timeout=timeout)
 
 

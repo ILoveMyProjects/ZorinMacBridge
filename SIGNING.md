@@ -1,31 +1,54 @@
-# macOS signing model
+# macOS code signing
 
-ZorinMacBridge v0.6.7 does **not** require Developer ID, a self-signed certificate, a keychain identity, GitHub signing secrets, or signing setup on the Linux workstation.
+ZorinMacBridge does **not** require a paid Apple Developer account, Developer ID certificate, notarization service, or paid provisioning profile to build or run the default release path.
 
-## Why
+## Default free release path
 
-macOS tracks privacy grants using the app's designated requirement (DR). The default DR of ad-hoc signed code is build-bound, so it changes after every rebuild. ZorinMacBridge therefore signs with an **explicit DR** instead of accepting the default ad-hoc DR.
+GitHub Actions builds the macOS arm64 app and DMG on `macos-26`. When no Apple signing secrets are configured, the workflow:
 
-Each Mac creates one random 256-bit local marker in:
+1. builds the native arm64 dylibs and PyInstaller app;
+2. signs the transport app ad-hoc with an explicit bundle-identifier designated requirement using `scripts/sign-macos-transport.sh`;
+3. verifies the ad-hoc signature;
+4. packages `ZorinMacBridge-Server_macOS-arm64.dmg`.
 
-`~/Library/Application Support/ZorinMacBridge/CodeSigning/local-identity-token`
+No certificate, keychain identity, Apple Developer account, or paid service is required for this path.
 
-Before an app is installed, ZorinMacBridge copies the verified release app to staging, adds `ZMBLocalIdentity=<local marker>` to the staged `Info.plist`, and signs the staged bundle with:
+On installation/update, the downloaded transport app is copied to a staging directory and re-signed **locally on that Mac** with a stable explicit ad-hoc designated requirement. The stable local identity is implemented by `mac_local_signing.py` and uses a random per-Mac token stored locally. No external account is involved. Reusing the same local identity across updates avoids changing the designated requirement on every build.
 
-`designated => identifier "com.ilovemyprojects.zorinmacbridge.server" and info[ZMBLocalIdentity] = "<local marker>"`
+## Optional Developer ID path
 
-The same marker is reused for future updates on that Mac, so the explicit DR remains the same across versions. No certificate or keychain is involved.
+Developer ID support remains available only as an optional enhancement for maintainers who already have the required Apple credentials. It is never required for CI, DMG creation, installation, updates, or READY.
 
-## Release transport
+If all three secrets are present:
 
-GitHub Actions uses ad-hoc signing only for transport integrity after the bundle is modified during packaging. The release workflow runs a fast macOS preflight which signs a small Mach-O and a minimal app with explicit DRs, verifies them with `codesign`, and rejects any fallback to a `cdhash`-based DR before the Apple Silicon macOS build starts.
+- `MACOS_DEVELOPER_ID_P12_BASE64`
+- `MACOS_DEVELOPER_ID_P12_PASSWORD`
+- `MACOS_DEVELOPER_ID_PROFILE_BASE64`
 
-The installer/updater verifies the downloaded app and checksum first. It then applies the Mac-local DR to a staged copy before replacing `/Applications/ZorinMacBridge Server.app`.
+then the release workflow validates the profile/certificate and uses `scripts/sign-macos-release.sh`. If none are present, the workflow automatically uses the free ad-hoc path. A **partially configured** optional Developer ID setup fails because it is internally inconsistent; removing the partial secrets restores the free path.
 
-## Migration
+The optional profile verifier still knows about:
 
-The first v0.6.7 launch from an older build-bound/ad-hoc identity is a one-time identity migration. The app stages and signs a replacement with the stable local DR, asks for administrator authorization only to replace the bundle in `/Applications`, then restarts. Because the old and new DRs are different, macOS can require Screen Recording and Accessibility approval once at that migration boundary. Later v0.6.7+ updates reuse the same DR.
+- `com.apple.developer.persistent-content-capture`
+- `com.apple.developer.hid.virtual.device`
 
-## Security trade-off
+but those restricted entitlements are **not** part of the default free release requirement.
 
-This is an internal/private distribution design, not a substitute for Developer ID and notarization. An explicit ad-hoc DR gives stable local identity semantics but does not cryptographically prove a public publisher. Public third-party distribution should use Developer ID and notarization.
+## READY/readiness
+
+READY does not depend on Developer ID or provisioning. For unattended pre-login operation, readiness is based on the installed LoginWindow agent and a current Stage-B capability proof for the exact installed build. The probe decides whether capture and at least one input path actually work on the physical Mac.
+
+This is deliberate: a paid signing state is not treated as a proxy for real LoginWindow functionality.
+
+## Security checks retained on the free path
+
+The free path still verifies:
+
+- release SHA-256 checksums;
+- expected bundle identifier;
+- app version against the GitHub release;
+- valid macOS code signature;
+- explicit ZorinMacBridge designated requirement for the transport bundle;
+- stable per-Mac local designated requirement before installation/update.
+
+The free path does not claim Apple notarization or Developer ID publisher authentication.

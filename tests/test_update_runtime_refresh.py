@@ -3,7 +3,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PAGE = (ROOT / 'zmb_system_page.py').read_text(encoding='utf-8')
 
-assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.7'
 assert 'elif action == "update-now":' in PAGE
 assert 'def refresh_after_update():' in PAGE
 assert 'discover = getattr(self.window, "discover_macs", None)' in PAGE

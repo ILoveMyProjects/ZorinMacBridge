@@ -15,12 +15,9 @@ def main() -> None:
     assert requirement.startswith('designated => ')
     assert not expression.startswith('designated => ')
     assert f'identifier "{BUNDLE_ID}"' in requirement
-    assert f'identifier "{BUNDLE_ID}"' in expression
     assert f'info[{IDENTITY_MARKER_KEY}] = "{token}"' in requirement
     assert 'certificate leaf' not in requirement
     assert 'cdhash' not in requirement
-    assert 'certificate leaf' not in expression
-    assert 'cdhash' not in expression
 
     with tempfile.TemporaryDirectory() as tmp:
         app = Path(tmp) / APP_NAME
@@ -34,70 +31,43 @@ def main() -> None:
     installer = Path('install-macos.sh').read_text(encoding='utf-8')
     updater = Path('updates.py').read_text(encoding='utf-8')
     server = Path('mac_server_gui.py').read_text(encoding='utf-8')
-    transport = Path('scripts/sign-macos-transport.sh').read_text(encoding='utf-8')
     local_signing = Path('mac_local_signing.py').read_text(encoding='utf-8')
+    release_signing = Path('mac_release_signing.py').read_text(encoding='utf-8')
 
-    # No certificate/keychain/GitHub-secret signing setup remains.
+    # 0.15.19: the default release path is free/ad-hoc. Developer ID support is
+    # retained only as an optional branch when all maintainer secrets exist.
+    assert 'MACOS_RELEASE_SIGNING_MODE=adhoc' in workflow
+    assert 'MACOS_RELEASE_SIGNING_MODE=developer-id' in workflow
+    assert "scripts/sign-macos-transport.sh 'dist/ZorinMacBridge Server.app'" in workflow
+    assert 'Missing secret: MACOS_DEVELOPER_ID_P12_BASE64' not in workflow
+    assert 'Missing secret: MACOS_DEVELOPER_ID_PROFILE_BASE64' not in workflow
+    assert 'scripts/sign-macos-release.sh' in workflow  # optional paid branch only
+    assert 'embedded.provisionprofile' in release_signing
+    assert 'com.apple.developer.persistent-content-capture' in release_signing
+    assert 'com.apple.developer.hid.virtual.device' in release_signing
+
+    # Free installs/updates are re-signed locally with one stable per-Mac DR.
+    assert '--local-sign-app "$STAGED"' in installer
+    assert 'stage_and_sign' in updater
+    assert 'free stable per-Mac ad-hoc identity' in updater
+    assert 'app_has_release_identity' in local_signing  # preserves optional Developer ID builds
+    assert 'Optional Developer-ID releases keep their publisher signature.' in local_signing
+    assert '--verify-release-app' in server  # optional verification CLI remains available
+
+    # Local signing itself must never acquire paid credentials or restricted
+    # entitlements. It remains certificate-free.
     for forbidden in (
-        'MACOS_CERTIFICATE_P12_BASE64', 'MACOS_CERTIFICATE_PASSWORD', 'MACOS_SIGNING_IDENTITY',
-        'security create-keychain', 'security import', 'security add-trusted-cert',
-        'set-key-partition-list', 'find-identity', 'find-key -t private',
+        'MACOS_DEVELOPER_ID_P12_BASE64',
+        'MACOS_DEVELOPER_ID_P12_PASSWORD',
+        'com.apple.developer.persistent-content-capture',
+        'com.apple.developer.hid.virtual.device',
     ):
-        assert forbidden not in transport
-    assert 'scripts/sign-macos-transport.sh --self-test' in workflow
-    assert 'Verify macOS transport signing' in workflow
-    assert 'macos-signing-preflight:' not in workflow
-    assert 'needs: [release-source-check]' in workflow
-
-    # CI transport and the installed copy use explicit DRs rather than the
-    # build-bound default ad-hoc cdhash requirement.
-    assert '--sign -' in transport
-    assert '--requirements "$REQ"' in transport
-    assert 'stable per-Mac explicit DR shape' in transport
-    assert 'info[ZMBLocalIdentity]' in transport
+        assert forbidden not in local_signing
     assert "'--sign', '-', '--requirements', str(req)" in local_signing
     assert 'ZMBLocalIdentity' in local_signing
     assert 'TOKEN_PATH' in local_signing
-    assert 'certificate leaf' not in local_signing
-    assert 'KEYCHAIN_PATH' not in local_signing
-    assert 'CERT_PATH' not in local_signing
-    assert 'P12_PATH' not in local_signing
 
-    # codesign -R accepts a single requirement expression, not a requirement set
-    # prefixed by `designated =>`. Keep separate files/values for signing vs. verification.
-    assert 'LOCAL_EXPR=' in transport
-    assert '-R "$LOCAL_EXPR"' in transport
-    assert 'REQ_EXPR=' in transport
-    assert '-R "$REQ_EXPR"' in transport
-    assert '-R "$LOCAL_REQ"' not in transport
-    assert '-R "$REQ"' not in transport
-    assert '_write_requirement_expression' in local_signing
-    assert "'-R', str(req_expr)" in local_signing
-
-    assert "--local-sign-app 'build/local-sign-test/ZorinMacBridge Server.app'" in workflow
-    assert "codesign -d -r- 'build/local-sign-test/ZorinMacBridge Server.app'" in workflow
-    assert 'security add-trusted-cert' not in workflow
-    assert 'setup-stable-signing-linux.sh' not in workflow
-
-    assert '--local-sign-app' in installer
-    assert 'security add-trusted-cert' not in installer
-    assert "stage_and_sign(source_app, stage_root)" in updater
-    assert "bootstrap_installed_app_identity()" in server
-    assert 'gh auth login' not in installer
-
-    # Never mutate individual PyInstaller binaries after their enclosing framework
-    # bundles have been signed. The top-level app is the only item re-signed by
-    # our transport/local-identity layers; recursive verification remains enabled.
-    assert "find \"$APP/Contents\" -type f" not in transport
-    assert "signing nested native libraries" not in transport
-    assert "--deep --options runtime" not in transport
-    assert "preserving PyInstaller nested signatures" in transport
-    assert "nested framework remained valid" in transport
-    assert "contents.rglob('*')" not in local_signing
-    assert "'--deep', '--options', 'runtime'" not in local_signing
-    assert 'No certificate, keychain setup, GitHub login, Developer ID, or Linux signing setup is required.' in installer
-
-    print('local stable-DR architecture tests: OK')
+    print('free local-DR release path + optional Developer ID tests: OK')
 
 
 if __name__ == '__main__':

@@ -4,7 +4,6 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.7'
 client = (ROOT / 'linux_client.py').read_text(encoding='utf-8')
 server = (ROOT / 'mac_server.py').read_text(encoding='utf-8')
 
@@ -37,7 +36,8 @@ assert 'no first H.264 access unit within {startup_timeout:g}s; native={detail}'
 assert 'disconnect_sock: ssl.SSLSocket | None = None' in server
 assert 'watchers.append(disconnect_sock)' in server
 assert "raise ConnectionError('video client disconnected during native capture')" in server
-assert '_read_exact_file(stream, 4, timeout=startup_timeout, disconnect_sock=sock)' in server
-assert '_read_exact_file(stream, size, timeout=startup_timeout, disconnect_sock=sock)' in server
+assert '_read_exact_file(stream, 4, timeout=startup_timeout, disconnect_sock=sock, idle_callback=flush_pipeline_events)' in server
+assert '_read_exact_file(stream, size, timeout=startup_timeout, disconnect_sock=sock, idle_callback=flush_pipeline_events)' in server
+assert "select.select(watchers, [], [], min(0.1 if idle_callback is not None else 0.5, remaining))" in server
 
 print('video restart stability regression tests: OK')

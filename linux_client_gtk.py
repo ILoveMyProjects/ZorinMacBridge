@@ -67,6 +67,8 @@ from zmb_xcode_page import XcodeController
 from zmb_terminal_page import TerminalController
 from zmb_projects_page import ProjectsController
 from zmb_shutdown import arm_hard_exit_watchdog
+from zmb_session_lifecycle import reconnect_delay_seconds
+from zmb_client_runtime import initialize_client_runtime_state
 
 # GTK4 and the GTK3 AppIndicator backend cannot live in the same process.
 # Prefer pystray's Xorg backend as a best-effort tray icon under X11/XWayland.
@@ -195,65 +197,24 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.resolution_var = ValueVar('1080p')
         self.display_id_var = ValueVar(0)
         self._display_choices = [('Auto — current Mac display', 0)]
-        self._display_source_sizes = {}
-        self._auto_display_id = 0
         self.machine_var = ValueVar('')
         self.remember_credentials_var = ValueVar(True)
-
         self.discovered_by_label = {}
         self.selected_server_id = ''
         self.selected_server_name = ''
         self.selected_desktop_available = True
         self.selected_system_available = False
         self.selected_paired_only = False
-        self.remember_credentials_active = True
-        self._connect_snapshot = None
-        self._desktop_display_snapshot = None
-        # Window state must be initialized once and must never be reset by a
-        # network reconnect. GTK fullscreen requests are asynchronous, so the
-        # notify::fullscreened signal below remains the source of truth.
-        self.fullscreen_active = False
 
-        self.outgoing = queue.Queue(maxsize=1000)
-        self._mouse_move_lock = threading.Lock()
-        self._pending_mouse_move = None
-        self.ui_queue = queue.Queue()
-        self.stop_event = threading.Event()
-        self.net_thread = None
-        self.video_thread = None
-        self.video_frames = queue.Queue(maxsize=1)
-        self._video_reconfigure_event = threading.Event()
-        self._video_reconfigure_not_before = 0.0
-        self._video_viewport_width = 1600
-        self._last_render_delay_ms = 0.0
-        self.connected = False
-        self.prelogin_session = False
-        self.prelogin_video_ready = False
-        self.remote_image_size = (1, 1)
-        self.display_rect = (0, 0, 1, 1)
-        self.modifiers_down = set()
-        self.keys_down = set()
-        self.remote_path = ''
-        self.file_entries = {}
+        initialize_client_runtime_state(self)
         self._clear_session_queues()
-        self.disconnect_requested = False
-        # Connection/reconnect state is independent from window full-screen state.
-        # Never clear fullscreen_active here: an automatic reconnect can happen while
-        # the window remains physically fullscreen, which would otherwise disable all
-        # local exit paths (button/Esc/Alt+Esc).
-        self.mouse_buttons_down = set()
         self._last_texture = None
         self._last_pixbuf = None
         self._file_rows = {}
         self._reconnect_source = 0
         self._reconnect_attempt = 0
         self._last_disconnect_reason = ''
-        self._discovery_serial = 0
         self._discovery_watchdog = 0
-        self._discovery_busy = False
-        self._update_check_busy = False
-        self._update_check_serial = 0
-        self._credential_serial = 0
         self._file_render_serial = 0
         self._desktop_trust_recovery_busy = False
         self._online_desktop_recovery_busy = False
@@ -845,7 +806,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         if not self.auto_reconnect_var.get() or self.disconnect_requested or self._reconnect_source:
             return
         self._reconnect_attempt += 1
-        delay = min(10.0, 1.0 * (2 ** min(self._reconnect_attempt - 1, 4)))
+        delay = reconnect_delay_seconds(self._reconnect_attempt, reason)
         self._last_disconnect_reason = reason
         self.status_var.set(f'Disconnected — reconnecting in {delay:g}s')
         self._log('INFO', f'Unexpected disconnect ({reason}); auto reconnect attempt {self._reconnect_attempt} in {delay:g}s.')
@@ -1660,6 +1621,23 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                     if self.prelogin_session:
                         self.prelogin_video_ready = False
                     self._refresh_files_state()
+                elif kind == 'prelogin_pipeline':
+                    stage = str(item[1] or '') if len(item) > 1 else ''
+                    labels = {
+                        'capture-frame': 'capturing LoginWindow',
+                        'pixel-buffer': 'preparing LoginWindow frame',
+                        'encode-submit': 'encoding LoginWindow frame',
+                        'h264-written': 'sending LoginWindow frame',
+                    }
+                    if self.connected and self.prelogin_session and not self.prelogin_video_ready and stage in labels:
+                        self.status_var.set(f'Connected — {labels[stage]}…')
+                elif kind == 'prelogin_capture_backend':
+                    backend = str(item[1] or '') if len(item) > 1 else ''
+                    if self.connected and self.prelogin_session and not self.prelogin_video_ready:
+                        if backend == 'scstream':
+                            self.status_var.set('Connected — starting LoginWindow SCStream…')
+                        elif backend == 'screenshot-manager':
+                            self.status_var.set('Connected — trying LoginWindow screenshot fallback…')
                 elif kind == 'prelogin_video_ready':
                     self.prelogin_video_ready = True
                     if self.connected and self.prelogin_session:
@@ -1682,6 +1660,10 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                     self._refresh_files_state()
                     if not self.prelogin_session:
                         self.refresh_files()
+                elif kind == 'prelogin_handoff':
+                    user = str(item[1] or '') if len(item) > 1 else ''
+                    self.status_var.set('Login accepted — switching to Aqua Desktop…')
+                    self._log('INFO', f'LoginWindow → Aqua handoff announced by Mac{f" for {user}" if user else ""}.')
                 elif kind == 'disconnected':
                     self.connected = False
                     reason = item[1] if len(item) > 1 else 'Session ended'

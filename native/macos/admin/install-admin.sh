@@ -9,6 +9,12 @@ if [ "$(uname -m)" != "arm64" ]; then
   echo "ZorinMacBridge P0 supports Apple Silicon (arm64) Macs only." >&2
   exit 1
 fi
+MACOS_VERSION="$(/usr/bin/sw_vers -productVersion 2>/dev/null || true)"
+MACOS_MAJOR="${MACOS_VERSION%%.*}"
+if [[ ! "$MACOS_MAJOR" =~ ^[0-9]+$ ]] || (( MACOS_MAJOR < 26 )); then
+  echo "ZorinMacBridge requires macOS 26.0 or later; detected: ${MACOS_VERSION:-unknown}" >&2
+  exit 1
+fi
 if [ "$(/usr/bin/id -u)" -ne 0 ]; then
   echo "This installer must run with administrator privileges." >&2
   exit 77
@@ -154,6 +160,7 @@ $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin unpair *
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin logs
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin diagnose
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin recover-all
+$TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin capability-probe
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin check-update
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin update-now
 $TARGET_USER ALL=(root) NOPASSWD: /usr/local/sbin/zmb-admin set-auto-update off

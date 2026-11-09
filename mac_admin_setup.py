@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import plistlib
 import pwd
+import re
 import shlex
 import socket
 import subprocess
@@ -17,6 +19,11 @@ UPDATE_PLIST = Path('/Library/LaunchDaemons') / f'{UPDATE_LABEL}.plist'
 ADMIN_HELPER = Path('/usr/local/sbin/zmb-admin')
 ADMIN_GATEWAY = Path('/usr/local/libexec/zmb-admin-ssh')
 ADMIN_DAEMON = Path('/usr/local/libexec/zmb-system-daemon')
+PRELOGIN_LABEL = 'com.ilovemyprojects.zorinmacbridge.prelogin'
+PRELOGIN_PLIST = Path('/Library/LaunchAgents') / f'{PRELOGIN_LABEL}.plist'
+APP_PATH = Path('/Applications/ZorinMacBridge Server.app')
+APP_BIN = APP_PATH / 'Contents/MacOS/ZorinMacBridge Server'
+CAPABILITY_STATUS = Path('/Library/Application Support/ZorinMacBridge/Admin/prelogin-capability-status')
 
 
 def current_short_user() -> str:
@@ -74,6 +81,111 @@ def uninstall_unattended_access() -> str:
     return _privileged_shell(command)
 
 
+def _read_key_value_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return values
+    for raw in text.splitlines():
+        if '=' not in raw:
+            continue
+        key, value = raw.split('=', 1)
+        key = key.strip()
+        if key:
+            values[key] = value.strip()
+    return values
+
+
+def _installed_app_identity() -> tuple[str, str]:
+    version = ''
+    cdhash = ''
+    try:
+        with (APP_PATH / 'Contents/Info.plist').open('rb') as handle:
+            info = plistlib.load(handle)
+        version = str(info.get('CFBundleShortVersionString') or '').strip()
+    except Exception:
+        pass
+    if APP_PATH.is_dir():
+        proc = _run(['/usr/bin/codesign', '-dvvv', str(APP_PATH)], timeout=10)
+        details = (proc.stdout or '') + '\n' + (proc.stderr or '')
+        match = re.search(r'(?m)^CDHash=([0-9A-Fa-f]+)\s*$', details)
+        if match:
+            cdhash = match.group(1).lower()
+    return version, cdhash
+
+
+def _prelogin_agent_contract_ready() -> bool:
+    try:
+        with PRELOGIN_PLIST.open('rb') as handle:
+            data = plistlib.load(handle)
+    except Exception:
+        return False
+    session_type = data.get('LimitLoadToSessionType')
+    if isinstance(session_type, str):
+        loginwindow = session_type == 'LoginWindow'
+    elif isinstance(session_type, list):
+        loginwindow = 'LoginWindow' in session_type
+    else:
+        loginwindow = False
+    argv = data.get('ProgramArguments')
+    return bool(
+        data.get('Label') == PRELOGIN_LABEL
+        and loginwindow
+        and data.get('RunAtLoad') is True
+        and data.get('KeepAlive') is True
+        and data.get('ProcessType') == 'Interactive'
+        and isinstance(argv, list)
+        and len(argv) >= 2
+        and argv[0] == str(APP_BIN)
+        and '--prelogin-server' in argv[1:]
+        and APP_BIN.is_file()
+    )
+
+
+def _release_signing_mode() -> str:
+    if not APP_PATH.is_dir():
+        return 'missing'
+    try:
+        from mac_release_signing import app_has_release_identity
+        if app_has_release_identity(APP_PATH):
+            return 'developer-id'
+    except Exception:
+        pass
+    try:
+        from mac_local_signing import app_has_local_identity
+        if app_has_local_identity(APP_PATH):
+            return 'local-adhoc'
+    except Exception:
+        pass
+    return 'transport-adhoc'
+
+
+def _prelogin_probe_state() -> dict[str, str | bool]:
+    proof = _read_key_value_file(CAPABILITY_STATUS)
+    version, cdhash = _installed_app_identity()
+    current = bool(
+        version and cdhash
+        and proof.get('app_version') == version
+        and proof.get('app_cdhash', '').lower() == cdhash.lower()
+    )
+    ready = bool(
+        current
+        and proof.get('overall') == 'PASS'
+        and proof.get('capture_result') == 'PASS'
+        and (proof.get('input_corehid_result') == 'PASS' or proof.get('input_legacy_result') == 'PASS')
+    )
+    return {
+        'prelogin_probe_present': bool(proof),
+        'prelogin_probe_current': current,
+        'prelogin_probe_ready': ready,
+        'prelogin_probe_overall': proof.get('overall', 'never'),
+        'prelogin_probe_capture': proof.get('capture_result', 'unknown'),
+        'prelogin_probe_input_corehid': proof.get('input_corehid_result', 'unknown'),
+        'prelogin_probe_input_legacy': proof.get('input_legacy_result', 'unknown'),
+    }
+
+
 def admin_component_state() -> dict[str, str | bool]:
     files_ok = all(path.is_file() for path in (ADMIN_PLIST, UPDATE_PLIST, ADMIN_HELPER, ADMIN_GATEWAY, ADMIN_DAEMON))
     launch = _run(['/bin/launchctl', 'print', f'system/{ADMIN_LABEL}'], timeout=5)
@@ -91,14 +203,20 @@ def admin_component_state() -> dict[str, str | bool]:
         remote_login = 'off'
     else:
         remote_login = 'on' if ssh_port_ready else 'unknown'
-    return {
+    probe = _prelogin_probe_state()
+    state: dict[str, str | bool] = {
         'installed': files_ok,
         'daemon_loaded': launch.returncode == 0,
         'updater_loaded': updater.returncode == 0,
         'remote_login': remote_login,
         'ssh_port_ready': ssh_port_ready,
         'ssh_host_key_ready': bool(ssh_host_fingerprints()),
+        'prelogin_agent_exists': PRELOGIN_PLIST.is_file(),
+        'prelogin_agent_contract_ready': _prelogin_agent_contract_ready(),
+        'release_signing_mode': _release_signing_mode(),
     }
+    state.update(probe)
+    return state
 
 
 def ssh_host_fingerprints() -> list[str]:

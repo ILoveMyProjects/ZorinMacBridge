@@ -9,6 +9,12 @@ if [ "$(uname -m)" != "arm64" ]; then
   echo "ZorinMacBridge macOS development supports Apple Silicon (arm64) only." >&2
   exit 1
 fi
+MACOS_VERSION="$(/usr/bin/sw_vers -productVersion 2>/dev/null || true)"
+MACOS_MAJOR="${MACOS_VERSION%%.*}"
+if [[ ! "$MACOS_MAJOR" =~ ^[0-9]+$ ]] || (( MACOS_MAJOR < 26 )); then
+  echo "ZorinMacBridge requires macOS 26.0 or later; detected: ${MACOS_VERSION:-unknown}" >&2
+  exit 1
+fi
 command -v python3 >/dev/null 2>&1 || { echo 'python3 is required on macOS.' >&2; exit 1; }
 python3 -m venv .venv
 . .venv/bin/activate

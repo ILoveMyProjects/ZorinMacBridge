@@ -21,10 +21,11 @@ def evaluate_setup_requirements(
     launch_at_login: bool,
     auto_start_server: bool,
 ) -> list[SetupRequirement]:
-    """Return the requirements for a fully unattended ZorinMacBridge Mac host.
+    """Return requirements for normal logged-in Aqua operation.
 
-    This is intentionally a pure function so the installer/UI can share the
-    exact same definition of READY vs REQUIRED without duplicating policy.
+    LoginWindow/pre-login verification is intentionally separate so an
+    unverified reboot-login path cannot make an otherwise working Aqua host
+    appear globally NOT READY.
     """
     requirements = [
         SetupRequirement(
@@ -124,6 +125,62 @@ def evaluate_setup_requirements(
         ),
     ])
     return requirements
+
+
+
+def evaluate_prelogin_requirements(
+    admin_state: Mapping[str, object] | None,
+) -> list[SetupRequirement]:
+    """Return requirements for the optional reboot-to-LoginWindow remote-login path.
+
+    These requirements deliberately do not participate in the host's normal
+    READY state. A logged-in Aqua host can be fully ready for Desktop, Files,
+    System, Terminal and Projects even when pre-login capability verification
+    has not been run for the current build.
+    """
+    if admin_state is None or not bool(admin_state.get('installed')):
+        return [
+            SetupRequirement(
+                'prelogin_agent',
+                'LoginWindow pre-login agent',
+                'required only for remote Desktop before macOS login after reboot',
+                False,
+            ),
+            SetupRequirement(
+                'prelogin_capability_proof',
+                'Verified LoginWindow capture and input',
+                'optional proof for remote login after reboot; one proof applies to this Mac/build, not to each client',
+                False,
+            ),
+        ]
+    return [
+        SetupRequirement(
+            'prelogin_agent',
+            'LoginWindow pre-login agent',
+            'required only for remote Desktop before macOS login after reboot',
+            bool(admin_state.get('prelogin_agent_exists'))
+            and bool(admin_state.get('prelogin_agent_contract_ready')),
+        ),
+        SetupRequirement(
+            'prelogin_capability_proof',
+            'Verified LoginWindow capture and input',
+            'optional proof for remote login after reboot; one proof applies to this Mac/build, not to each client',
+            bool(admin_state.get('prelogin_probe_ready')),
+        ),
+    ]
+
+def prelogin_readiness_state(admin_state: Mapping[str, object] | None) -> str:
+    """Return VERIFIED, UNVERIFIED, NOT_READY or UNKNOWN for reboot pre-login."""
+    if admin_state is None:
+        return 'UNKNOWN'
+    requirements = {item.key: item for item in evaluate_prelogin_requirements(admin_state)}
+    agent = requirements['prelogin_agent'].ready
+    proof = requirements['prelogin_capability_proof'].ready
+    if not agent:
+        return 'NOT_READY'
+    if proof:
+        return 'VERIFIED'
+    return 'UNVERIFIED'
 
 
 def missing_setup_requirements(requirements: list[SetupRequirement]) -> list[SetupRequirement]:

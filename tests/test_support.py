@@ -44,9 +44,11 @@ def main() -> None:
     assert "except (socket.timeout, ssl.SSLWantReadError):" in client_source
     assert 'VIDEO_QUALITY_PRESETS' in client_source
     workflow = Path('.github/workflows/release.yml').read_text(encoding='utf-8')
-    assert 'MACOS_CERTIFICATE_P12_BASE64' not in workflow
-    assert 'scripts/sign-macos-transport.sh' in workflow
-    assert '--self-test-local-signing-identity' in workflow
+    assert 'MACOS_RELEASE_SIGNING_MODE=adhoc' in workflow
+    assert 'MACOS_RELEASE_SIGNING_MODE=developer-id' in workflow
+    assert "scripts/sign-macos-transport.sh 'dist/ZorinMacBridge Server.app'" in workflow
+    assert 'scripts/sign-macos-release.sh' in workflow
+    assert 'Missing secret: MACOS_DEVELOPER_ID_P12_BASE64' not in workflow
     print('support tests: OK')
 
 

@@ -35,10 +35,12 @@ from updates import check_for_updates, install_update, updater_tls_self_test
 from settings import client_record, save_client_record
 from secret_store import get_password as get_saved_password, set_password as save_password_secret
 from zmb_video_policy import choose_adaptive_step, initial_tier_for_viewport, profile_for_tier
+from zmb_session_lifecycle import HANDOFF_REASON_PREFIX, PipelineProgress, parse_session_state
+from zmb_client_runtime import initialize_client_runtime_state
 
 from protocol import (
     AUTH, AUTH_FAIL, AUTH_OK, CLIPBOARD_DATA, CLIPBOARD_GET, CLIPBOARD_SET,
-    DOWNLOAD_BEGIN, DOWNLOAD_CHUNK, DOWNLOAD_END, DOWNLOAD_REQ, ERROR, VIDEO_H264, VIDEO_STATS,
+    DOWNLOAD_BEGIN, DOWNLOAD_CHUNK, DOWNLOAD_END, DOWNLOAD_REQ, ERROR, SESSION_STATE, VIDEO_H264, VIDEO_STATS,
     KEY, LIST_REQ, LIST_RESP, MKDIR_OK, MKDIR_REQ, MOUSE_BUTTON, MOUSE_MOVE,
     PacketReader, SCROLL, TEXT, UPLOAD_BEGIN, UPLOAD_CHUNK, UPLOAD_END,
     ascii_physical_keysym, pack_json, pack_packet, recv_one_blocking, unpack_json,
@@ -149,44 +151,10 @@ class ClientApp:
         self.fps_var = tk.StringVar(value='30')
         self.resolution_var = tk.StringVar(value='1080p')
         self.display_id_var = tk.IntVar(value=0)
-        self._display_source_sizes: dict[int, tuple[int, int]] = {}
-        self._auto_display_id = 0
-        self.remember_credentials_active = True
-        self._connect_snapshot = None
-        self._desktop_display_snapshot = None
-        self._credential_serial = 0
-        self._discovery_serial = 0
-        self._discovery_busy = False
-        self._update_check_busy = False
-        self._update_check_serial = 0
-
-        self.outgoing: queue.Queue[bytes] = queue.Queue(maxsize=1000)
-        self._mouse_move_lock = threading.Lock()
-        self._pending_mouse_move: bytes | None = None
-        self.ui_queue: queue.Queue[tuple] = queue.Queue()
-        self.stop_event = threading.Event()
-        self.net_thread: threading.Thread | None = None
-        self.video_thread: threading.Thread | None = None
-        self.video_frames: queue.Queue[Image.Image] = queue.Queue(maxsize=1)
-        self._video_reconfigure_event = threading.Event()
-        self._video_reconfigure_not_before = 0.0
-        self._video_viewport_width = 1600
-        self._last_render_delay_ms = 0.0
-        self.connected = False
-        self.prelogin_session = False
-        self.prelogin_video_ready = False
+        initialize_client_runtime_state(self)
         self.last_photo = None
-        self.remote_image_size = (1, 1)
-        self.display_rect = (0, 0, 1, 1)
-        self.modifiers_down: set[str] = set()
-        self.keys_down: set[str] = set()
-        self.remote_path = ''
-        self.file_entries: dict[str, dict] = {}
         self.tray = None
         self._clear_session_queues()
-        self.disconnect_requested = False
-        self.fullscreen_active = False
-        self.mouse_buttons_down: set[int] = set()
 
         self._build_ui()
         self._build_menu()
@@ -563,7 +531,7 @@ class ClientApp:
             raise ValueError('Paste the full server SHA-256 fingerprint (64 hex characters; colons optional).')
         return ip, port, password, expected_fp
 
-    def _secure_connect(self, role: str, auth_extra: dict | None = None) -> ssl.SSLSocket:
+    def _secure_connect(self, role: str, auth_extra: dict | None = None, auth_reader: PacketReader | None = None) -> ssl.SSLSocket:
         # Connection workers must never read Tk/GTK widget state. Capture one
         # immutable snapshot on the UI thread before starting a session.
         params = self._connect_snapshot
@@ -613,7 +581,7 @@ class ClientApp:
             auth.update(auth_extra)
         self._log('DEBUG', f'Sending authentication request for role={role!r}.')
         sock.sendall(pack_json(AUTH, auth))
-        kind, payload = recv_one_blocking(sock)
+        kind, payload = recv_one_blocking(sock, auth_reader or PacketReader())
         if kind == AUTH_FAIL:
             sock.close()
             self._log('ERROR', f'Authentication failed for role={role!r}: {payload.decode("utf-8", "replace")}')
@@ -630,6 +598,17 @@ class ClientApp:
             self.prelogin_session = bool(auth_info.get('prelogin'))
             if self.prelogin_session:
                 self.prelogin_video_ready = False
+                self._desktop_session_token = str(auth_info.get('session_token') or '')
+                try:
+                    self._desktop_session_generation = int(auth_info.get('session_generation') or 0)
+                except (TypeError, ValueError):
+                    self._desktop_session_generation = 0
+                if not self._desktop_session_token:
+                    sock.close()
+                    raise ConnectionError('Pre-login Desktop did not provide a session token')
+            else:
+                self._desktop_session_token = ''
+                self._desktop_session_generation = 0
             self.ui_queue.put(('prelogin_state', self.prelogin_session))
             displays = auth_info.get('displays')
             if isinstance(displays, list):
@@ -693,9 +672,14 @@ class ClientApp:
     def _network_loop(self) -> None:
         sock = None
         disconnect_reason = ''
+        handoff_requested = False
         try:
+            self._desktop_session_token = ''
+            self._desktop_session_generation = 0
             desktop_extra = {'remote_display': dict(self._desktop_display_snapshot or {})}
-            sock = self._secure_connect('desktop', desktop_extra)
+            reader = PacketReader()
+            sock = self._secure_connect('desktop', desktop_extra, auth_reader=reader)
+            prefetched_control_packets = reader.drain_pending()
             if self.remember_credentials_active:
                 try:
                     if self._connect_snapshot is None:
@@ -710,7 +694,6 @@ class ClientApp:
                 except Exception as exc:
                     self._log('WARNING', f'Could not remember credentials: {exc}')
             sock.settimeout(0.05)
-            reader = PacketReader()
             last_server_error = ''
             self.ui_queue.put(('connected',))
             self.video_thread = threading.Thread(target=self._video_loop, daemon=True)
@@ -730,19 +713,38 @@ class ClientApp:
                 if mouse_move is not None:
                     sock.sendall(mouse_move)
                 try:
-                    data = sock.recv(65536)
-                    if not data:
-                        if last_server_error:
-                            raise ConnectionError(f'Server closed after reporting: {last_server_error}')
-                        raise ConnectionError('Server closed the connection')
-                    for kind, payload in reader.feed(data):
+                    if prefetched_control_packets:
+                        packets = prefetched_control_packets
+                        prefetched_control_packets = []
+                    else:
+                        data = sock.recv(65536)
+                        if not data:
+                            if last_server_error:
+                                raise ConnectionError(f'Server closed after reporting: {last_server_error}')
+                            raise ConnectionError('Server closed the connection')
+                        packets = reader.feed(data)
+                    for kind, payload in packets:
                         if kind == CLIPBOARD_DATA:
                             self.ui_queue.put(('clipboard', payload.decode('utf-8', 'replace')))
+                        elif kind == SESSION_STATE:
+                            try:
+                                event = parse_session_state(unpack_json(payload))
+                            except Exception:
+                                event = parse_session_state(None)
+                            if event.kind == 'handoff':
+                                handoff_requested = True
+                                user = event.user
+                                generation = event.generation if event.generation is not None else self._desktop_session_generation
+                                self._log('INFO', f'Pre-login handoff requested by Mac (generation={generation}, user={user or "unknown"}).')
+                                self.ui_queue.put(('prelogin_handoff', user, generation))
+                                break
                         elif kind == ERROR:
                             server_error = payload.decode('utf-8', 'replace')
                             last_server_error = server_error
                             self._log('ERROR', f'Server reported: {server_error}')
                             self.ui_queue.put(('error', server_error))
+                    if handoff_requested:
+                        break
                 except (socket.timeout, ssl.SSLWantReadError):
                     pass
         except Exception as exc:
@@ -759,10 +761,14 @@ class ClientApp:
             # A control-channel failure owns the lifetime of the whole session.
             # Stop video/file helpers; an optional UI auto-reconnect can create a fresh session.
             self.stop_event.set()
-            if self.disconnect_requested and not disconnect_reason:
+            if handoff_requested:
+                disconnect_reason = HANDOFF_REASON_PREFIX
+            elif self.disconnect_requested and not disconnect_reason:
                 disconnect_reason = 'Disconnected by user'
             elif not disconnect_reason:
                 disconnect_reason = 'Desktop session ended'
+            self._desktop_session_token = ''
+            self._desktop_session_generation = 0
             self.ui_queue.put(('disconnected', disconnect_reason))
 
     def _queue_video_image(self, image: Image.Image) -> bool:
@@ -922,17 +928,25 @@ class ClientApp:
                     f'resolution={resolution["name"]}, fps={profile["fps"]}, '
                     f'quality={effective_name}, bitrate={profile["bitrate"] // 1_000_000} Mbit/s).',
                 )
-                sock = self._secure_connect('video', {
+                video_auth = {
                     'video': profile,
                     'quality': effective_name,
                     'display_id': display_id,
-                })
+                }
+                if self.prelogin_session:
+                    if not self._desktop_session_token:
+                        raise RuntimeError('Pre-login video cannot start without the active Desktop session token')
+                    video_auth['session_token'] = self._desktop_session_token
+                    video_auth['session_generation'] = self._desktop_session_generation
+                reader = PacketReader()
+                sock = self._secure_connect('video', video_auth, auth_reader=reader)
+                prefetched_packets = reader.drain_pending()
                 # ScreenCaptureKit may legitimately emit no frames while the display is
                 # completely unchanged. A read timeout is therefore an idle tick, NOT a
                 # broken session. Keep the timeout short so video-only reconfiguration
                 # stays responsive without disturbing the control channel.
                 sock.settimeout(0.5)
-                reader = PacketReader()
+                pipeline_progress = PipelineProgress() if self.prelogin_session else None
                 decoder = av.CodecContext.create('h264', 'r')
                 self._log('INFO', 'H.264 decoder initialized (PyAV/FFmpeg).')
 
@@ -946,16 +960,23 @@ class ClientApp:
                         intentional_reconnect = True
                         break
                     timed_out = False
-                    try:
-                        data = sock.recv(262144)
-                    except (socket.timeout, ssl.SSLWantReadError):
-                        timed_out = True
+                    if prefetched_packets:
+                        packets = prefetched_packets
+                        prefetched_packets = []
                         data = b''
-                    if not timed_out and not data:
-                        raise ConnectionError('Video connection closed by server')
+                    else:
+                        try:
+                            data = sock.recv(262144)
+                        except (socket.timeout, ssl.SSLWantReadError):
+                            timed_out = True
+                            data = b''
+                        if not timed_out and not data:
+                            raise ConnectionError('Video connection closed by server')
+                        packets = reader.feed(data) if data else []
                     if data:
                         stat_bytes += len(data)
-                        for kind, payload in reader.feed(data):
+                    if packets:
+                        for kind, payload in packets:
                             if kind == VIDEO_H264:
                                 for packet in decoder.parse(payload):
                                     for frame in decoder.decode(packet):
@@ -972,7 +993,26 @@ class ClientApp:
                                             if self.prelogin_session:
                                                 self.prelogin_video_ready = True
                                                 self.ui_queue.put(('prelogin_video_ready', img.width, img.height))
+                                            if pipeline_progress is not None:
+                                                transition = pipeline_progress.observe('client-decoded')
+                                                if transition.missing:
+                                                    self._log('WARNING', 'Pre-login pipeline reached client-decoded with missing stages: ' + ', '.join(transition.missing))
                                             self._log('INFO', f'First H.264 frame decoded: {img.width}x{img.height}.')
+                            elif kind == SESSION_STATE:
+                                try:
+                                    event = parse_session_state(unpack_json(payload))
+                                except Exception:
+                                    event = parse_session_state(None)
+                                if event.kind == 'pipeline' and event.stage:
+                                    if pipeline_progress is not None:
+                                        transition = pipeline_progress.observe(event.stage)
+                                        if transition.regression:
+                                            self._log('WARNING', f'Pre-login pipeline stage regressed from {transition.previous_stage} to {event.stage}.')
+                                    self._log('INFO', f'Pre-login pipeline: {event.stage}.')
+                                    self.ui_queue.put(('prelogin_pipeline', event.stage))
+                                elif event.kind == 'capture-backend' and event.backend:
+                                    self._log('INFO', f'Pre-login capture backend: {event.backend}.')
+                                    self.ui_queue.put(('prelogin_capture_backend', event.backend))
                             elif kind == VIDEO_STATS:
                                 try:
                                     decoded_stats = unpack_json(payload)

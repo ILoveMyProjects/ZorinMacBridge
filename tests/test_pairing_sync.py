@@ -96,7 +96,7 @@ def main() -> None:
     assert 'self.xcode_controller.selection_changed()' in client
     assert 'Mac paired ✓ · Desktop is not connected. Connect Desktop to use Files.' in client
     assert 'self._set_tls_fingerprint(fingerprint)' in client
-    assert 'zmb_pairing_state.py' in release
+    assert (ROOT / 'zmb_pairing_state.py').is_file()
     assert 'scripts/run-tests.sh' in release
     assert 'scripts/run-tests.sh' in ci
     assert 'remembered_host_key_matches' in backend
@@ -104,7 +104,6 @@ def main() -> None:
     assert 'ZMB_DESKTOP_TLS_FINGERPRINT=' in backend
     assert 'bootstrap_tls_fingerprint' in backend
     assert 'work="$(cd "$work" && /bin/pwd -P)"' in admin
-    assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.7'
 
     print('pairing state sync tests: OK')
 

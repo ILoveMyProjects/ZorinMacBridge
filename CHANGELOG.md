@@ -1,4 +1,129 @@
-## 0.15.7 — PreloginLoginFlowFix
+## 0.15.21 - recover LoginWindow first-frame capture
+
+- Uses supported ScreenCaptureKit `SCStream` as the primary LoginWindow capture backend on macOS 26+.
+- Accepts the initial `.started` ScreenCaptureKit sample so a static login screen can still produce the first frame.
+- Falls back to `SCScreenshotManager` only when SCStream starts but produces no encode submission within the 2-second proof window, or when SCStream start fails.
+- Forwards the selected pre-login capture backend to the Zorin client so real-device logs distinguish `scstream` from `screenshot-manager`.
+- Keeps CGDisplayStream prohibited and preserves the existing Stage D VideoToolbox/H.264 pipeline and bounded first-access-unit timeout.
+
+## 0.15.20 - split Aqua READY from pre-login verification
+
+- Fixes Stage F policy so an unverified LoginWindow capability probe no longer makes a working logged-in Aqua host globally NOT READY.
+- Keeps normal READY focused on Desktop/Files/System/Terminal/Projects prerequisites.
+- Reports reboot-to-LoginWindow capability separately as VERIFIED, UNVERIFIED or NOT READY.
+- Clarifies that one capability proof is stored on the Mac for the exact app build and applies to all paired Zorin clients; it is never per-client.
+- Terminal setup may emit `SETUP_OK=1` while separately reporting `PRELOGIN_AFTER_REBOOT=UNVERIFIED`; pre-login verification remains available but no longer blocks normal use.
+
+## 0.15.19 - free macOS release signing
+
+- Removes the hard dependency on paid Apple Developer credentials from GitHub Actions, installation, updates and READY/readiness.
+- Makes the default macOS release path certificate-free: GitHub ad-hoc transport signing, followed by one stable per-Mac local ad-hoc designated requirement before installation/update.
+- Keeps Developer ID + provisioning as an optional enhancement only when all three maintainer secrets are explicitly configured; missing secrets no longer fail CI or block `.dmg` creation.
+- Removes Developer ID/provisioning from the REQUIRED setup contract. READY now depends on the actual LoginWindow agent and current capability proof, not on a paid signing service.
+- Preserves GitHub-built Linux `.deb` and macOS `.dmg` installers.
+
+## 0.15.18 - macOS 26 native build fix
+
+- Fixes the Swift 6.3 exclusivity violation in the Stage-B capability probe by reading image pixels through the borrowed `UnsafeMutableRawBufferPointer` while `withUnsafeMutableBytes` is active.
+- Adds source gates that reject the obsolete `tests/test_prelogin_displaystream_capture.py` regression test, which targets the removed `CGDisplayStream` backend.
+- Keeps ScreenCaptureKit-only pre-login capture, the Apple-Silicon/macOS-26 target, and GitHub-built `.deb` + `.dmg` installers unchanged.
+
+## 0.15.17 - Apple Silicon macOS 26+ target
+
+- Corrects the 0.15.16 platform scope: the supported Mac target is Apple Silicon arm64 (M1+) running macOS 26.0 Tahoe or later.
+- Raises native C/Swift deployment target and the app `LSMinimumSystemVersion` to 26.0; macOS 25 and older are rejected by installers/source setup.
+- Makes CoreHID a required Stage-B capability dependency for the macOS 26 target instead of a weak/optional SDK path.
+- Narrows native CI and tagged macOS packaging to the `macos-26` Apple-Silicon runner.
+- Keeps GitHub-hosted installable release packaging for both machines: Linux amd64 `.deb` and macOS arm64 `.dmg`; local validation does not build either installer.
+
+## 0.15.16 - Apple Silicon macOS 15+ target
+
+- Narrows the supported Mac platform to Apple Silicon arm64 (M1+) with macOS 15.0 or later; Intel and macOS 14 or older are intentionally unsupported.
+- Sets the native C/Swift deployment target to macOS 15.0 and stamps `LSMinimumSystemVersion=15.0` into the release app.
+- CI now compiles on the M1 `macos-15` runner (oldest supported OS) and `macos-26`; Xcode 27 is no longer a required target for this machine profile.
+- Removes pre-macOS-15 capture/streamer fallbacks from the production Swift streamer.
+- Makes CoreHID capability probing optional at SDK build time: macOS 15 builds use the legacy IOHID/Quartz probe, while newer SDK builds may weak-link CoreHID without raising the app deployment target.
+
+## 0.15.15 — ScreenCaptureKitOnlyFix
+
+- Fixes the Stage A macOS 26/Xcode 27 native-build failure: `CGDisplayStream.start()` / `.stop()` are unavailable from the macOS 15+ SDKs and cannot be used by the production streamer.
+- Removes `CGDisplayStream` completely from `ZMBStreamerLib.swift` instead of bypassing SDK availability checks.
+- Uses `SCScreenshotManager.captureSampleBuffer()` as the sole LoginWindow capture backend on macOS 14+; the logged-in Aqua desktop continues to use continuous `SCStream`.
+- Preserves the Stage D pre-login pipeline states (`capture-frame -> pixel-buffer -> encode-submit -> h264-written -> client-decoded`) and the existing bounded first-H.264 timeout/diagnostics.
+- Adds a native-source regression guard that rejects any reintroduction of `CGDisplayStream` into the production streamer.
+
+## 0.15.14 — SessionLifecycleRefactor
+
+- Implements Stage G without changing the intended Desktop/LoginWindow user flow: shared session lifecycle policy is extracted from GUI/server monoliths into `zmb_session_lifecycle.py`.
+- Moves pre-login control ownership/token validation into the shared lifecycle module while preserving the existing replacement grace period, socket shutdown behavior and handoff ordering.
+- Centralizes `SESSION_STATE` handoff/pipeline construction/parsing and the handoff reconnect delay so client and server no longer duplicate stringly-typed lifecycle policy.
+- Adds first-frame `PipelineProgress` tracking (`capture-frame -> pixel-buffer -> encode-submit -> h264-written -> client-decoded`) for diagnostics and direct behavioral tests; unknown future native stages remain wire-compatible and are ignored by older clients instead of tearing down Video.
+- Extracts GUI-independent Linux client runtime-state initialization into `zmb_client_runtime.py`, used by both Tk and GTK frontends so backend fields cannot silently diverge between constructors.
+- Replaces Stage D Python source-string assertions with direct coordinator/session-state/handoff tests; native C/Swift structural checks remain only where Linux CI cannot execute the macOS frameworks and are backed by the Stage A macOS build gate.
+- Removes exact release-number assertions from unrelated behavioral tests and adds a version-contract test so normal version bumps do not require editing dozens of regression tests.
+- Adds constructor-state preservation coverage, shared lifecycle/reconnect/pipeline tests and frontend-only GTK state coverage.
+
+## 0.15.13 — PreloginReadinessGate
+
+- Implements Stage F: the macOS setup contract no longer reports READY unless the unattended LoginWindow path itself is verified, not merely the normal Aqua permissions/P0/SSH path.
+- Validates the installed `/Library/LaunchAgents/com.ilovemyprojects.zorinmacbridge.prelogin.plist` contract, including LoginWindow session type, RunAtLoad/KeepAlive, installed app binary and `--prelogin-server` entry point.
+- Requires the installed app to pass the Stage C Developer ID/provisioning verification with both restricted pre-login capabilities before READY can be shown.
+- Persists each Stage B LoginWindow capability-probe result in the root-owned P0 state together with the installed app version and CDHash; READY requires `overall=PASS`, usable capture, working input, and an exact match to the currently installed build.
+- Invalidates the prior persistent proof as soon as a new capability-probe attempt begins, preventing an older PASS from surviving a revoked permission or newly failing probe.
+- Makes an app update/re-sign automatically stale the previous proof through the version/CDHash comparison, so a new build must prove LoginWindow capture/input again.
+- Extends `zmb-admin status` with current/stale/ready pre-login proof fields for remote diagnostics.
+- Extends the Mac GUI and terminal installer so missing pre-login agent/signing/proof conditions are red REQUIRED items; `SETUP_COMPLETE=1` / READY are impossible until all three are satisfied.
+- Adds Stage F regression coverage for requirement policy, stale proof rejection, pre-login plist contract validation and persistent proof wiring. Runtime capture/input/handoff behavior from Stage D is otherwise unchanged.
+
+## 0.15.12 — PreloginCoreLifecycle
+
+- Implements Stage D: the macOS LoginWindow runtime now has a single Desktop/control owner, and replacement connections must wait for the previous input owner to complete cleanup before they can become active.
+- Issues a cryptographically random per-control `session_token` during pre-login Desktop authentication; the dedicated video role is rejected unless it presents the token belonging to the currently active control session from the same LAN peer.
+- Hardens the native LoginWindow IOHID bridge with mutex-protected, reference-counted open/close semantics so stale cleanup cannot close a newer input handle.
+- Adds explicit pre-login pipeline states: `capture-frame`, `pixel-buffer`, `encode-submit`, `h264-written`, followed by the existing client-side first-frame decode confirmation. CGDisplayStream proof-of-life now requires successful VideoToolbox submission rather than merely seeing an IOSurface callback.
+- Adds an explicit `SESSION_STATE` lifecycle packet. When `/dev/console` changes from LoginWindow to a real user, the pre-login server announces `handoff -> aqua`, interrupts stale video, stops the LoginWindow listener, and exits.
+- Adds bounded Aqua bind retry for the shared Desktop port and a 250 ms client handoff reconnect path, avoiding ordinary exponential reconnect delay during LoginWindow -> Aqua transition.
+- Preserves packets coalesced with `AUTH_OK` by keeping the same `PacketReader` across authentication and the live Desktop/Video role; this prevents an immediately-following first H.264 access unit or handoff state from being silently discarded.
+- Closes the LoginWindow IOHID handle if input initialization fails after native open but before geometry setup completes.
+- Adds Stage D concurrency/handoff regression coverage. Production capture/input capability still depends on the Stage B/C real-Mac capability/signing requirements; this release does not claim physical LoginWindow success without that acceptance test.
+
+## 0.15.11 — SigningProvisioningGate
+
+- Introduces Stage C production signing for the macOS server: Developer ID Application + an embedded Apple-issued Developer ID provisioning profile instead of release-time ad-hoc transport signing plus per-Mac re-signing.
+- Requires the profile to authorize `com.apple.developer.persistent-content-capture` and `com.apple.developer.hid.virtual.device` for the exact ZorinMacBridge App ID, and rejects expired/device-limited profiles.
+- Verifies that the selected Developer ID signing certificate is present in the provisioning profile before the build is allowed to continue.
+- Builds PyInstaller nested Mach-O code with the Developer ID identity, then signs the outer app with Hardened Runtime, secure timestamp and profile-derived entitlements.
+- Adds `mac_release_signing.py` and `scripts/sign-macos-release.sh` to verify profile, App ID, TeamIdentifier, signed entitlements and final application signature.
+- Changes fresh install and in-app/P0 updates to preserve the Developer ID/provisioned bundle exactly; production releases are no longer locally re-signed after download.
+- Keeps the old local explicit-DR implementation only as a legacy/source fallback and prevents its startup migration from touching a valid Stage C release.
+- Adds Stage C regression tests and acceptance documentation. Production release remains blocked until Apple grants both restricted capabilities and matching GitHub signing secrets are configured.
+
+## 0.15.10 — PreloginCapabilityProbe
+
+- Adds Stage B capability proof for the physical macOS LoginWindow without changing the production Desktop/pre-login runtime paths.
+- Adds a diagnostic-only `libzmb_capability_probe.dylib` that is loaded into the existing `ZorinMacBridge Server.app` process identity, avoiding false TCC results from a separately signed helper executable.
+- Proves capture by taking a real ScreenCaptureKit screenshot, writing a PNG, recording dimensions/SHA-256, and rejecting uniform/black frames instead of treating an API callback as success.
+- Probes CoreHID virtual-keyboard input with a harmless left-Shift down/up report and verifies that the LoginWindow session modifier state actually toggles; no text or password is injected.
+- Records the effective `com.apple.developer.persistent-content-capture` and `com.apple.developer.hid.virtual.device` entitlements and keeps `CGPreflightScreenCaptureAccess()` diagnostic-only because macOS 27 Remote Desktop authorization has no public silent status API.
+- Adds a restricted `zmb-admin capability-probe` command that launches the installed app once inside the active LoginWindow session and returns structured PASS/BLOCKED/FAIL output over the existing paired System SSH channel.
+- Extends the macOS native gate to compile and inspect the capability dylib and moves macOS release packaging to `macos-26` so CoreHID is available at build time. The normal streamer dylib keeps its macOS 13 deployment target and does not link CoreHID.
+
+## 0.15.9 — MacOSBuildGate
+
+- Adds a required Apple-Silicon native macOS compile gate to push/pull-request CI on both `macos-26` and `xcode-27`, so unavailable Swift/CoreGraphics APIs fail before a release tag.
+- Adds the same two-runner native gate to the release workflow and makes the macOS packaging job depend on it.
+- Introduces `scripts/verify-macos-native-gate.sh` as the single gate for native C/Swift compilation, arm64 verification, required framework linkage and exported streamer/input ABI symbols.
+- Removes the duplicate inline native compiler command from `release.yml`; release packaging now consumes the same canonical `scripts/build-macos-streamer.sh` path exercised by CI.
+- Adds regression coverage and an acceptance checklist for the macOS build gate.
+- Does not change pre-login capture, input, authentication, discovery, update or handoff runtime behavior.
+
+## 0.15.8 — CGDisplayStreamSwiftFix
+
+- Fixes the macOS/Xcode 16.4 release build failure introduced by 0.15.7: Swift now uses the imported `CGDisplayStream(...)` initializer, `.start()`/`.stop()` instance methods, and `CGDisplayStream.showCursor` / `queueDepth` / `minimumFrameTime` property keys instead of obsolete C-style symbols that Swift marks unavailable.
+- Routes state reads/writes from async pre-login capture code through a synchronous scoped-lock helper, avoiding `NSLock.lock()` / `unlock()` calls directly from async contexts that become errors in Swift 6 language mode.
+- Removes the two unused-mutable-variable warnings in virtual-display lifetime management while preserving the intended strong-reference lifetime.
+- Keeps the 0.15.7 LoginWindow `CGDisplayStream` capture strategy, screenshot fallback, video-session lifecycle and network protocol unchanged.
+- Adds a regression assertion that the obsolete Swift-imported CoreGraphics spellings cannot return to `ZMBStreamerLib.swift`.
 
 - Fixes the 0.15.6 reconnect deadlock where a logically stopped native streamer could keep `_VIDEO_SESSION_LOCK` until slow Swift cleanup finished. Video ownership is now released immediately after `zmb_streamer_stop()` and before `runner.join()`/destroy.
 - Makes native teardown bounded: stop invalidates VideoToolbox without `VTCompressionSessionCompleteFrames`, closes the output pipe immediately, and no longer waits synchronously on a blocked writer queue.

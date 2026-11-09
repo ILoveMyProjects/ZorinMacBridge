@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from mac_requirements import evaluate_setup_requirements, missing_setup_requirements
+from mac_requirements import evaluate_prelogin_requirements, evaluate_setup_requirements, missing_setup_requirements
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -13,6 +13,9 @@ def main() -> None:
         'remote_login': 'on',
         'ssh_port_ready': True,
         'ssh_host_key_ready': True,
+        'prelogin_agent_exists': True,
+        'prelogin_agent_contract_ready': True,
+        'prelogin_probe_ready': True,
     }
     requirements = evaluate_setup_requirements(
         screen_recording=True,
@@ -44,6 +47,25 @@ def main() -> None:
     assert 'auto_start_server' in missing
     assert 'ssh_transport' not in missing  # Remote Login OFF is the primary failure.
 
+    prelogin_broken = dict(ready_state)
+    prelogin_broken.update(
+        prelogin_agent_contract_ready=False,
+        prelogin_probe_ready=False,
+    )
+    requirements = evaluate_setup_requirements(
+        screen_recording=True,
+        accessibility=True,
+        session_password_configured=True,
+        admin_state=prelogin_broken,
+        launch_at_login=True,
+        auto_start_server=True,
+    )
+    # Pre-login verification is intentionally separate from normal Aqua READY.
+    assert not missing_setup_requirements(requirements)
+    prelogin_missing = {item.key for item in missing_setup_requirements(evaluate_prelogin_requirements(prelogin_broken))}
+    assert {'prelogin_agent', 'prelogin_capability_proof'} <= prelogin_missing
+    assert 'prelogin_release_identity' not in prelogin_missing
+
     gui = (ROOT / 'mac_server_gui.py').read_text(encoding='utf-8')
     terminal = (ROOT / 'mac_terminal_setup.py').read_text(encoding='utf-8')
     admin = (ROOT / 'mac_admin_setup.py').read_text(encoding='utf-8')
@@ -52,14 +74,19 @@ def main() -> None:
     ci = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
     release = (ROOT / '.github/workflows/release.yml').read_text(encoding='utf-8')
 
-    assert 'Required setup for full Zorin operation' in gui
+    assert 'Required setup for normal Aqua operation' in gui
     assert 'Fix next REQUIRED item' in gui
     assert 'Open Remote Login Settings' in gui
     assert '#c62828' in gui
     assert 'REQUIRED: setup incomplete' in gui
+    assert 'READY — normal Aqua/Desktop/Files/System/Terminal operation is available.' in gui
+    assert 'One proof from any paired Zorin client covers this Mac/build.' in gui
     assert 'Required setup incomplete' in gui
     assert "'ssh_port_ready': ssh_port_ready" in admin
     assert "'ssh_host_key_ready': bool(ssh_host_fingerprints())" in admin
+    assert "'prelogin_agent_contract_ready': _prelogin_agent_contract_ready()" in admin
+    assert "'release_signing_mode': _release_signing_mode()" in admin
+    assert "'prelogin_probe_ready': ready" in admin
     assert "if 'remote login: on' in remote_text" in admin
     assert "elif 'remote login: off' in remote_text" in admin
     assert "if 'on' in remote_text" not in admin

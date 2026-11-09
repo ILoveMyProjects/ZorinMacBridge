@@ -279,7 +279,17 @@ def bootstrap_installed_app_identity() -> None:
         same_location = app.resolve() == expected.resolve()
     except Exception:
         same_location = str(app) == str(expected)
-    if not same_location or app_has_local_identity(app):
+    if not same_location:
+        return
+    try:
+        from mac_release_signing import app_has_release_identity
+        if app_has_release_identity(app):
+            # Optional Developer-ID releases keep their publisher signature.
+            # The default free release path is locally ad-hoc signed instead.
+            return
+    except Exception:
+        pass
+    if app_has_local_identity(app):
         return
 
     ensure_local_identity()

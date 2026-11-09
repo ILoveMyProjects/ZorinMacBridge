@@ -3,7 +3,6 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.7'
 
 client = (ROOT / 'linux_client.py').read_text(encoding='utf-8')
 gtk = (ROOT / 'linux_client_gtk.py').read_text(encoding='utf-8')
@@ -45,8 +44,8 @@ assert 'Requested display is not yet visible to ScreenCaptureKit' in swift
 assert 'requested ?? automatic' not in swift
 
 # 2K -> 4K replacement is transactional and preserves the previous display on failure.
-assert 'var previousDisplay = display' in swift
-assert 'previousDisplay = nil' in swift
+assert 'let previousDisplay = display' in swift
+assert 'withExtendedLifetime(previousDisplay) {}' in swift
 assert 'Keep the working virtual display alive while constructing a replacement' in swift
 
 # Zorin-side compatibility for old pystray + Pillow >= 10.

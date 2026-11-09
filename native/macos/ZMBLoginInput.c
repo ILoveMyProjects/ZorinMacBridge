@@ -6,6 +6,7 @@
 #include <IOKit/hidsystem/IOLLEvent.h>
 #include <IOKit/hidsystem/ev_keymap.h>
 #include <mach/mach.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -19,6 +20,8 @@
  */
 
 static io_connect_t g_zmb_hid = IO_OBJECT_NULL;
+static uint32_t g_zmb_hid_refs = 0;
+static pthread_mutex_t g_zmb_hid_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /*
  * Modern macOS can reject IOHIDPostEvent from a LoginWindow agent with
@@ -78,7 +81,9 @@ static int32_t zmb_quartz_scroll(int32_t dx, int32_t dy, uint32_t flags) {
 
 static int32_t zmb_post(UInt32 type, IOGPoint location, NXEventData *data,
                         IOOptionBits flags, IOOptionBits options) {
+    pthread_mutex_lock(&g_zmb_hid_lock);
     if (g_zmb_hid == IO_OBJECT_NULL) {
+        pthread_mutex_unlock(&g_zmb_hid_lock);
         return (int32_t)kIOReturnNotOpen;
     }
 #pragma clang diagnostic push
@@ -93,11 +98,15 @@ static int32_t zmb_post(UInt32 type, IOGPoint location, NXEventData *data,
         options
     );
 #pragma clang diagnostic pop
+    pthread_mutex_unlock(&g_zmb_hid_lock);
     return (int32_t)kr;
 }
 
 int32_t zmb_login_input_open(void) {
+    pthread_mutex_lock(&g_zmb_hid_lock);
     if (g_zmb_hid != IO_OBJECT_NULL) {
+        g_zmb_hid_refs += 1;
+        pthread_mutex_unlock(&g_zmb_hid_lock);
         return (int32_t)kIOReturnSuccess;
     }
     io_service_t service = IOServiceGetMatchingService(
@@ -105,6 +114,7 @@ int32_t zmb_login_input_open(void) {
         IOServiceMatching(kIOHIDSystemClass)
     );
     if (service == IO_OBJECT_NULL) {
+        pthread_mutex_unlock(&g_zmb_hid_lock);
         return (int32_t)kIOReturnNotFound;
     }
     io_connect_t connection = IO_OBJECT_NULL;
@@ -116,17 +126,25 @@ int32_t zmb_login_input_open(void) {
     );
     IOObjectRelease(service);
     if (kr != kIOReturnSuccess) {
+        pthread_mutex_unlock(&g_zmb_hid_lock);
         return (int32_t)kr;
     }
     g_zmb_hid = connection;
+    g_zmb_hid_refs = 1;
+    pthread_mutex_unlock(&g_zmb_hid_lock);
     return (int32_t)kIOReturnSuccess;
 }
 
 void zmb_login_input_close(void) {
-    if (g_zmb_hid != IO_OBJECT_NULL) {
+    pthread_mutex_lock(&g_zmb_hid_lock);
+    if (g_zmb_hid_refs > 0) {
+        g_zmb_hid_refs -= 1;
+    }
+    if (g_zmb_hid != IO_OBJECT_NULL && g_zmb_hid_refs == 0) {
         IOServiceClose(g_zmb_hid);
         g_zmb_hid = IO_OBJECT_NULL;
     }
+    pthread_mutex_unlock(&g_zmb_hid_lock);
 }
 
 int32_t zmb_login_input_key(uint16_t key_code, int32_t down,

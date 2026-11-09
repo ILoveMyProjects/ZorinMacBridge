@@ -20,6 +20,12 @@ if [ "$ARCH" != "arm64" ]; then
   echo "ZorinMacBridge Server supports Apple Silicon (arm64) Macs only; detected: $ARCH" >&2
   exit 1
 fi
+MACOS_VERSION="$(/usr/bin/sw_vers -productVersion 2>/dev/null || true)"
+MACOS_MAJOR="${MACOS_VERSION%%.*}"
+if [[ ! "$MACOS_MAJOR" =~ ^[0-9]+$ ]] || (( MACOS_MAJOR < 26 )); then
+  echo "ZorinMacBridge requires macOS 26.0 or later; detected: ${MACOS_VERSION:-unknown}" >&2
+  exit 1
+fi
 ASSET="ZorinMacBridge-Server_macOS-arm64.dmg"
 SUMS="SHA256SUMS-macOS-arm64.txt"
 
@@ -61,7 +67,8 @@ if [ ! -d "$SOURCE" ]; then
   exit 1
 fi
 
-# Verify the transport artifact before changing its local code identity.
+# Free releases are ad-hoc transport signed in GitHub Actions. Developer ID is
+# supported when configured by the maintainer, but it is never required.
 codesign --verify --deep --strict --verbose=2 "$SOURCE"
 ACTUAL_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$SOURCE/Contents/Info.plist" 2>/dev/null || true)"
 if [ "$ACTUAL_BUNDLE_ID" != "$BUNDLE_ID" ]; then
@@ -69,22 +76,34 @@ if [ "$ACTUAL_BUNDLE_ID" != "$BUNDLE_ID" ]; then
   exit 1
 fi
 
-SIGNED="$STAGE/$APP_NAME"
-ditto "$SOURCE" "$SIGNED"
+STAGED="$STAGE/$APP_NAME"
+ditto "$SOURCE" "$STAGED"
+if "$SOURCE/Contents/MacOS/ZorinMacBridge Server" --verify-release-app "$SOURCE" >/dev/null 2>&1; then
+  SIGNING_MODE="developer-id"
+  echo "Optional Developer ID release detected; preserving publisher signature."
+else
+  SIGNING_MODE="local-adhoc"
+  echo "Free release detected; applying this Mac's stable local ad-hoc identity."
+  "$SOURCE/Contents/MacOS/ZorinMacBridge Server" --local-sign-app "$STAGED"
+fi
+codesign --verify --deep --strict --verbose=2 "$STAGED"
 
-echo "Applying this Mac's stable local designated requirement…"
-"$SOURCE/Contents/MacOS/ZorinMacBridge Server" --local-sign-app "$SIGNED"
-codesign --verify --deep --strict --verbose=2 "$SIGNED"
-
-echo "Installing to /Applications…"
+echo "Installing verified $SIGNING_MODE release to /Applications…"
 sudo rm -rf "$DEST"
-sudo ditto "$SIGNED" "$DEST"
+sudo ditto "$STAGED" "$DEST"
+
+codesign --verify --deep --strict --verbose=2 "$DEST"
+if [ "$SIGNING_MODE" = "developer-id" ]; then
+  "$DEST/Contents/MacOS/ZorinMacBridge Server" --verify-release-app "$DEST"
+fi
 
 echo
 echo "ZorinMacBridge Server is installed in /Applications."
-echo "This Mac now has a persistent local designated requirement for ZorinMacBridge."
-echo "Future in-app updates are re-signed with the same designated requirement before installation."
-echo "No certificate, keychain setup, GitHub login, Developer ID, or Linux signing setup is required."
+if [ "$SIGNING_MODE" = "developer-id" ]; then
+  echo "Optional Developer ID signature and provisioning profile were preserved."
+else
+  echo "A free per-Mac stable ad-hoc code identity was applied; no paid Apple developer service was required."
+fi
 echo "The app was NOT started automatically."
 
 if [ "$APP_ONLY" -eq 0 ]; then

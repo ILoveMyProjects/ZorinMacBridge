@@ -20,14 +20,14 @@ assert 'SystemController' in client
 assert "self.stack.add_titled(self.system_page, 'system', 'System')" in client
 assert 'Enable / Repair' in server
 assert 'Unattended access / recovery' in server
-assert 'zmb_admin_backend.py' in release and 'zmb_pairing_state.py' in release and 'zmb_system_page.py' in release
+assert (root / 'zmb_admin_backend.py').is_file() and (root / 'zmb_pairing_state.py').is_file() and (root / 'zmb_system_page.py').is_file()
 assert "--add-data 'native/macos/admin:native/macos/admin'" in release
 assert 'Request Screen Recording Access' in server
 assert 'Request Mouse/Keyboard Access' in server
 assert "['/usr/bin/open', str(path)]" in server
 assert "accelerator='⌘⇧O'" in server
 assert 'gir1.2-gtk-4.0' in release and 'gir1.2-adw-1' in release
-assert 'linux_client_gtk.py' in release
+assert (root / 'linux_client_gtk.py').is_file()
 assert "os.execv(exe, [exe])" in client
 
 restart_block = client.split('    def _restart_after_update(self) -> None:', 1)[1].split('    # ---------- Queue / video ----------', 1)[0]
@@ -37,10 +37,11 @@ assert 'self.disconnect_remote()' not in restart_block
 
 assert not (root / 'scripts/setup-stable-signing-linux.sh').exists()
 assert (root / 'mac_local_signing.py').exists()
-assert (root / 'scripts/sign-macos-transport.sh').exists()
+assert (root / 'scripts/sign-macos-release.sh').exists()
 assert 'Require stable macOS signing identity' not in release
-assert 'MACOS_CERTIFICATE_P12_BASE64' not in release
-assert '--self-test-local-signing-identity' in release
+assert 'MACOS_DEVELOPER_ID_P12_BASE64' in release
+assert 'MACOS_DEVELOPER_ID_PROFILE_BASE64' in release
+assert '--verify-release-app' in release
 assert 'macos-intel' not in release
 assert 'macos-15-intel' not in release
 assert 'ZorinMacBridge-Server_macOS-x86_64.dmg' not in release
@@ -74,4 +75,4 @@ assert 'ProjectsController' in client
 assert "self.stack.add_titled(self.terminal_page, 'terminal', 'Terminal')" in client
 assert "self.stack.add_titled(self.projects_page, 'projects', 'Projects')" in client
 assert 'gir1.2-vte-3.91' in release and 'libvte-2.91-gtk4-0' in release
-assert 'zmb_shell_backend.py zmb_terminal_page.py zmb_project_data.py zmb_projects_page.py' in release
+assert all((root / name).is_file() for name in ('zmb_shell_backend.py', 'zmb_terminal_page.py', 'zmb_project_data.py', 'zmb_projects_page.py'))

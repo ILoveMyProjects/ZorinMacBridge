@@ -16,6 +16,7 @@ case "$orig" in
   "zmb-admin logs") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin logs ;;
   "zmb-admin diagnose") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin diagnose ;;
   "zmb-admin recover-all") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin recover-all ;;
+  "zmb-admin capability-probe") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin capability-probe ;;
   "zmb-admin check-update") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin check-update ;;
   "zmb-admin update-now") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin update-now ;;
   "zmb-admin set-auto-update off") exec /usr/bin/sudo -n /usr/local/sbin/zmb-admin set-auto-update off ;;

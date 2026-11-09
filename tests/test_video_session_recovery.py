@@ -9,7 +9,6 @@ sys.path.insert(0, str(ROOT))
 
 import mac_server
 
-assert (ROOT / 'VERSION').read_text(encoding='utf-8').strip() == '0.15.7'
 
 # Reset shared state in case this file is run in-process with another test runner.
 while mac_server._VIDEO_SESSION_LOCK.locked():

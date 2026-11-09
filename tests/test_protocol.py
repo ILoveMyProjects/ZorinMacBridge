@@ -5,7 +5,7 @@ from pathlib import Path
 
 from mac_server import file_session, is_lan_ip, safe_share_path
 from protocol import (
-    DOWNLOAD_BEGIN, DOWNLOAD_CHUNK, DOWNLOAD_END, DOWNLOAD_REQ,
+    AUTH_OK, DOWNLOAD_BEGIN, DOWNLOAD_CHUNK, DOWNLOAD_END, DOWNLOAD_REQ,
     LIST_REQ, LIST_RESP, MKDIR_OK, MKDIR_REQ, PacketReader, VIDEO_H264,
     UPLOAD_BEGIN, UPLOAD_CHUNK, UPLOAD_END,
     pack_json, pack_packet, recv_one_blocking, unpack_json,
@@ -72,6 +72,20 @@ def test_video_packet_framing():
         out.extend(reader.feed(wire[off:off + 137]))
     assert out == [(VIDEO_H264, payload)]
 
+
+def test_auth_reader_preserves_coalesced_first_video_packet():
+    server, client = socket.socketpair()
+    try:
+        payload = b"\x00\x00\x00\x01\x65first-frame"
+        server.sendall(pack_json(AUTH_OK, {'role': 'video'}) + pack_packet(VIDEO_H264, payload))
+        reader = PacketReader()
+        kind, _ = recv_one_blocking(client, reader)
+        assert kind == AUTH_OK
+        assert reader.drain_pending() == [(VIDEO_H264, payload)]
+    finally:
+        server.close()
+        client.close()
+
 def test_path_security():
     with tempfile.TemporaryDirectory() as td:
         share = Path(td)
@@ -95,6 +109,7 @@ def test_lan_filter():
 if __name__ == '__main__':
     test_reader_and_file_tree()
     test_video_packet_framing()
+    test_auth_reader_preserves_coalesced_first_video_packet()
     test_path_security()
     test_lan_filter()
     print('all tests passed')

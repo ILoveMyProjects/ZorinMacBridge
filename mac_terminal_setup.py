@@ -5,7 +5,7 @@ import subprocess
 import sys
 
 from mac_admin_setup import admin_component_state, current_short_user, install_unattended_access, ssh_host_fingerprints
-from mac_requirements import evaluate_setup_requirements, missing_setup_requirements
+from mac_requirements import evaluate_setup_requirements, missing_setup_requirements, prelogin_readiness_state
 from mac_server import accessibility_permission_status, screen_capture_permission_status
 from settings import load_server_password_verifier, save_server_password, update_server_settings
 
@@ -125,13 +125,21 @@ def run_terminal_setup() -> int:
     print(f'MACOS_SHORT_USER={user}')
     print('REMOTE_LOGIN=' + ('on' if remote_login_ready else 'manual_required'))
     print(f'AUTO_UPDATE_MODE={auto_update_mode}')
+    prelogin_state = prelogin_readiness_state(state)
+    print(f'PRELOGIN_AFTER_REBOOT={prelogin_state}')
+    if prelogin_state == 'VERIFIED':
+        print('PRELOGIN_NOTE=LoginWindow capture/input proof is current for this Mac/build and applies to all paired Zorin clients.')
+    elif prelogin_state == 'UNVERIFIED':
+        print('PRELOGIN_NOTE=LoginWindow remote login is not verified for this build; normal Aqua operation is unaffected. Run capability-probe once from any paired Zorin client if you want to verify reboot-to-login.')
+    elif prelogin_state == 'NOT_READY':
+        print('PRELOGIN_NOTE=LoginWindow agent is not ready; normal Aqua operation is unaffected. Use Enable / Repair if pre-login-after-reboot is required.')
     if missing:
         print('REQUIRED_SETUP_BEGIN')
         for item in missing:
             print(f'REQUIRED={item.key}|{item.label}|{item.impact}')
         print('REQUIRED_SETUP_END')
         print()
-        _required('Setup is incomplete. Open ZorinMacBridge Server on this Mac and resolve every red REQUIRED item before relying on unattended operation.')
+        _required('Setup is incomplete. Open ZorinMacBridge Server on this Mac and resolve every red REQUIRED item before relying on normal Aqua operation.')
     else:
         print('SETUP_OK=1')
     if not remote_login_ready:
