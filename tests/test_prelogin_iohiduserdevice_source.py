@@ -6,9 +6,14 @@ C = (ROOT / 'native/macos/ZMBLoginInput.c').read_text()
 SERVER = (ROOT / 'mac_server.py').read_text()
 GATE = (ROOT / 'scripts/verify-macos-native-gate.sh').read_text()
 
-assert '#include <IOKit/hid/IOHIDUserDevice.h>' in C
-assert 'IOHIDUserDeviceCreate' in C
-assert 'IOHIDUserDeviceHandleReport' in C
+assert '#include <IOKit/hid/IOHIDUserDevice.h>' not in C
+assert '#include <dlfcn.h>' in C
+assert 'typedef struct __IOHIDUserDevice *IOHIDUserDeviceRef;' in C
+assert 'dlsym(' in C
+assert '"IOHIDUserDeviceCreate"' in C
+assert '"IOHIDUserDeviceHandleReport"' in C
+assert 'g_zmb_user_device_create' in C
+assert 'g_zmb_user_device_handle_report' in C
 assert 'ZMB_LOGIN_INPUT_USER_DEVICE' in C
 assert 'zmb_login_input_backend' in C
 assert 'zmb_login_input_open_backend' in C

@@ -2,7 +2,7 @@
 #include <ApplicationServices/ApplicationServices.h>
 #include <IOKit/IOKitLib.h>
 #include <IOKit/hid/IOHIDKeys.h>
-#include <IOKit/hid/IOHIDUserDevice.h>
+#include <dlfcn.h>
 #include <IOKit/hidsystem/IOHIDLib.h>
 #include <IOKit/hidsystem/IOHIDParameter.h>
 #include <IOKit/hidsystem/IOLLEvent.h>
@@ -33,7 +33,22 @@ enum {
     ZMB_LOGIN_INPUT_QUARTZ = 3,
 };
 
+/*
+ * Xcode 26.6 no longer ships IOKit/hid/IOHIDUserDevice.h in the public
+ * macOS SDK even though Apple still documents the opaque reference type.
+ * Keep this backend optional: resolve the two runtime symbols from IOKit
+ * dynamically so the whole ZMB native dylib still builds when the SDK header
+ * is absent.  If the running OS does not export them, the reboot matrix sees
+ * FAIL_OPEN for this backend and continues to the other native candidates.
+ */
+typedef struct __IOHIDUserDevice *IOHIDUserDeviceRef;
+typedef IOHIDUserDeviceRef (*ZMBIOHIDUserDeviceCreateFn)(CFAllocatorRef, CFDictionaryRef);
+typedef IOReturn (*ZMBIOHIDUserDeviceHandleReportFn)(IOHIDUserDeviceRef, uint8_t *, CFIndex);
+
 static io_connect_t g_zmb_hid = IO_OBJECT_NULL;
+static void *g_zmb_iokit_handle = NULL;
+static ZMBIOHIDUserDeviceCreateFn g_zmb_user_device_create = NULL;
+static ZMBIOHIDUserDeviceHandleReportFn g_zmb_user_device_handle_report = NULL;
 static IOHIDUserDeviceRef g_zmb_user_keyboard = NULL;
 static IOHIDUserDeviceRef g_zmb_user_pointer = NULL;
 static uint32_t g_zmb_hid_refs = 0;
@@ -83,6 +98,32 @@ static void zmb_dict_set_i32(CFMutableDictionaryRef dict, CFStringRef key, int32
     }
 }
 
+static int32_t zmb_load_user_device_api(void) {
+    if (g_zmb_user_device_create && g_zmb_user_device_handle_report) {
+        return (int32_t)kIOReturnSuccess;
+    }
+    if (!g_zmb_iokit_handle) {
+        g_zmb_iokit_handle = dlopen(
+            "/System/Library/Frameworks/IOKit.framework/IOKit",
+            RTLD_LAZY | RTLD_LOCAL
+        );
+    }
+    if (!g_zmb_iokit_handle) return (int32_t)kIOReturnUnsupported;
+
+    g_zmb_user_device_create = (ZMBIOHIDUserDeviceCreateFn)dlsym(
+        g_zmb_iokit_handle, "IOHIDUserDeviceCreate"
+    );
+    g_zmb_user_device_handle_report = (ZMBIOHIDUserDeviceHandleReportFn)dlsym(
+        g_zmb_iokit_handle, "IOHIDUserDeviceHandleReport"
+    );
+    if (!g_zmb_user_device_create || !g_zmb_user_device_handle_report) {
+        g_zmb_user_device_create = NULL;
+        g_zmb_user_device_handle_report = NULL;
+        return (int32_t)kIOReturnUnsupported;
+    }
+    return (int32_t)kIOReturnSuccess;
+}
+
 static IOHIDUserDeviceRef zmb_create_user_device(const uint8_t *descriptor,
                                                   CFIndex descriptor_length,
                                                   int32_t product_id,
@@ -111,7 +152,7 @@ static IOHIDUserDeviceRef zmb_create_user_device(const uint8_t *descriptor,
     zmb_dict_set_i32(properties, CFSTR(kIOHIDPrimaryUsagePageKey), 0x01);
     zmb_dict_set_i32(properties, CFSTR(kIOHIDPrimaryUsageKey), primary_usage);
 
-    IOHIDUserDeviceRef device = IOHIDUserDeviceCreate(kCFAllocatorDefault, properties);
+    IOHIDUserDeviceRef device = g_zmb_user_device_create(kCFAllocatorDefault, properties);
     CFRelease(descriptor_data);
     CFRelease(properties);
     return device;
@@ -126,6 +167,9 @@ static void zmb_reset_user_device_state(void) {
 }
 
 static int32_t zmb_open_user_devices(void) {
+    int32_t api_rc = zmb_load_user_device_api();
+    if (api_rc != (int32_t)kIOReturnSuccess) return api_rc;
+
     IOHIDUserDeviceRef keyboard = zmb_create_user_device(
         kZMBKeyboardDescriptor,
         (CFIndex)sizeof(kZMBKeyboardDescriptor),
@@ -388,7 +432,7 @@ int32_t zmb_login_input_hid_key(uint16_t usage, int32_t down) {
     uint8_t report[8] = {0};
     report[0] = g_zmb_keyboard_modifiers;
     for (size_t i = 0; i < 6; ++i) report[2 + i] = g_zmb_keyboard_keys[i];
-    IOReturn rc = IOHIDUserDeviceHandleReport(g_zmb_user_keyboard, report, (CFIndex)sizeof(report));
+    IOReturn rc = g_zmb_user_device_handle_report(g_zmb_user_keyboard, report, (CFIndex)sizeof(report));
     pthread_mutex_unlock(&g_zmb_hid_lock);
     return (int32_t)rc;
 }
@@ -418,7 +462,7 @@ int32_t zmb_login_input_hid_pointer(int32_t x, int32_t y, uint8_t buttons, int32
         (uint8_t)((g_zmb_pointer_y >> 8) & 0xFFu),
         (uint8_t)(int8_t)wheel,
     };
-    IOReturn rc = IOHIDUserDeviceHandleReport(g_zmb_user_pointer, report, (CFIndex)sizeof(report));
+    IOReturn rc = g_zmb_user_device_handle_report(g_zmb_user_pointer, report, (CFIndex)sizeof(report));
     pthread_mutex_unlock(&g_zmb_hid_lock);
     return (int32_t)rc;
 }

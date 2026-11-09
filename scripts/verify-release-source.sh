@@ -137,8 +137,20 @@ grep -Fq 'Pre-login input check:' linux_client.py || {
   echo 'ERROR: Linux client no longer exposes reboot input matrix results.' >&2
   exit 1
 }
-grep -Fq 'IOHIDUserDeviceCreate' native/macos/ZMBLoginInput.c || {
-  echo 'ERROR: LoginWindow fallback lost its virtual IOHIDUserDevice path.' >&2
+if grep -Fq '#include <IOKit/hid/IOHIDUserDevice.h>' native/macos/ZMBLoginInput.c; then
+  echo 'ERROR: Xcode 26.6 SDK does not ship IOHIDUserDevice.h; use runtime symbol resolution.' >&2
+  exit 1
+fi
+grep -Fq 'dlsym(' native/macos/ZMBLoginInput.c || {
+  echo 'ERROR: IOHIDUserDevice backend lost macOS 26-compatible runtime symbol resolution.' >&2
+  exit 1
+}
+grep -Fq '"IOHIDUserDeviceCreate"' native/macos/ZMBLoginInput.c || {
+  echo 'ERROR: LoginWindow fallback lost IOHIDUserDeviceCreate runtime lookup.' >&2
+  exit 1
+}
+grep -Fq '"IOHIDUserDeviceHandleReport"' native/macos/ZMBLoginInput.c || {
+  echo 'ERROR: LoginWindow fallback lost IOHIDUserDeviceHandleReport runtime lookup.' >&2
   exit 1
 }
 grep -Fq 'zmb_login_input_hid_key' mac_server.py || {

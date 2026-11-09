@@ -1,3 +1,10 @@
+## 0.15.34 - macOS 26 IOHIDUserDevice SDK build fix
+
+- Fixes the Xcode 26.6 native build failure caused by the SDK no longer shipping `IOKit/hid/IOHIDUserDevice.h`.
+- Keeps the 0.15.33 reboot LoginWindow evidence matrix and working capture/wake path unchanged.
+- Resolves `IOHIDUserDeviceCreate` and `IOHIDUserDeviceHandleReport` dynamically from IOKit at runtime; when the running OS does not export them, that matrix row reports `FAIL_OPEN` and the remaining native input candidates are still tested.
+- Adds a release-source regression gate so the removed SDK header cannot be reintroduced accidentally.
+
 ## 0.15.33 - reboot LoginWindow evidence matrix
 
 - Preserves the existing ScreenCaptureKit/VideoToolbox pre-login capture path and all sleep/wake/display-recovery behavior from 0.15.32.

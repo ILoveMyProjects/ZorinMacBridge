@@ -1,3 +1,7 @@
+## 0.15.34 macOS 26 IOHIDUserDevice SDK build fix
+
+0.15.34 is a compile-only compatibility hotfix for the 0.15.33 reboot LoginWindow matrix. Xcode 26.6 no longer exposes `IOKit/hid/IOHIDUserDevice.h` in the public macOS SDK, so ZorinMacBridge no longer includes that header. The optional IOHIDUserDevice row is resolved from IOKit at runtime; missing symbols become `FAIL_OPEN` for that row rather than preventing the entire native streamer from building. ScreenCaptureKit/VideoToolbox capture, sleep/wake recovery, TLS, and the other input candidates are unchanged.
+
 ## 0.15.33 reboot LoginWindow evidence matrix
 
 0.15.33 keeps the working ScreenCaptureKit/VideoToolbox LoginWindow capture and sleep/wake recovery unchanged. After a reboot, the pre-login control path now tests **CoreHID HIDVirtualDevice**, **IOHIDUserDevice**, **IOHIDSystem/IOHIDPostEvent**, and **kCGSessionEventTap** independently. A backend is not trusted because `open()` or a send call returned success: ZorinMacBridge requires an observed Shift transition in the combined LoginWindow session and checks pointer move+restore before selecting it. The complete matrix is sent to the Zorin client log as `Pre-login input check: ...`. If no backend proves delivery, control/video remain connected so the failure is diagnosable instead of collapsing into an ownerless reconnect loop.
