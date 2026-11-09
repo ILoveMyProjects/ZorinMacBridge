@@ -1,3 +1,10 @@
+## 0.15.23 - LoginWindow direct capture fix
+
+- Fixes a pre-login first-frame deadlock in 0.15.22: the fallback could only run after `SCShareableContent` and `SCStream.startCapture()` returned, so a LoginWindow hang inside ScreenCaptureKit prevented the fallback from ever starting.
+- Routes only the LoginWindow video path directly through `/usr/sbin/screencapture -m`, using CoreGraphics display geometry to initialize the existing VideoToolbox/H.264 encoder before any ScreenCaptureKit content discovery.
+- Keeps normal logged-in Aqua capture on continuous ScreenCaptureKit `SCStream`; pairing, wake recovery, TLS, control ownership, handoff, packaging and the no-VNC/no-port-5900 architecture are unchanged.
+- Keeps system capture bounded and preserves explicit `prelogin-backend`, pipeline and `prelogin-failure` diagnostics instead of retrying a silent ScreenCaptureKit startup hang.
+
 ## 0.15.22 - reboot recovery fix
 
 - Fixes the post-reboot `saved/offline -> Wake -> reachable -> Wake` loop: a confirmed live Desktop endpoint now wins over stale paired-only discovery state, and successful wake recovery clears `selected_paired_only` before reconnect.

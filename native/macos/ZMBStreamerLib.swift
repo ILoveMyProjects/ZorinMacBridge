@@ -457,6 +457,18 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func start() async throws {
+        // LoginWindow must not wait on ScreenCaptureKit discovery before the
+        // system screenshot path gets a chance to run. On macOS 26 the
+        // SCShareableContent/SCStream startup path can remain pending in the
+        // LoginWindow session without delivering an error or a frame. Build the
+        // encoder from CoreGraphics display geometry and enter the bounded
+        // /usr/sbin/screencapture path immediately. Aqua keeps the normal
+        // ScreenCaptureKit streaming path below.
+        if prelogin {
+            try await startPreloginSystemCapture()
+            return
+        }
+
         var content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         guard !content.displays.isEmpty else {
             throw NSError(domain: "ZorinMacBridge", code: 1, userInfo: [NSLocalizedDescriptionKey: "No display available for ScreenCaptureKit"])
@@ -529,11 +541,6 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
             "target=\(width)x\(height) crop=\(sourceRect.map { NSStringFromRect($0) } ?? "full")"
         )
 
-        if prelogin {
-            try await runPreloginSCStreamWithScreenshotFallback(filter: filter, configuration: config, width: width, height: height)
-            return
-        }
-
         let newStream = SCStream(filter: filter, configuration: config, delegate: self)
         try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
         guard installStreamUnlessFinished(newStream) else { return }
@@ -547,52 +554,28 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    private func runPreloginSCStreamWithScreenshotFallback(
-        filter: SCContentFilter,
-        configuration: SCStreamConfiguration,
-        width: Int,
-        height: Int
-    ) async throws {
-        let primary = SCStream(filter: filter, configuration: configuration, delegate: self)
-        try primary.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
-        guard installStreamUnlessFinished(primary) else { return }
-
-        do {
-            try await primary.startCapture()
-            log("prelogin-backend=scstream")
-            log("prelogin-scstream-started width=\(width) height=\(height) fps=\(fps) bitrate=\(bitrate)")
-        } catch {
-            clearStreamIfCurrent(primary)
-            log("prelogin-scstream-start-error=\(error.localizedDescription)")
-            try await runPreloginSystemScreenshotLoop(width: width, height: height)
-            return
+    private func startPreloginSystemCapture() async throws {
+        let mainDisplayID = CGMainDisplayID()
+        let sourceWidth = Int(CGDisplayPixelsWide(mainDisplayID))
+        let sourceHeight = Int(CGDisplayPixelsHigh(mainDisplayID))
+        guard sourceWidth > 1, sourceHeight > 1 else {
+            let detail = "LoginWindow main display geometry unavailable (id=\(mainDisplayID) size=\(sourceWidth)x\(sourceHeight))"
+            log("prelogin-failure=display-geometry-unavailable: \(detail)")
+            throw NSError(
+                domain: "ZorinMacBridge",
+                code: 58,
+                userInfo: [NSLocalizedDescriptionKey: detail]
+            )
         }
 
-        // LoginWindow can accept SCStream.startCapture() yet never deliver the
-        // initial frame. Do not leave the remote client on "waiting for first
-        // frame" forever: after a short proof window switch to the system
-        // screencapture utility, which is designed to operate in loginwindow's
-        // Mach bootstrap hierarchy and therefore gives us a second, independent
-        // capture path without Screen Sharing/port 5900 or paid services.
-        let proofDeadline = DispatchTime.now().uptimeNanoseconds + 2_000_000_000
-        while true {
-            let (isFinished, encodeSubmitted) = withStateLock {
-                (finished, preloginEncodeSubmitted)
-            }
-            if isFinished { return }
-            if encodeSubmitted {
-                while !withStateLock({ finished }) {
-                    try await Task.sleep(nanoseconds: 100_000_000)
-                }
-                return
-            }
-            if DispatchTime.now().uptimeNanoseconds >= proofDeadline { break }
-            try await Task.sleep(nanoseconds: 100_000_000)
-        }
-
-        log("prelogin-scstream-no-frame-within=2s")
-        try? await primary.stopCapture()
-        clearStreamIfCurrent(primary)
+        let scale = min(1.0, Double(maxWidth) / Double(max(sourceWidth, 1)))
+        let width = max(2, Int((Double(sourceWidth) * scale).rounded(.down)) & ~1)
+        let height = max(2, Int((Double(sourceHeight) * scale).rounded(.down)) & ~1)
+        try createEncoder(width: Int32(width), height: Int32(height))
+        log(
+            "prelogin-display-selected id=\(mainDisplayID) source=\(sourceWidth)x\(sourceHeight) " +
+            "target=\(width)x\(height)"
+        )
         try await runPreloginSystemScreenshotLoop(width: width, height: height)
     }
 

@@ -1,6 +1,6 @@
-## 0.15.22 reboot recovery: stale-offline + LoginWindow capture fallback
+## 0.15.23 LoginWindow direct capture fix
 
-0.15.22 fixes two independent post-reboot failures. A successful live Desktop TCP probe now overrides a stale Bonjour `paired/offline` record, clears the saved/offline flag, and proceeds directly to TLS instead of looping `Wake-on-Connect`. For LoginWindow video, continuous ScreenCaptureKit `SCStream` remains primary; if it produces no initial encode submission within two seconds (or fails to start), the pre-login process uses `/usr/sbin/screencapture -m` inside the existing LoginWindow launchd/Mach bootstrap session, converts the captured image to a `CVPixelBuffer`, and feeds the existing VideoToolbox H.264 pipeline. Capture-backend and capture-failure states are sent to the client so it does not remain indefinitely on `waiting for first frame`. This fallback does not use VNC/Screen Sharing/port 5900 and does not require paid Apple services.
+0.15.23 keeps the 0.15.22 reboot/wake recovery and fixes the remaining LoginWindow first-frame hang. The pre-login process no longer waits for `SCShareableContent` or `SCStream.startCapture()` before trying the system capture path. It reads the main display geometry through CoreGraphics, starts the existing VideoToolbox H.264 encoder, and immediately uses bounded `/usr/sbin/screencapture -m` capture inside the LoginWindow launchd/Mach bootstrap session. Normal logged-in Aqua desktop capture remains on continuous ScreenCaptureKit `SCStream`. Capture backend, pipeline and failure states continue to reach the client. No VNC, Screen Sharing or port 5900 is introduced.
 
 ## 0.15.21 LoginWindow first-frame recovery
 

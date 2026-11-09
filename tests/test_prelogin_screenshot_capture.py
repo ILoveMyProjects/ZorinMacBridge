@@ -5,10 +5,11 @@ SWIFT = (ROOT / 'native/macos/ZMBStreamerLib.swift').read_text(encoding='utf-8')
 SERVER = (ROOT / 'mac_server.py').read_text(encoding='utf-8')
 CLIENT = (ROOT / 'linux_client.py').read_text(encoding='utf-8')
 
-# Supported macOS 26+ LoginWindow capture is ScreenCaptureKit only.
+# LoginWindow capture must not depend on ScreenCaptureKit startup.
 assert 'CGDisplayStream' not in SWIFT
-assert 'runPreloginSCStreamWithScreenshotFallback' in SWIFT
-assert 'SCStream(filter: filter, configuration: configuration, delegate: self)' in SWIFT
+assert 'runPreloginSCStreamWithScreenshotFallback' not in SWIFT
+assert 'private func startPreloginSystemCapture() async throws' in SWIFT
+assert 'let mainDisplayID = CGMainDisplayID()' in SWIFT
 assert '/usr/sbin/screencapture' in SWIFT
 assert 'process.arguments = ["-x", "-m", "-t", "png", fileURL.path]' in SWIFT
 assert 'makePixelBuffer(from: image' in SWIFT
@@ -27,4 +28,4 @@ assert "line.startswith('prelogin-failure=')" in SERVER
 assert "Pre-login capture backend: {event.backend}." in CLIENT
 assert "Pre-login capture failed: {event.reason}." in CLIENT
 
-print('pre-login ScreenCaptureKit recovery regression tests: OK')
+print('pre-login direct system capture regression tests: OK')

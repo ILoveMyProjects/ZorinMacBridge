@@ -16,7 +16,9 @@ assert "self.selected_paired_only = False" in gtk
 assert "clearing saved/offline state" in gtk
 
 swift = (ROOT / "native/macos/ZMBStreamerLib.swift").read_text(encoding="utf-8")
-assert "prelogin-scstream-no-frame-within=2s" in swift
+assert "prelogin-scstream-no-frame-within=2s" not in swift
+assert "private func startPreloginSystemCapture() async throws" in swift
+assert "let mainDisplayID = CGMainDisplayID()" in swift
 assert "prelogin-backend=screencapture-cli" in swift
 assert "/usr/sbin/screencapture" in swift
 assert 'process.arguments = ["-x", "-m", "-t", "png", fileURL.path]' in swift
@@ -34,4 +36,4 @@ event = parse_session_state(make_capture_failure_state("system-screencapture-fai
 assert event.kind == "capture-failure"
 assert event.reason == "system-screencapture-failed: blocked"
 
-print("0.15.22 reboot recovery regression tests: OK")
+print("0.15.23 reboot recovery regression tests: OK")
