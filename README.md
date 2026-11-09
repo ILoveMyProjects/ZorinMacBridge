@@ -153,7 +153,7 @@ curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/mast
 
 The macOS server supports **Apple Silicon (arm64) only**. The installer verifies the Mac architecture, downloads the arm64 `.dmg`, verifies SHA-256, and installs **ZorinMacBridge Server** into `/Applications`. Intel Macs are not supported.
 
-Starting with **0.15.19**, the default macOS release path is certificate-free: GitHub Actions uses ad-hoc transport signing, and installation/update applies one stable per-Mac local ad-hoc designated requirement. Developer ID/provisioning remains optional when a maintainer explicitly configures it; it is not required for CI, DMG creation, installation, updates, or READY.
+Starting with **0.15.19**, normal logged-in Aqua operation still has a certificate-free path: GitHub Actions can use ad-hoc transport signing and installation/update applies one stable per-Mac local ad-hoc designated requirement. Starting with **0.15.24**, reboot-to-LoginWindow remote login is a separate stricter capability tier: it can become READY only on a Developer ID provisioned build carrying the Apple-managed Persistent Content Capture and CoreHID Virtual Device entitlements, followed by a physical LoginWindow capability proof for that exact build.
 
 ## Remote desktop architecture
 
@@ -341,7 +341,7 @@ For permissions and restricted capabilities to survive updates, production relea
 com.ilovemyprojects.zorinmacbridge.server
 ```
 
-The Stage-B probe can report whether optional restricted capabilities such as `com.apple.developer.persistent-content-capture` or `com.apple.developer.hid.virtual.device` are present. They are **not required by the default free release path**. The physical capability probe, not a paid entitlement, decides whether LoginWindow capture/input is actually usable. See [`SIGNING.md`](SIGNING.md).
+The Stage-B probe reports the effective `com.apple.developer.persistent-content-capture` and `com.apple.developer.hid.virtual.device` entitlements. Starting with **0.15.24**, they are not required for normal Aqua Desktop, but they **are required** before reboot-to-LoginWindow remote login can become READY. Signing alone is still not enough: the exact installed build must also pass the physical LoginWindow capture + CoreHID proof. See [`SIGNING.md`](SIGNING.md).
 
 ## Remote controls
 
@@ -466,9 +466,9 @@ For real-Mac validation before tagging the release, follow [`docs/acceptance/P1_
 
 ## Stable macOS permissions across updates
 
-There is no signing setup to run on Zorin/Linux and no paid Apple signing setup is required. The default macOS release uses free ad-hoc transport signing in GitHub Actions and a stable per-Mac local ad-hoc identity at install/update time. Developer ID is an optional enhancement only when a maintainer already has the relevant Apple credentials.
+There is no signing setup to run on Zorin/Linux. Normal Aqua Desktop can still use the free ad-hoc release/install path. Reboot-to-LoginWindow remote login is different: starting with **0.15.24** it requires a Developer ID provisioned build with the Apple-managed Persistent Content Capture + CoreHID Virtual Device capabilities. The installer preserves that publisher signature/profile and refuses a later ad-hoc downgrade that would remove those capabilities.
 
-See [`SIGNING.md`](SIGNING.md) for the free/default and optional signing paths.
+See [`SIGNING.md`](SIGNING.md) for the Aqua-only and managed pre-login signing paths.
 
 ## Security model
 
@@ -543,9 +543,9 @@ Starting with 0.15.9, native macOS compilation is also a required **push/pull-re
 
 0.15.10 adds a diagnostic-only capability probe. It runs as the existing `ZorinMacBridge Server.app` identity inside the real `LoginWindow` launchd session and classifies capture and input independently. Capture PASS requires a real non-uniform ScreenCaptureKit image saved as `/var/tmp/zmb-capability-probe.png`; input PASS requires a harmless Shift down/up to be observable in the LoginWindow session. The probe also reports the effective Persistent Content Capture and CoreHID virtual-device entitlements. It does **not** type text, does not know the login password, and does not modify the production video/input paths. See `docs/development/STAGE_B_CAPABILITY_PROBE.md`.
 
-### Stage C history and 0.15.19 free-signing correction
+### Stage C history, 0.15.19 Aqua free signing, and 0.15.24 managed pre-login
 
-0.15.11 introduced a Developer ID/provisioning gate. **0.15.19 supersedes that as a mandatory release requirement.** The default release now uses free ad-hoc transport signing plus a stable per-Mac local identity. Developer ID/profile validation remains only as an optional branch. See [`SIGNING.md`](SIGNING.md).
+0.15.11 introduced a Developer ID/provisioning gate. 0.15.19 removed it as a requirement for normal Aqua operation and retained a free ad-hoc release/install path. **0.15.24 restores Developer ID/provisioning only for the stricter reboot-to-LoginWindow capability tier**: pre-login READY now requires both Apple-managed entitlements plus a current physical capability proof. Aqua READY remains independent of that signing tier. See [`SIGNING.md`](SIGNING.md).
 
 ## Troubleshooting
 
@@ -553,7 +553,7 @@ The Linux client includes a **Logs** tab. Connection logs show TCP, TLS, fingerp
 
 If macOS asks for Screen Recording **when you press Connect**, make sure you are on v0.4.3 or newer. v0.4.0-v0.4.2 launched a separate native capture executable, which could be treated as separate TCC-responsible code. v0.4.3 runs ScreenCaptureKit in the main server process instead.
 
-On 0.15.19+ the normal free installation reports a stable local ad-hoc identity. An optional Developer ID build may instead report its team/profile. Neither mode alone proves LoginWindow support; use the Stage-B capability probe.
+On 0.15.24+ the normal free installation reports a stable local ad-hoc identity and is explicitly **Aqua-only** for readiness purposes. A Developer ID/profile build with both managed pre-login entitlements is eligible for reboot-login verification, but signing alone still does not prove LoginWindow support; the exact build must pass the Stage-B physical capture + CoreHID probe.
 
 If video works but mouse/keyboard does not, check the Mac server log for:
 

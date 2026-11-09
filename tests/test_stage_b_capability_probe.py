@@ -21,7 +21,7 @@ assert "libzmb_capability_probe.dylib" in server
 assert "--add-binary 'build/libzmb_capability_probe.dylib:.'" in release
 assert "--self-test-capability-probe-load" in release
 
-# CoreHID is diagnostic-only and must not become a dependency of the normal streamer dylib.
+# CoreHID is the required pre-login input proof, but Stage 1 still keeps it isolated from the normal Aqua streamer dylib.
 assert 'CoreHID.framework' in probe_build
 assert '-weak_framework' not in probe_build
 assert '-framework CoreHID' not in streamer_build
@@ -53,9 +53,12 @@ for marker in (
 assert 'password' not in probe.lower()
 assert 'Data([0x02, 0, 0, 0, 0, 0, 0, 0])' in probe
 
-# Current IOHID/Quartz input remains a comparison measurement, not the only proof.
+# Current IOHID/Quartz input remains a diagnostic comparison only. It must not
+# be allowed to turn the managed pre-login probe PASS without CoreHID.
 assert 'zmb_login_input_open' in probe
 assert 'input_legacy_result' in probe
+assert 'if captureOK && coreHIDOK' in probe
+assert 'input_result", coreHIDOK ? "PASS" : "FAIL"' in probe
 
 # Probe is remotely callable only through the already-restricted admin command path.
 assert 'capability-probe' in admin
@@ -63,6 +66,8 @@ assert '"zmb-admin capability-probe"' in admin_ssh
 assert '/usr/local/sbin/zmb-admin capability-probe' in install_admin
 assert '"capability-probe"' in backend
 assert 'prelogin_console_active || fail' in admin
+assert '--verify-release-app "$APP_PATH"' in admin
+assert 'Persistent Content Capture and CoreHID Virtual Device entitlements' in admin
 assert 'LimitLoadToSessionType' in admin and 'LoginWindow' in admin
 
 # Target runtime is macOS 26+. CoreHID is a required SDK/runtime dependency.

@@ -67,8 +67,9 @@ if [ ! -d "$SOURCE" ]; then
   exit 1
 fi
 
-# Free releases are ad-hoc transport signed in GitHub Actions. Developer ID is
-# supported when configured by the maintainer, but it is never required.
+# Aqua-only releases may use the free ad-hoc transport path. Full reboot-to-
+# LoginWindow remote login requires the Developer ID + provisioning path with
+# both Apple-managed pre-login capabilities.
 codesign --verify --deep --strict --verbose=2 "$SOURCE"
 ACTUAL_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$SOURCE/Contents/Info.plist" 2>/dev/null || true)"
 if [ "$ACTUAL_BUNDLE_ID" != "$BUNDLE_ID" ]; then
@@ -78,12 +79,21 @@ fi
 
 STAGED="$STAGE/$APP_NAME"
 ditto "$SOURCE" "$STAGED"
+EXISTING_PRELOGIN_CAPABLE=0
+if [ -d "$DEST" ] && "$SOURCE/Contents/MacOS/ZorinMacBridge Server" --verify-release-app "$DEST" >/dev/null 2>&1; then
+  EXISTING_PRELOGIN_CAPABLE=1
+fi
 if "$SOURCE/Contents/MacOS/ZorinMacBridge Server" --verify-release-app "$SOURCE" >/dev/null 2>&1; then
   SIGNING_MODE="developer-id"
-  echo "Optional Developer ID release detected; preserving publisher signature."
+  echo "Developer ID pre-login-capable release detected; preserving publisher signature and provisioning profile."
 else
+  if [ "$EXISTING_PRELOGIN_CAPABLE" -eq 1 ]; then
+    echo "Refusing to replace a pre-login-capable Developer ID installation with a free/ad-hoc build." >&2
+    echo "That downgrade would remove Apple-managed Persistent Content Capture/CoreHID capabilities." >&2
+    exit 78
+  fi
   SIGNING_MODE="local-adhoc"
-  echo "Free release detected; applying this Mac's stable local ad-hoc identity."
+  echo "Free Aqua-only release detected; applying this Mac's stable local ad-hoc identity."
   "$SOURCE/Contents/MacOS/ZorinMacBridge Server" --local-sign-app "$STAGED"
 fi
 codesign --verify --deep --strict --verbose=2 "$STAGED"
@@ -100,9 +110,11 @@ fi
 echo
 echo "ZorinMacBridge Server is installed in /Applications."
 if [ "$SIGNING_MODE" = "developer-id" ]; then
-  echo "Optional Developer ID signature and provisioning profile were preserved."
+  echo "Developer ID signature + provisioning profile with managed pre-login capabilities were preserved."
+  echo "Pre-login still requires a physical LoginWindow capability probe before it can become VERIFIED."
 else
-  echo "A free per-Mac stable ad-hoc code identity was applied; no paid Apple developer service was required."
+  echo "A free per-Mac stable ad-hoc code identity was applied. Normal Aqua Desktop remains supported."
+  echo "Reboot-to-LoginWindow remote login is NOT available in this signing mode."
 fi
 echo "The app was NOT started automatically."
 

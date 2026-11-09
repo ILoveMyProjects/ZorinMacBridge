@@ -505,6 +505,12 @@ class ServerGUI:
         if state == 'VERIFIED':
             return 'Pre-login after reboot: VERIFIED for this Mac/build; the proof applies to all paired Zorin clients.'
         if state == 'NOT_READY':
+            if not admin.get('prelogin_release_identity_ready'):
+                return (
+                    'Pre-login after reboot: NOT READY — this installed build is Aqua-only. '
+                    'Remote login after reboot requires a Developer ID provisioned build with Apple-managed '
+                    'Persistent Content Capture + CoreHID Virtual Device capabilities. Normal Aqua use is unaffected.'
+                )
             return 'Pre-login after reboot: NOT READY — the LoginWindow agent needs Enable / Repair. Normal Aqua use is unaffected.'
         if state == 'UNKNOWN':
             return 'Pre-login after reboot: status unavailable. Normal Aqua use is evaluated separately.'
@@ -513,7 +519,7 @@ class ServerGUI:
         overall = str(admin.get('prelogin_probe_overall') or 'never')
         if overall not in {'never', 'PASS'}:
             return f'Pre-login after reboot: UNVERIFIED — last capability probe result: {overall}. Normal Aqua use is unaffected.'
-        return 'Pre-login after reboot: UNVERIFIED — optional capability proof has not been run for this build. One proof from any paired Zorin client covers this Mac/build.'
+        return 'Pre-login after reboot: UNVERIFIED — the required physical LoginWindow capture + CoreHID proof has not been run for this build.'
 
     def _update_required_setup(self) -> None:
         if not (self._permissions_checked and self._admin_checked):
@@ -659,7 +665,8 @@ class ServerGUI:
                     probe_text = 'UNVERIFIED/stale'
                 else:
                     probe_text = 'UNVERIFIED/' + str(state.get('prelogin_probe_overall') or 'never')
-                text += f' · Pre-login after reboot: agent={agent}, proof={probe_text} · Signing: {signing} (informational)'
+                managed = 'ready' if state.get('prelogin_release_identity_ready') else 'blocked'
+                text += f' · Pre-login after reboot: managed-capabilities={managed}, agent={agent}, proof={probe_text} · Signing: {signing}'
             self.admin_status_var.set(text)
             self._update_required_setup()
 

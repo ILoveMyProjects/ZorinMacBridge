@@ -173,7 +173,7 @@ def _prelogin_probe_state() -> dict[str, str | bool]:
         current
         and proof.get('overall') == 'PASS'
         and proof.get('capture_result') == 'PASS'
-        and (proof.get('input_corehid_result') == 'PASS' or proof.get('input_legacy_result') == 'PASS')
+        and proof.get('input_corehid_result') == 'PASS'
     )
     return {
         'prelogin_probe_present': bool(proof),
@@ -204,6 +204,7 @@ def admin_component_state() -> dict[str, str | bool]:
     else:
         remote_login = 'on' if ssh_port_ready else 'unknown'
     probe = _prelogin_probe_state()
+    signing_mode = _release_signing_mode()
     state: dict[str, str | bool] = {
         'installed': files_ok,
         'daemon_loaded': launch.returncode == 0,
@@ -213,7 +214,11 @@ def admin_component_state() -> dict[str, str | bool]:
         'ssh_host_key_ready': bool(ssh_host_fingerprints()),
         'prelogin_agent_exists': PRELOGIN_PLIST.is_file(),
         'prelogin_agent_contract_ready': _prelogin_agent_contract_ready(),
-        'release_signing_mode': _release_signing_mode(),
+        'release_signing_mode': signing_mode,
+        # verify_release_app() only returns developer-id when the embedded
+        # all-Macs provisioning profile and both managed pre-login entitlements
+        # are present and match the signed application.
+        'prelogin_release_identity_ready': signing_mode == 'developer-id',
     }
     state.update(probe)
     return state

@@ -71,6 +71,7 @@ assert 'PRELOGIN_AGENT_MISSING' in admin
 assert 'recover_prelogin_cmd()' in admin
 assert 'recover-prelogin) recover_prelogin_cmd' in admin
 assert 'prelogin_ready=%s' in admin
+assert 'prelogin_release_identity_ready=%s' in admin
 assert 'prelogin_process_running()' in admin
 assert 'gui/0/${PRELOGIN_LABEL}' not in admin
 assert 'launchctl bootstrap loginwindow' in admin

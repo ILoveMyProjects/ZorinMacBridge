@@ -138,34 +138,49 @@ def evaluate_prelogin_requirements(
     System, Terminal and Projects even when pre-login capability verification
     has not been run for the current build.
     """
-    if admin_state is None or not bool(admin_state.get('installed')):
+    if admin_state is None:
         return [
+            SetupRequirement(
+                'prelogin_release_identity',
+                'Apple-managed pre-login capabilities',
+                'requires Developer ID provisioning with Persistent Content Capture and CoreHID Virtual Device entitlements',
+                False,
+            ),
             SetupRequirement(
                 'prelogin_agent',
                 'LoginWindow pre-login agent',
-                'required only for remote Desktop before macOS login after reboot',
+                'required for remote Desktop before macOS login after reboot',
                 False,
             ),
             SetupRequirement(
                 'prelogin_capability_proof',
-                'Verified LoginWindow capture and input',
-                'optional proof for remote login after reboot; one proof applies to this Mac/build, not to each client',
+                'Verified LoginWindow capture and CoreHID input',
+                'requires a current physical LoginWindow proof for this exact Mac/build',
                 False,
             ),
         ]
+
+    installed = bool(admin_state.get('installed'))
     return [
+        SetupRequirement(
+            'prelogin_release_identity',
+            'Apple-managed pre-login capabilities',
+            'requires Developer ID provisioning with Persistent Content Capture and CoreHID Virtual Device entitlements',
+            bool(admin_state.get('prelogin_release_identity_ready')),
+        ),
         SetupRequirement(
             'prelogin_agent',
             'LoginWindow pre-login agent',
-            'required only for remote Desktop before macOS login after reboot',
-            bool(admin_state.get('prelogin_agent_exists'))
+            'required for remote Desktop before macOS login after reboot',
+            installed
+            and bool(admin_state.get('prelogin_agent_exists'))
             and bool(admin_state.get('prelogin_agent_contract_ready')),
         ),
         SetupRequirement(
             'prelogin_capability_proof',
-            'Verified LoginWindow capture and input',
-            'optional proof for remote login after reboot; one proof applies to this Mac/build, not to each client',
-            bool(admin_state.get('prelogin_probe_ready')),
+            'Verified LoginWindow capture and CoreHID input',
+            'requires a current physical LoginWindow proof for this exact Mac/build',
+            installed and bool(admin_state.get('prelogin_probe_ready')),
         ),
     ]
 
@@ -174,9 +189,10 @@ def prelogin_readiness_state(admin_state: Mapping[str, object] | None) -> str:
     if admin_state is None:
         return 'UNKNOWN'
     requirements = {item.key: item for item in evaluate_prelogin_requirements(admin_state)}
+    release_identity = requirements['prelogin_release_identity'].ready
     agent = requirements['prelogin_agent'].ready
     proof = requirements['prelogin_capability_proof'].ready
-    if not agent:
+    if not release_identity or not agent:
         return 'NOT_READY'
     if proof:
         return 'VERIFIED'

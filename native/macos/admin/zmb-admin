@@ -468,6 +468,8 @@ capability_probe_cmd() {
   require_root
   prelogin_console_active || fail "capability probe requires the active macOS LoginWindow session" 69
   [ -x "$APP_BIN" ] || fail "ZorinMacBridge Server app is not installed" 66
+  "$APP_BIN" --verify-release-app "$APP_PATH" >/dev/null 2>&1 \
+    || fail "pre-login capability probe requires a Developer ID build with Apple-managed Persistent Content Capture and CoreHID Virtual Device entitlements" 78
 
   local label plist result image stdout_log stderr_log target group i detail
   label="com.ilovemyprojects.zorinmacbridge.capabilityprobe"
@@ -757,7 +759,7 @@ desktop_tls_fingerprint() {
 
 status_cmd() {
   require_root
-  local host server_id osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening prelogin_agent_exists prelogin_agent_loaded prelogin_ready prelogin_console auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired desktop_tls_fp ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg auto_update_mode update_current update_latest update_available update_checked update_result update_error power_lines developer_dir wake_mac prelogin_probe_present prelogin_probe_current prelogin_probe_ready prelogin_probe_overall prelogin_probe_capture prelogin_probe_input_corehid prelogin_probe_input_legacy proof_version proof_cdhash app_version app_cdhash
+  local host server_id osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening prelogin_agent_exists prelogin_agent_loaded prelogin_ready prelogin_console auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired desktop_tls_fp ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg auto_update_mode update_current update_latest update_available update_checked update_result update_error power_lines developer_dir wake_mac prelogin_probe_present prelogin_probe_current prelogin_probe_ready prelogin_probe_overall prelogin_probe_capture prelogin_probe_input_corehid prelogin_probe_input_legacy prelogin_release_identity_ready proof_version proof_cdhash app_version app_cdhash
   host="$(/bin/hostname 2>/dev/null || echo unknown)"
   server_id="$(config_value SERVER_ID unknown)"
   osver="$(/usr/bin/sw_vers -productVersion 2>/dev/null || echo unknown)"
@@ -767,7 +769,7 @@ status_cmd() {
   user="$(target_user || true)"
   [ -n "$user" ] || user="$(console_user || true)"
   uid=""; home=""; settings=""; plist=""; port="$DEFAULT_PORT"; bind="unknown"
-  app_installed=0; app_running=0; agent_exists=0; agent_loaded=0; listening=0; session=0; prelogin_agent_exists=0; prelogin_agent_loaded=0; prelogin_ready=0; prelogin_console=0
+  app_installed=0; app_running=0; agent_exists=0; agent_loaded=0; listening=0; session=0; prelogin_agent_exists=0; prelogin_agent_loaded=0; prelogin_ready=0; prelogin_console=0; prelogin_release_identity_ready=0
   auto_start="unknown"; launch_at_login="unknown"
   [ -d "$APP_PATH" ] && app_installed=1
   [ -f "$PRELOGIN_PLIST" ] && prelogin_agent_exists=1 || true
@@ -822,6 +824,9 @@ status_cmd() {
   update_checked="$(status_file_value checked_at 0)"
   update_result="$(status_file_value result never)"
   update_error="$(status_file_value error '')"
+  if [ -x "$APP_BIN" ] && "$APP_BIN" --verify-release-app "$APP_PATH" >/dev/null 2>&1; then
+    prelogin_release_identity_ready=1
+  fi
   prelogin_probe_present=0; [ -f "$CAPABILITY_STATUS_FILE" ] && prelogin_probe_present=1 || true
   proof_version="$(capability_status_value app_version '')"
   proof_cdhash="$(capability_status_value app_cdhash '' | /usr/bin/tr '[:upper:]' '[:lower:]')"
@@ -836,8 +841,8 @@ status_cmd() {
     prelogin_probe_current=1
   fi
   prelogin_probe_ready=0
-  if [ "$prelogin_probe_current" = "1" ] && [ "$prelogin_probe_overall" = "PASS" ] && [ "$prelogin_probe_capture" = "PASS" ]; then
-    if [ "$prelogin_probe_input_corehid" = "PASS" ] || [ "$prelogin_probe_input_legacy" = "PASS" ]; then prelogin_probe_ready=1; fi
+  if [ "$prelogin_probe_current" = "1" ] && [ "$prelogin_probe_overall" = "PASS" ] && [ "$prelogin_probe_capture" = "PASS" ] && [ "$prelogin_probe_input_corehid" = "PASS" ]; then
+    prelogin_probe_ready=1
   fi
   ssh_unlock=0
   if printf '%s' "$major" | /usr/bin/grep -Eq '^[0-9]+$' && [ "$major" -ge 26 ] && [ "$remote_login" = "on" ]; then
@@ -866,11 +871,12 @@ status_cmd() {
   printf 'zmb_app_running=%s\n' "$app_running"
   printf 'launch_agent_exists=%s\n' "$agent_exists"
   printf 'launch_agent_loaded=%s\n' "$agent_loaded"
-  if [ "$session" != "1" ] && [ "$listening" = "1" ]; then prelogin_ready=1; fi
+  if [ "$session" != "1" ] && [ "$listening" = "1" ] && [ "$prelogin_release_identity_ready" = "1" ] && [ "$prelogin_probe_ready" = "1" ]; then prelogin_ready=1; fi
   printf 'prelogin_agent_exists=%s\n' "$prelogin_agent_exists"
   printf 'prelogin_agent_loaded=%s\n' "$prelogin_agent_loaded"
   printf 'prelogin_console_active=%s\n' "$prelogin_console"
   printf 'prelogin_ready=%s\n' "$prelogin_ready"
+  printf 'prelogin_release_identity_ready=%s\n' "$prelogin_release_identity_ready"
   printf 'prelogin_probe_present=%s\n' "$prelogin_probe_present"
   printf 'prelogin_probe_current=%s\n' "$prelogin_probe_current"
   printf 'prelogin_probe_ready=%s\n' "$prelogin_probe_ready"

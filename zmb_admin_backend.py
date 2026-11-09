@@ -669,7 +669,11 @@ def status_summary(data: dict[str, str]) -> str:
         return "DEGRADED — system service heartbeat is stale"
     if data.get("user_session_available") != "1":
         if data.get("prelogin_ready") == "1":
-            return "LOGIN WINDOW READY — remote login screen is available"
+            return "LOGIN WINDOW VERIFIED — managed capture + CoreHID proof is current"
+        if data.get("prelogin_release_identity_ready") == "0":
+            return "SYSTEM ONLINE — LoginWindow remote login blocked by missing managed Apple capabilities"
+        if data.get("prelogin_probe_ready") == "0":
+            return "SYSTEM ONLINE — LoginWindow remote login is not yet physically verified"
         return "SYSTEM ONLINE — no logged-in GUI session"
     if data.get("zmb_app_running") == "1" and data.get("zmb_port_listening") == "1":
         return "READY — system and remote desktop are online"

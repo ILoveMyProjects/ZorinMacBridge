@@ -1,3 +1,11 @@
+## 0.15.24 - managed pre-login capability gate
+
+- Makes reboot-to-LoginWindow readiness require a verified Developer ID build whose embedded all-Macs provisioning profile and signed app contain both `com.apple.developer.persistent-content-capture` and `com.apple.developer.hid.virtual.device`. Normal logged-in Aqua operation remains available on the free stable ad-hoc path.
+- Tightens the Stage-B physical proof so only CoreHID `HIDVirtualDevice` can satisfy the pre-login input gate; legacy IOHID/Quartz remains diagnostic comparison data and can no longer make pre-login READY.
+- Refuses installer/updater downgrades from a pre-login-capable Developer ID installation to a free/ad-hoc build, preventing an update from silently removing the Apple-managed capabilities.
+- Makes the root unattended installer report whether the installed app is managed-prelogin-capable and keeps the LoginWindow proof bound to the exact app version + CDHash.
+- Keeps the no-VNC/no-Screen-Sharing/no-port-5900 architecture and does not yet replace the production LoginWindow capture/input runtime; this release is the signing/readiness/install foundation for that next stage.
+
 ## 0.15.23 - LoginWindow direct capture fix
 
 - Fixes a pre-login first-frame deadlock in 0.15.22: the fallback could only run after `SCShareableContent` and `SCStream.startCapture()` returned, so a LoginWindow hang inside ScreenCaptureKit prevented the fallback from ever starting.

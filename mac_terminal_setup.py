@@ -130,9 +130,12 @@ def run_terminal_setup() -> int:
     if prelogin_state == 'VERIFIED':
         print('PRELOGIN_NOTE=LoginWindow capture/input proof is current for this Mac/build and applies to all paired Zorin clients.')
     elif prelogin_state == 'UNVERIFIED':
-        print('PRELOGIN_NOTE=LoginWindow remote login is not verified for this build; normal Aqua operation is unaffected. Run capability-probe once from any paired Zorin client if you want to verify reboot-to-login.')
+        print('PRELOGIN_NOTE=Managed pre-login signing is ready, but the required physical LoginWindow capture + CoreHID probe has not passed for this exact build.')
     elif prelogin_state == 'NOT_READY':
-        print('PRELOGIN_NOTE=LoginWindow agent is not ready; normal Aqua operation is unaffected. Use Enable / Repair if pre-login-after-reboot is required.')
+        if not state.get('prelogin_release_identity_ready'):
+            print('PRELOGIN_NOTE=This build is Aqua-only. Reboot-to-LoginWindow remote login requires Developer ID provisioning with Apple-managed Persistent Content Capture + CoreHID Virtual Device capabilities.')
+        else:
+            print('PRELOGIN_NOTE=Managed pre-login signing is ready, but the LoginWindow agent is not ready. Use Enable / Repair.')
     if missing:
         print('REQUIRED_SETUP_BEGIN')
         for item in missing:

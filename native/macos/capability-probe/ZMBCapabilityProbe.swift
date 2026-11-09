@@ -398,14 +398,17 @@ public func zmb_capability_probe_run(
     let captureOK = runCaptureProbe(report: &report, imageURL: imageURL)
     let coreHIDOK = runCoreHIDProbe(report: &report)
     let legacyOK = runLegacyInputProbe(report: &report)
-    let inputOK = coreHIDOK || legacyOK
-    report.add("input_result", inputOK ? "PASS" : "FAIL")
+    // Stage 1 managed pre-login contract: legacy IOHID/Quartz remains diagnostic
+    // only.  Production remote login is allowed to become READY only when the
+    // Apple-managed CoreHID virtual-device path is proven on LoginWindow.
+    report.add("input_result", coreHIDOK ? "PASS" : "FAIL")
+    report.add("input_legacy_comparison", legacyOK ? "PASS" : "FAIL")
 
-    if captureOK && inputOK {
+    if captureOK && coreHIDOK {
         report.add("overall", "PASS")
     } else if captureOK {
         report.add("overall", "CAPTURE_ONLY")
-    } else if inputOK {
+    } else if coreHIDOK {
         report.add("overall", "INPUT_ONLY")
     } else {
         let persistent = entitlementBool("com.apple.developer.persistent-content-capture") ?? false

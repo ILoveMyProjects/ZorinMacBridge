@@ -31,8 +31,9 @@ if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
   fi
 fi
 
-# Free release path is mandatory. Developer ID is optional and may be enabled only
-# when all credentials are supplied by the maintainer.
+# A free Aqua-only release path remains mandatory. Developer ID is optional for
+# normal Aqua operation, but reboot-to-LoginWindow READY requires the managed
+# pre-login capabilities carried by the Developer ID provisioning path.
 for marker in \
   'MACOS_RELEASE_SIGNING_MODE=adhoc' \
   'Apple Developer credentials not configured; using free ad-hoc transport signing.' \
@@ -54,9 +55,8 @@ for forbidden in \
   fi
 done
 
-# Optional Developer ID helpers remain valid when a maintainer explicitly supplies
-# credentials, but the default installer/updater must support free local ad-hoc
-# identity without requiring a provisioning profile.
+# Developer ID helpers must preserve both managed pre-login capabilities while
+# the default Aqua-only installer/updater still supports free local ad-hoc identity.
 for entitlement in \
   'com.apple.developer.persistent-content-capture' \
   'com.apple.developer.hid.virtual.device'; do
@@ -74,9 +74,26 @@ grep -Fq 'stage_and_sign' updates.py || {
   echo 'ERROR: free updater path does not apply a stable local ad-hoc identity.' >&2
   exit 1
 }
-if grep -Fq "'prelogin_release_identity'" mac_requirements.py; then
-  echo 'ERROR: READY still requires paid Developer ID/provisioning.' >&2
+grep -Fq "'prelogin_release_identity'" mac_requirements.py || {
+  echo 'ERROR: pre-login READY does not require Apple-managed Developer ID/provisioning.' >&2
   exit 1
-fi
+}
+grep -Fq "'prelogin_release_identity_ready'" mac_requirements.py || {
+  echo 'ERROR: pre-login readiness is not wired to the verified managed-capability identity.' >&2
+  exit 1
+}
+grep -Fq "proof.get('input_corehid_result') == 'PASS'" mac_admin_setup.py || {
+  echo 'ERROR: pre-login proof still permits a non-CoreHID input path.' >&2
+  exit 1
+}
+grep -Fq 'Refusing to replace a pre-login-capable Developer ID installation with a free/ad-hoc build.' updates.py || {
+  echo 'ERROR: updater can silently downgrade a pre-login-capable installation.' >&2
+  exit 1
+}
+grep -Fq 'Refusing to replace a pre-login-capable Developer ID installation with a free/ad-hoc build.' install-macos.sh || {
+  echo 'ERROR: installer can silently downgrade a pre-login-capable installation.' >&2
+  exit 1
+}
 
-echo "[release-source] free macOS signing path + optional Developer ID invariants OK"
+echo "[release-source] free Aqua-only signing path + managed pre-login capability gate OK"
+# Marker used by regression tests: pre-login READY requires Apple-managed Developer ID/provisioning.

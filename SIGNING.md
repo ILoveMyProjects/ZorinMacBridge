@@ -1,54 +1,56 @@
 # macOS code signing
 
-ZorinMacBridge does **not** require a paid Apple Developer account, Developer ID certificate, notarization service, or paid provisioning profile to build or run the default release path.
+ZorinMacBridge has two distinct macOS capability tiers.
 
-## Default free release path
+## 1. Normal Aqua Desktop — free path remains supported
 
-GitHub Actions builds the macOS arm64 app and DMG on `macos-26`. When no Apple signing secrets are configured, the workflow:
+Normal logged-in Desktop/Files/System/Terminal operation does **not** require Developer ID. When Apple signing credentials are not configured, GitHub Actions may build the arm64 app/DMG with the existing ad-hoc transport signature. Installation/update then applies the stable per-Mac local ad-hoc designated requirement from `mac_local_signing.py`.
 
-1. builds the native arm64 dylibs and PyInstaller app;
-2. signs the transport app ad-hoc with an explicit bundle-identifier designated requirement using `scripts/sign-macos-transport.sh`;
-3. verifies the ad-hoc signature;
-4. packages `ZorinMacBridge-Server_macOS-arm64.dmg`.
+This path remains intentionally supported for normal Aqua operation. It must not be reported as reboot-to-LoginWindow capable.
 
-No certificate, keychain identity, Apple Developer account, or paid service is required for this path.
+## 2. Reboot-to-LoginWindow remote login — managed capability path
 
-On installation/update, the downloaded transport app is copied to a staging directory and re-signed **locally on that Mac** with a stable explicit ad-hoc designated requirement. The stable local identity is implemented by `mac_local_signing.py` and uses a random per-Mac token stored locally. No external account is involved. Reusing the same local identity across updates avoids changing the designated requirement on every build.
+Starting with 0.15.24, pre-login READY requires the installed application to pass `mac_release_signing.verify_release_app()`. That verifier requires all of the following together:
 
-## Optional Developer ID path
+- a non-ad-hoc **Developer ID Application** signature;
+- an embedded `Contents/embedded.provisionprofile`;
+- an all-Macs Developer ID distribution profile (`ProvisionsAllDevices=true`, no device list);
+- matching TeamIdentifier/application identifier;
+- a non-expired profile authorizing the selected signing certificate;
+- `com.apple.developer.persistent-content-capture = true`;
+- `com.apple.developer.hid.virtual.device = true`;
+- the same entitlement values present in the final signed application.
 
-Developer ID support remains available only as an optional enhancement for maintainers who already have the required Apple credentials. It is never required for CI, DMG creation, installation, updates, or READY.
-
-If all three secrets are present:
+The release workflow uses this path only when all three maintainer secrets are configured:
 
 - `MACOS_DEVELOPER_ID_P12_BASE64`
 - `MACOS_DEVELOPER_ID_P12_PASSWORD`
 - `MACOS_DEVELOPER_ID_PROFILE_BASE64`
 
-then the release workflow validates the profile/certificate and uses `scripts/sign-macos-release.sh`. If none are present, the workflow automatically uses the free ad-hoc path. A **partially configured** optional Developer ID setup fails because it is internally inconsistent; removing the partial secrets restores the free path.
+A partially configured Developer ID setup fails rather than producing an ambiguous build. When no Apple credentials are configured, the workflow still produces the free Aqua-only build.
 
-The optional profile verifier still knows about:
+## Installer and updater behavior
 
-- `com.apple.developer.persistent-content-capture`
-- `com.apple.developer.hid.virtual.device`
+The macOS installer verifies the downloaded app before copying it into `/Applications`.
 
-but those restricted entitlements are **not** part of the default free release requirement.
+- Managed Developer ID build: preserve the publisher signature and embedded provisioning profile unchanged.
+- Free build: apply the stable per-Mac local ad-hoc identity for Aqua operation.
+- Existing managed pre-login installation + incoming free/ad-hoc build: **reject the downgrade**. Removing the managed entitlements silently would make reboot-login fail after an otherwise successful update.
 
-## READY/readiness
+The automatic updater follows the same rule. Migration from Aqua-only ad-hoc to the managed Developer ID build is allowed; the reverse transition is refused.
 
-READY does not depend on Developer ID or provisioning. For unattended pre-login operation, readiness is based on the installed LoginWindow agent and a current Stage-B capability proof for the exact installed build. The probe decides whether capture and at least one input path actually work on the physical Mac.
+The root unattended installer configures everything root can configure locally: the P0 helpers, LoginWindow LaunchAgent, ownership/permissions, SSH prerequisites, update service and persistent state. It also reports `PRELOGIN_MANAGED_CAPABILITIES=ready|blocked`. Root access does not synthesize Apple-managed entitlements; those must already be present in the signed/provisioned application.
 
-This is deliberate: a paid signing state is not treated as a proxy for real LoginWindow functionality.
+## Physical capability proof is still mandatory
 
-## Security checks retained on the free path
+Managed signing is a prerequisite, not proof that the target Mac accepts the feature at LoginWindow. The Stage-B probe still runs in the real LoginWindow session under the exact installed app identity. Pre-login becomes VERIFIED only when the proof is current for the installed version + CDHash and reports:
 
-The free path still verifies:
+- `capture_result=PASS`;
+- `input_corehid_result=PASS`;
+- `overall=PASS`.
 
-- release SHA-256 checksums;
-- expected bundle identifier;
-- app version against the GitHub release;
-- valid macOS code signature;
-- explicit ZorinMacBridge designated requirement for the transport bundle;
-- stable per-Mac local designated requirement before installation/update.
+Legacy IOHID/Quartz remains diagnostic comparison data only. Starting with 0.15.24, a legacy-input PASS cannot satisfy the production pre-login readiness contract.
 
-The free path does not claim Apple notarization or Developer ID publisher authentication.
+## Security / integrity invariants
+
+Both release tiers retain checksum, bundle-id, version and code-signature verification. The managed tier additionally validates the provisioning profile, certificate authorization, TeamIdentifier and both signed entitlements. The installer/updater never re-signs a verified managed release locally because doing so would destroy the Apple-issued capability identity.

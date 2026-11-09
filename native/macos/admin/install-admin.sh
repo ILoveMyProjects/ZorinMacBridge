@@ -53,6 +53,8 @@ ADMIN_LABEL="com.ilovemyprojects.zorinmacbridge.admin"
 UPDATE_LABEL="com.ilovemyprojects.zorinmacbridge.update"
 PRELOGIN_LABEL="com.ilovemyprojects.zorinmacbridge.prelogin"
 PRELOGIN_PLIST="/Library/LaunchAgents/${PRELOGIN_LABEL}.plist"
+APP_PATH="/Applications/ZorinMacBridge Server.app"
+APP_BIN="$APP_PATH/Contents/MacOS/ZorinMacBridge Server"
 
 # launchd processes bootout asynchronously on current macOS releases.  A
 # bootstrap issued immediately afterwards can fail with EIO (5) even when the
@@ -275,6 +277,12 @@ printf 'TARGET_USER=%s\n' "$TARGET_USER"
 printf 'TARGET_UID=%s\n' "$TARGET_UID"
 printf 'P0_OK=1\n'
 printf 'REMOTE_LOGIN=%s\n' "$REMOTE_LOGIN_STATE"
+if [ -x "$APP_BIN" ] && "$APP_BIN" --verify-release-app "$APP_PATH" >/dev/null 2>&1; then
+  printf 'PRELOGIN_MANAGED_CAPABILITIES=ready\n'
+else
+  printf 'PRELOGIN_MANAGED_CAPABILITIES=blocked\n'
+  echo 'PRELOGIN NOTE: normal Aqua remains available, but reboot-to-LoginWindow remote login requires the Developer ID provisioned build with Persistent Content Capture + CoreHID Virtual Device capabilities.' >&2
+fi
 /usr/local/sbin/zmb-admin status || true
 
 echo 'SSH_FINGERPRINTS_BEGIN'

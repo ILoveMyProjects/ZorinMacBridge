@@ -28,8 +28,11 @@ assert 'scripts/sign-macos-release.sh' in workflow
 assert '--local-sign-app "$STAGED"' in installer
 assert 'stage_and_sign' in updater
 
-# READY may depend on actual LoginWindow proof, but never on paid signing.
-assert "'prelogin_release_identity'" not in requirements
-assert 'paid Developer ID/provisioning' in source_gate
+# Normal Aqua READY remains available on the free path, but reboot-to-LoginWindow
+# READY now explicitly requires the Apple-managed Developer ID/provisioning path.
+assert "'prelogin_release_identity'" in requirements
+assert "'prelogin_release_identity_ready'" in requirements
+assert 'pre-login READY requires Apple-managed Developer ID/provisioning' in source_gate
+assert 'free Aqua-only signing path' in source_gate
 
-print('free release signing contract tests: OK')
+print('free Aqua signing + managed pre-login gate regression checks: OK')

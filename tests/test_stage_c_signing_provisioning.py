@@ -89,8 +89,10 @@ local_signing = (ROOT / 'mac_local_signing.py').read_text(encoding='utf-8')
 gui = (ROOT / 'mac_server_gui.py').read_text(encoding='utf-8')
 manifest = (ROOT / 'native/macos/signing/ZorinMacBridge.release-entitlements.plist').read_text(encoding='utf-8')
 
-# Developer ID/profile validation remains available, but is optional. The
-# workflow must have a fully free ad-hoc branch when no Apple secrets exist.
+# Developer ID/profile validation remains optional for normal Aqua releases,
+# but it is the only signing mode eligible for reboot-to-LoginWindow READY.
+# The workflow must still retain a fully free Aqua-only branch when no Apple
+# credentials exist.
 for marker in (
     'MACOS_RELEASE_SIGNING_MODE=adhoc',
     'MACOS_RELEASE_SIGNING_MODE=developer-id',
@@ -117,8 +119,9 @@ assert 'codesign --force --deep' not in sign_script
 for key in REQUIRED_RESTRICTED_ENTITLEMENTS:
     assert key in manifest
 
-# Default install/update must work without Developer ID and apply a stable local
-# ad-hoc identity. Optional Developer ID builds are preserved unchanged.
+# Default Aqua install/update must work without Developer ID and apply a stable
+# local ad-hoc identity. Developer ID builds are preserved unchanged and may not
+# be silently downgraded to an Aqua-only ad-hoc build.
 assert '--local-sign-app "$STAGED"' in installer
 assert 'stage_and_sign' in updater
 assert 'MACOS_RELEASE_SIGNING_MODE=developer-id' in workflow
@@ -126,5 +129,7 @@ assert 'app_has_release_identity' in local_signing
 assert 'Optional Developer-ID releases keep their publisher signature.' in local_signing
 assert '--verify-release-app' in gui
 assert 'release_identity_summary' in gui
+assert 'Refusing to replace a pre-login-capable Developer ID installation with a free/ad-hoc build.' in installer
+assert 'Refusing to replace a pre-login-capable Developer ID installation with a free/ad-hoc build.' in updater
 
-print('optional Developer ID + mandatory free signing regression checks passed')
+print('managed pre-login signing + free Aqua signing regression checks passed')

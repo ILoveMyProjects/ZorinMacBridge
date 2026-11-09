@@ -491,6 +491,11 @@ def _verify_macos_update_identity(current_app: Path | None, new_app: Path, progr
     from mac_release_signing import app_has_release_identity, verify_release_app
 
     if not app_has_release_identity(new_app):
+        if current_app is not None and current_app.is_dir() and app_has_release_identity(current_app):
+            raise RuntimeError(
+                'Refusing to replace a pre-login-capable Developer ID installation with a free/ad-hoc build. '
+                'That downgrade would remove the Apple-managed Persistent Content Capture/CoreHID capabilities.'
+            )
         _emit(progress, 'Free release selected; a stable per-Mac local identity will be applied before installation.')
         return 'local-adhoc'
 
