@@ -41,6 +41,7 @@ def initialize_client_runtime_state(client) -> None:
     client.connected = False
     client.prelogin_session = False
     client.prelogin_video_ready = False
+    client.prelogin_input_ready = False
     client.server_runtime_version = ''
     client.server_runtime_matches_client = True
     client._desktop_session_token = ''

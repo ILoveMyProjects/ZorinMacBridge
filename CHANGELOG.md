@@ -1,3 +1,12 @@
+# 0.15.38 — LoginWindow input readiness + runtime failover
+
+- Preserves the physically verified 0.15.37 cold-reboot LoginWindow video path unchanged; P0, ScreenCaptureKit/VideoToolbox capture, wake/display recovery, and Aqua capture are not modified.
+- Removes blocking CoreGraphics delivery observation (`CGEventSourceFlagsState` / cursor-location probing) from the critical LoginWindow control-session startup path. A native backend now becomes `OPEN_READY` as soon as its exact open succeeds, so control can begin receiving real user input immediately.
+- Changes the ad-hoc fallback order after CoreHID to IOHIDSystem/IOHIDPostEvent, then IOHIDUserDevice, then Quartz. CoreHID remains first for provisioned builds.
+- Adds runtime input failover: when a real keyboard/pointer dispatch returns an error, the failed backend is closed, the next exact backend is opened, and the same user event is retried without dropping Desktop/video.
+- Separates Linux `VIDEO READY` from `INPUT READY`; GTK/Tk no longer claim or enable remote keyboard/mouse merely because the first LoginWindow H.264 frame was decoded.
+- Streams LoginWindow input activation/failover state over the existing `SESSION_STATE` channel (`OPEN_READY`, `ACTIVE`, `DISPATCH_FAIL`, `UNAVAILABLE`) so one reboot log identifies the selected backend and any runtime fallback.
+
 # 0.15.37 — Pre-login native lifecycle fix
 
 - Fixes a pre-run LoginWindow deadlock where `video_session()` called the Aqua virtual-display release path before starting capture; that Swift path synchronously dispatched to the app main queue and could block the LoginWindow server thread before any `prelogin-stage` was emitted. LoginWindow now never touches Aqua virtual-display ownership.

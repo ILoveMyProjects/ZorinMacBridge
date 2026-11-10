@@ -620,6 +620,7 @@ class ClientApp:
                 )
             if self.prelogin_session:
                 self.prelogin_video_ready = False
+                self.prelogin_input_ready = False
                 self._desktop_session_token = str(auth_info.get('session_token') or '')
                 try:
                     self._desktop_session_generation = int(auth_info.get('session_generation') or 0)
@@ -707,13 +708,13 @@ class ClientApp:
                     self._log(
                         'INFO',
                         'Pre-login reboot checks: TLS/auth=PASS, LoginWindow endpoint=PASS, runtime-version=PASS; '
-                        'awaiting capture first frame and native input delivery matrix.'
+                        'awaiting capture first frame and LoginWindow input backend readiness.'
                     )
                 else:
                     self._log(
                         'ERROR',
                         'Pre-login reboot checks: TLS/auth=PASS, LoginWindow endpoint=PASS, runtime-version=FAIL; '
-                        'the Mac is running a different/legacy server build, so input-matrix evidence is blocked.'
+                        'the Mac is running a different/legacy server build, so input readiness evidence is blocked.'
                     )
             if self.remember_credentials_active:
                 try:
@@ -785,6 +786,12 @@ class ClientApp:
                                 )
                                 if event.reason:
                                     self._log('DEBUG', f'Pre-login input check detail ({event.backend}): {event.reason}')
+                                if event.selected and event.result in ('OPEN_READY', 'ACTIVE'):
+                                    self.prelogin_input_ready = True
+                                    self.ui_queue.put(('prelogin_input_ready', event.backend, event.result))
+                                elif event.backend == 'unavailable' and event.result == 'UNAVAILABLE':
+                                    self.prelogin_input_ready = False
+                                    self.ui_queue.put(('prelogin_input_unavailable', event.reason or 'no backend available'))
                         elif kind == ERROR:
                             server_error = payload.decode('utf-8', 'replace')
                             last_server_error = server_error
@@ -1203,6 +1210,28 @@ class ClientApp:
                     self._append_log(item[1])
                 elif item[0] == 'prelogin_state':
                     self.prelogin_session = bool(item[1])
+                    if self.prelogin_session:
+                        self.prelogin_video_ready = False
+                        self.prelogin_input_ready = False
+                elif item[0] == 'prelogin_video_ready':
+                    self.prelogin_video_ready = True
+                    if self.connected and self.prelogin_session:
+                        if self.prelogin_input_ready:
+                            self.status_var.set('Connected — macOS login window · remote input ready')
+                            if self.capture_input_var.get():
+                                self.canvas.focus_set()
+                        else:
+                            self.status_var.set('Connected — macOS login window · waiting for remote input')
+                elif item[0] == 'prelogin_input_ready':
+                    self.prelogin_input_ready = True
+                    if self.connected and self.prelogin_session and self.prelogin_video_ready:
+                        self.status_var.set('Connected — macOS login window · remote input ready')
+                        if self.capture_input_var.get():
+                            self.canvas.focus_set()
+                elif item[0] == 'prelogin_input_unavailable':
+                    self.prelogin_input_ready = False
+                    if self.connected and self.prelogin_session:
+                        self.status_var.set('Connected — macOS login window · view only (input unavailable)')
                 elif item[0] == 'connected':
                     self.connected = True
                     if self.prelogin_session:
@@ -1442,8 +1471,15 @@ class ClientApp:
             except (queue.Empty, queue.Full):
                 pass
 
+    def _remote_input_ready(self) -> bool:
+        if not self.connected or not self.capture_input_var.get():
+            return False
+        if self.prelogin_session:
+            return bool(self.prelogin_video_ready and self.prelogin_input_ready)
+        return True
+
     def _mouse_move(self, event) -> None:
-        if not self.capture_input_var.get():
+        if not self._remote_input_ready():
             return
         pos = self._norm_xy(event)
         if pos:
@@ -1451,7 +1487,7 @@ class ClientApp:
             self._enqueue(pack_packet(MOUSE_MOVE, struct.pack('!ff', *pos)))
 
     def _mouse_button(self, button: int, down: bool, event) -> None:
-        if not self.capture_input_var.get():
+        if not self._remote_input_ready():
             return
         self.canvas.focus_set()
         pos = self._norm_xy(event)
@@ -1464,7 +1500,7 @@ class ClientApp:
             self._enqueue(pack_packet(MOUSE_BUTTON, struct.pack('!BBff', button, int(down), pos[0], pos[1])))
 
     def _send_scroll(self, dx: int, dy: int) -> None:
-        if not self.capture_input_var.get():
+        if not self._remote_input_ready():
             return
         self._enqueue(pack_packet(SCROLL, struct.pack('!ii', dx, dy)))
 
@@ -1532,7 +1568,7 @@ class ClientApp:
         if event.keysym == 'Escape' and self.fullscreen_active:
             self._exit_fullscreen(event)
             return 'break'
-        if not self.capture_input_var.get():
+        if not self._remote_input_ready():
             return 'break'
         keysym = self._map_keysym(event.keysym)
         if keysym in MODIFIER_KEYS or keysym in {'Meta_L', 'Meta_R'}:
@@ -1567,7 +1603,7 @@ class ClientApp:
         return 'break'
 
     def _key_release(self, event) -> str:
-        if not self.capture_input_var.get():
+        if not self._remote_input_ready():
             return 'break'
         keysym = self._map_keysym(event.keysym)
         if keysym in self.modifiers_down:

@@ -88,8 +88,9 @@ grep -Fq "'prelogin_release_identity_ready'" mac_requirements.py || {
 
 # Production LoginWindow keeps ScreenCaptureKit SCStream/CoreHID as primary.
 # Capture may fall through supported ScreenCaptureKit screenshot APIs only after
-# the prior candidate fails to write a real H.264 access unit. Input fallback is
-# independently delivery-probed.
+# the prior candidate fails to write a real H.264 access unit. The production
+# reboot LoginWindow input matrix uses bounded exact-open readiness plus runtime
+# dispatch failover; physical delivery proof stays in the capability probe.
 grep -Fq 'screencapturekit-persistent' native/macos/ZMBStreamerLib.swift || {
   echo 'ERROR: production pre-login video lost its primary ScreenCaptureKit backend.' >&2
   exit 1
@@ -132,16 +133,30 @@ grep -Fq 'zmb_login_input_open_backend' mac_server.py || {
   echo 'ERROR: reboot LoginWindow input matrix cannot open exact native backends.' >&2
   exit 1
 }
-grep -Fq '_probe_keyboard_delivery' mac_server.py || {
-  echo 'ERROR: reboot LoginWindow input matrix lost keyboard delivery proof.' >&2
+grep -Fq '_activate_from_index' mac_server.py || {
+  echo 'ERROR: reboot LoginWindow input matrix lost bounded exact-open activation.' >&2
   exit 1
 }
-grep -Fq '_probe_pointer_delivery' mac_server.py || {
-  echo 'ERROR: reboot LoginWindow input matrix lost pointer delivery proof.' >&2
+grep -Fq '_dispatch_with_failover' mac_server.py || {
+  echo 'ERROR: reboot LoginWindow input matrix lost real-event runtime failover.' >&2
   exit 1
 }
+grep -Fq "event.result in ('OPEN_READY', 'ACTIVE')" linux_client.py || {
+  echo 'ERROR: Linux client no longer gates pre-login input on backend readiness.' >&2
+  exit 1
+}
+python3 - <<'PY_GATE'
+from pathlib import Path
+s = Path('mac_server.py').read_text(encoding='utf-8')
+start = s.index('class LoginWindowInput(MacInput):')
+end = s.index('\n\nclass MacClipboard:', start)
+login = s[start:end]
+for forbidden in ('_combined_session_flags()', '_cursor_location()'):
+    if forbidden in login:
+        raise SystemExit(f'ERROR: blocking CoreGraphics delivery observation returned to LoginWindow control startup: {forbidden}')
+PY_GATE
 grep -Fq 'Pre-login input check:' linux_client.py || {
-  echo 'ERROR: Linux client no longer exposes reboot input matrix results.' >&2
+  echo 'ERROR: Linux client no longer exposes reboot input readiness/failover results.' >&2
   exit 1
 }
 if grep -Fq '#include <IOKit/hid/IOHIDUserDevice.h>' native/macos/ZMBLoginInput.c; then

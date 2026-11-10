@@ -76,6 +76,8 @@ The LoginWindow input path remains IOHIDSystem-first. macOS can still deny synth
 
 # ZorinMacBridge
 
+> **0.15.38 LoginWindow input readiness:** after the physically verified 0.15.37 reboot path reaches a real LoginWindow H.264 frame, control startup no longer blocks on CoreGraphics delivery observation. The server selects the first exact native backend that opens (CoreHID → IOHIDSystem → IOHIDUserDevice → Quartz), reports `OPEN_READY`, and retries the same real key/pointer event on the next backend if native dispatch fails. The Linux client now treats video readiness and input readiness as separate gates and does not claim remote input is enabled until both are ready. P0, LoginWindow video, Aqua capture, and sleep/wake recovery are unchanged.
+
 > **0.15.37 native lifecycle:** LoginWindow no longer calls the Aqua virtual-display release path before capture (that path synchronously dispatches to the main queue and could block the pre-login helper before the first native progress event). Capture now enters the matrix directly on the native runner thread, exposes every diagnostic progress stage to the Zorin client, uses an explicit replacement cancel-event, and verifies that the loaded `libzmb_streamer.dylib` was built from the same release as the app. Native teardown can no longer hold the Python video-owner lock while a replacement session is waiting.
 
 > **0.15.36 runtime consistency:** pre-login diagnostics are accepted only when the Linux client and Mac server report the same release version. P0 discovery also exposes the installed Mac version.
