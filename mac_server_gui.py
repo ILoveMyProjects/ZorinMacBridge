@@ -1237,7 +1237,11 @@ def main() -> None:
     if '--self-test-streamer-load' in sys.argv:
         try:
             native = NativeStreamerLibrary()
-            print(f'SELFTEST OK: in-process streamer library loaded from {native.path}')
+            native_version = native.build_version()
+            expected_version = current_version()
+            if native_version != expected_version:
+                raise RuntimeError(f'native streamer version mismatch: app={expected_version} dylib={native_version}')
+            print(f'SELFTEST OK: in-process streamer library loaded from {native.path}; version={native_version}')
             raise SystemExit(0)
         except Exception as exc:
             print(f'SELFTEST FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)

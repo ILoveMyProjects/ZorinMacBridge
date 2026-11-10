@@ -1,3 +1,13 @@
+# 0.15.37 — Pre-login native lifecycle fix
+
+- Fixes a pre-run LoginWindow deadlock where `video_session()` called the Aqua virtual-display release path before starting capture; that Swift path synchronously dispatched to the app main queue and could block the LoginWindow server thread before any `prelogin-stage` was emitted. LoginWindow now never touches Aqua virtual-display ownership.
+- Runs the LoginWindow capture matrix synchronously on the dedicated native runner thread instead of scheduling it through Swift `Task`, guaranteeing an observable `native-run-enter` stage before any ScreenCaptureKit request.
+- Adds a per-video-session cancellation event so replacement/reconnect interrupts a stale server-side native pipe read even when TLS FIN/shutdown is not observed promptly.
+- Releases the Python global video-session owner before invoking native teardown, and makes Swift ScreenCaptureKit/VideoToolbox cleanup asynchronous so a slow native stop cannot block the next authenticated video socket.
+- Adds `capture-progress` session-state events for diagnostic pre-login stages that were previously discarded by the client as unknown, making `capture-matrix-start`, content requests, stream start, screenshot requests and encoder setup visible in one physical reboot log.
+- Embeds the release version into `libzmb_streamer.dylib` at compile time and verifies it from both the frozen-app self-test and the live video path, preventing a new Python app from silently running a stale native streamer.
+- Keeps P0 boot supervision, the 0.15.36 capture backend order, LoginWindow input matrix, and the normal Aqua/sleep-wake capture path unchanged.
+
 # 0.15.36 — Reboot LoginWindow boot + capture recovery
 
 - Makes the system P0 LaunchDaemon actively supervise the LoginWindow pre-login server after a cold reboot instead of returning early whenever the target Aqua session is absent.

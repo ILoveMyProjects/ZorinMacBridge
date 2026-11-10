@@ -180,6 +180,10 @@ def make_capture_failure_state(reason: str) -> dict[str, str]:
     return {'state': 'capture-failure', 'reason': str(reason or '')}
 
 
+def make_capture_progress_state(stage: str) -> dict[str, str]:
+    return {'state': 'capture-progress', 'stage': str(stage or '')}
+
+
 def make_input_probe_state(
     backend: str, *, result: str, keyboard: str, pointer: str, open_rc: str, selected: bool, reason: str = ''
 ) -> dict[str, Any]:
@@ -211,6 +215,11 @@ def parse_session_state(value: Any) -> SessionStateEvent:
         stage = str(value.get('stage') or '')
         if stage in _PIPELINE_INDEX and stage != 'client-decoded':
             return SessionStateEvent('pipeline', stage=stage)
+        return SessionStateEvent('unknown')
+    if state == 'capture-progress':
+        stage = str(value.get('stage') or '')
+        if stage:
+            return SessionStateEvent('capture-progress', stage=stage)
         return SessionStateEvent('unknown')
     if state == 'capture-backend':
         backend = str(value.get('backend') or '')

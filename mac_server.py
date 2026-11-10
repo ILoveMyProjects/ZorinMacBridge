@@ -29,7 +29,7 @@ from resources import resource_path
 
 from zmb_session_lifecycle import (
     PRELOGIN_CONTROL_REPLACEMENT_GRACE_SECONDS, PreloginControlLease,
-    PreloginSessionCoordinator, make_capture_backend_state, make_capture_failure_state, make_handoff_state, make_input_probe_state, make_pipeline_state,
+    PreloginSessionCoordinator, PIPELINE_STAGES, make_capture_backend_state, make_capture_failure_state, make_capture_progress_state, make_handoff_state, make_input_probe_state, make_pipeline_state,
 )
 
 from protocol import (
@@ -75,6 +75,7 @@ MAX_CLIPBOARD = 2 * 1024 * 1024
 _VIDEO_SESSION_LOCK = threading.Lock()
 _VIDEO_SESSION_STATE_LOCK = threading.Lock()
 _ACTIVE_VIDEO_SOCKET: ssl.SSLSocket | None = None
+_ACTIVE_VIDEO_CANCEL: threading.Event | None = None
 VIDEO_REPLACEMENT_GRACE_SECONDS = 4.0
 VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS = 35.0
 _PRELOGIN_SESSION_COORDINATOR = PreloginSessionCoordinator()
@@ -89,24 +90,29 @@ def request_prelogin_handoff(user: str, *, log=print) -> PreloginControlLease | 
     return lease
 
 
-def _set_active_video_socket(sock: ssl.SSLSocket | None) -> None:
-    global _ACTIVE_VIDEO_SOCKET
+def _set_active_video_socket(sock: ssl.SSLSocket | None, cancel_event: threading.Event | None = None) -> None:
+    global _ACTIVE_VIDEO_SOCKET, _ACTIVE_VIDEO_CANCEL
     with _VIDEO_SESSION_STATE_LOCK:
         _ACTIVE_VIDEO_SOCKET = sock
+        _ACTIVE_VIDEO_CANCEL = cancel_event
 
 
 def _clear_active_video_socket(sock: ssl.SSLSocket) -> None:
-    global _ACTIVE_VIDEO_SOCKET
+    global _ACTIVE_VIDEO_SOCKET, _ACTIVE_VIDEO_CANCEL
     with _VIDEO_SESSION_STATE_LOCK:
         if _ACTIVE_VIDEO_SOCKET is sock:
             _ACTIVE_VIDEO_SOCKET = None
+            _ACTIVE_VIDEO_CANCEL = None
 
 
 def _interrupt_active_video_session(*, log=print) -> bool:
     with _VIDEO_SESSION_STATE_LOCK:
         active = _ACTIVE_VIDEO_SOCKET
+        cancel_event = _ACTIVE_VIDEO_CANCEL
+    if cancel_event is not None:
+        cancel_event.set()
     if active is None:
-        return False
+        return cancel_event is not None
     try:
         # TCP shutdown is intentional here.  It wakes the old video thread out of
         # select()/recv immediately; that thread still owns close() and native cleanup.
@@ -117,7 +123,7 @@ def _interrupt_active_video_session(*, log=print) -> bool:
     return True
 
 
-def _acquire_video_session(sock: ssl.SSLSocket, *, log=print) -> None:
+def _acquire_video_session(sock: ssl.SSLSocket, *, log=print) -> threading.Event:
     if not _VIDEO_SESSION_LOCK.acquire(blocking=False):
         log('[video] previous video session still active; interrupting stale owner before replacement')
         _interrupt_active_video_session(log=log)
@@ -126,7 +132,9 @@ def _acquire_video_session(sock: ssl.SSLSocket, *, log=print) -> None:
                 f'previous video session did not stop within {VIDEO_REPLACEMENT_GRACE_SECONDS:g}s '
                 'after forced socket shutdown'
             )
-    _set_active_video_socket(sock)
+    cancel_event = threading.Event()
+    _set_active_video_socket(sock, cancel_event)
+    return cancel_event
 
 
 def _release_video_session(sock: ssl.SSLSocket) -> None:
@@ -1049,6 +1057,8 @@ class NativeStreamerLibrary:
         self.lib.zmb_display_list_json.restype = ctypes.c_void_p
         self.lib.zmb_string_free.argtypes = [ctypes.c_void_p]
         self.lib.zmb_string_free.restype = None
+        self.lib.zmb_streamer_build_version.argtypes = []
+        self.lib.zmb_streamer_build_version.restype = ctypes.c_void_p
         # LoginWindow production input is an Apple-managed CoreHID virtual
         # keyboard/pointer compiled into the same signed native payload.
         self.lib.zmb_corehid_input_open.argtypes = []
@@ -1088,6 +1098,10 @@ class NativeStreamerLibrary:
             return ctypes.string_at(pointer).decode('utf-8', 'replace')
         finally:
             self.lib.zmb_string_free(pointer)
+
+    def build_version(self) -> str:
+        value = self._owned_string(self.lib.zmb_streamer_build_version)
+        return value or 'unknown'
 
     def ensure_virtual_display(self, width: int, height: int) -> int:
         display_id = int(self.lib.zmb_virtual_display_ensure(int(width), int(height)))
@@ -1144,7 +1158,31 @@ def available_displays(*, log=print) -> list[dict]:
         return []
 
 
-def _read_exact_file(stream, size: int, *, timeout: float | None = 15.0, disconnect_sock: ssl.SSLSocket | None = None, idle_callback=None) -> bytes:
+def _prepare_video_capture_display(native: NativeStreamerLibrary, display_id: int, target_width: int, target_height: int, *, prelogin: bool, log=print) -> int:
+    """Select the native capture display without touching Aqua-only virtual state from LoginWindow.
+
+    The pre-login helper is a separate LoginWindow process after reboot. It does
+    not own the Aqua virtual-display singleton and must never call the Swift
+    release path, which dispatches synchronously to the app main queue.
+    """
+    capture_display_id = max(0, int(display_id))
+    virtual_mode = int(target_width) > 0 and int(target_height) > 0
+    if virtual_mode:
+        if prelogin:
+            raise RuntimeError('virtual display mode is unavailable at macOS LoginWindow')
+        capture_display_id = native.ensure_virtual_display(int(target_width), int(target_height))
+        log(f'[video] virtual remote desktop ready: {target_width}x{target_height} display_id={capture_display_id}')
+    elif prelogin:
+        # Critical: do not call zmb_virtual_display_release() from LoginWindow.
+        # Virtual display ownership exists only in the Aqua server process.
+        log(f'[video] LoginWindow physical display selected: display_id={capture_display_id or "auto"}')
+    else:
+        native.release_virtual_display()
+        log(f'[video] physical display mode selected: display_id={capture_display_id or "auto"}')
+    return capture_display_id
+
+
+def _read_exact_file(stream, size: int, *, timeout: float | None = 15.0, disconnect_sock: ssl.SSLSocket | None = None, cancel_event: threading.Event | None = None, idle_callback=None) -> bytes:
     """Read native pipe bytes while also noticing a closed video client.
 
     Reconfiguration closes the old TLS video socket before opening the next one.
@@ -1157,6 +1195,8 @@ def _read_exact_file(stream, size: int, *, timeout: float | None = 15.0, disconn
     deadline = None if timeout is None else time.monotonic() + max(0.5, float(timeout))
     fd = stream.fileno()
     while len(out) < size:
+        if cancel_event is not None and cancel_event.is_set():
+            raise ConnectionError('video session cancelled for replacement')
         if idle_callback is not None:
             idle_callback()
         if deadline is None:
@@ -1170,6 +1210,8 @@ def _read_exact_file(stream, size: int, *, timeout: float | None = 15.0, disconn
         if disconnect_sock is not None:
             watchers.append(disconnect_sock)
         readable, _, _ = select.select(watchers, [], [], wait_for)
+        if cancel_event is not None and cancel_event.is_set():
+            raise ConnectionError('video session cancelled for replacement')
         if not readable:
             continue
         if disconnect_sock is not None and disconnect_sock in readable:
@@ -1301,7 +1343,7 @@ def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, prelogin_lea
         log('[control] disconnected')
 
 
-def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int, display_id: int = 0, target_width: int = 0, target_height: int = 0, *, prelogin: bool = False, log=print, release_ownership=None) -> None:
+def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int, display_id: int = 0, target_width: int = 0, target_height: int = 0, *, prelogin: bool = False, log=print, release_ownership=None, cancel_event: threading.Event | None = None) -> None:
     """Stream H.264 from ScreenCaptureKit running inside the main app process.
 
     The native Swift code is a dylib loaded with ctypes, not a child executable.
@@ -1324,6 +1366,11 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
             'then fully quit and reopen the app. The server will not request permission from a remote Connect.'
         )
     native = NativeStreamerLibrary()
+    native_version = native.build_version()
+    app_version = runtime_version()
+    if native_version != app_version:
+        raise RuntimeError(f'native streamer build version mismatch: app={app_version} dylib={native_version}')
+    log(f'[video/native] build version verified: {native_version}')
     if prelogin:
         # LoginWindow always exposes the physical macOS login screen.  A user's
         # saved 2K/4K preference is intentionally deferred until Aqua takes over.
@@ -1333,15 +1380,9 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
         max_width = min(max(640, int(max_width)), 1920)
         fps = min(max(1.0, float(fps)), 30.0)
         bitrate = min(max(1_000_000, int(bitrate)), 8_000_000)
-    capture_display_id = max(0, int(display_id))
-    virtual_mode = int(target_width) > 0 and int(target_height) > 0
-    if virtual_mode:
-        capture_display_id = native.ensure_virtual_display(int(target_width), int(target_height))
-        log(f'[video] virtual remote desktop ready: {target_width}x{target_height} display_id={capture_display_id}')
-    else:
-        # Auto/native mode returns to the physical Mac display arrangement.
-        native.release_virtual_display()
-        log(f'[video] physical display mode selected: display_id={capture_display_id or "auto"}')
+    capture_display_id = _prepare_video_capture_display(
+        native, display_id, target_width, target_height, prelogin=prelogin, log=log,
+    )
     set_active_input_display(capture_display_id)
 
     data_r, data_w = os.pipe()
@@ -1391,7 +1432,11 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
                         if len(native_messages) > 20:
                             del native_messages[:-20]
                         if prelogin and line.startswith('prelogin-stage='):
-                            session_events.put(make_pipeline_state(line.split('=', 1)[1]))
+                            stage = line.split('=', 1)[1]
+                            if stage in PIPELINE_STAGES:
+                                session_events.put(make_pipeline_state(stage))
+                            else:
+                                session_events.put(make_capture_progress_state(stage))
                         elif prelogin and line.startswith('prelogin-backend='):
                             session_events.put(make_capture_backend_state(line.split('=', 1)[1]))
                         elif prelogin and line.startswith('prelogin-failure='):
@@ -1413,8 +1458,12 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
     runner = threading.Thread(target=run_native, name='zmb-native-video', daemon=True)
     logger = threading.Thread(target=log_worker, name='zmb-native-video-log', daemon=True)
     log('[video] starting in-process ScreenCaptureKit + VideoToolbox H.264 stream')
-    runner.start()
+    if prelogin:
+        sock.sendall(pack_json(SESSION_STATE, make_capture_progress_state('native-runner-starting')))
     logger.start()
+    runner.start()
+    if prelogin:
+        sock.sendall(pack_json(SESSION_STATE, make_capture_progress_state('native-runner-started')))
 
     sock.settimeout(10.0)
     frames = 0
@@ -1426,7 +1475,7 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
             while True:
                 startup_timeout = VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS if frames == 0 else None
                 try:
-                    header = _read_exact_file(stream, 4, timeout=startup_timeout, disconnect_sock=sock, idle_callback=flush_pipeline_events)
+                    header = _read_exact_file(stream, 4, timeout=startup_timeout, disconnect_sock=sock, cancel_event=cancel_event, idle_callback=flush_pipeline_events)
                 except EOFError:
                     runner.join(timeout=0.25)
                     code = result.get('code', -999)
@@ -1444,7 +1493,7 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
                 if not (1 <= size <= 16 * 1024 * 1024):
                     raise RuntimeError(f'invalid native H.264 access-unit size: {size}')
                 try:
-                    payload = _read_exact_file(stream, size, timeout=startup_timeout, disconnect_sock=sock, idle_callback=flush_pipeline_events)
+                    payload = _read_exact_file(stream, size, timeout=startup_timeout, disconnect_sock=sock, cancel_event=cancel_event, idle_callback=flush_pipeline_events)
                 except TimeoutError as exc:
                     if frames == 0:
                         detail = ' | '.join(native_messages[-6:]) or 'no native capture diagnostics'
@@ -1471,30 +1520,38 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
                     stat_frames = 0
                     stat_bytes = 0
     finally:
-        try:
-            native.lib.zmb_streamer_stop(handle)
-        except Exception:
-            pass
-        # The native streamer is now logically stopped.  Do not keep the global
-        # video-session ownership while Swift drains/cancels its background work:
-        # a slow FileHandle/VideoToolbox cleanup must not block the next client.
+        # Release the Python video-owner lock before asking Swift to tear down.
+        # zmb_streamer_stop must never be able to hold the next TLS video session
+        # hostage if ScreenCaptureKit/VideoToolbox cleanup is slow.
         if release_ownership is not None:
             try:
                 release_ownership()
             except Exception as exc:
                 log(f'[video] ownership release warning: {type(exc).__name__}: {exc}')
-        runner.join(timeout=3.0)
         try:
-            native.lib.zmb_streamer_destroy(handle)
-        except Exception:
-            pass
-        # These descriptors are owned by Swift FileHandle and normally close
-        # when runBlocking returns. Close defensively if they are still open.
-        for fd in (native_data_w, native_log_w):
+            native.lib.zmb_streamer_stop(handle)
+        except Exception as exc:
+            log(f'[video] native stop warning: {type(exc).__name__}: {exc}')
+        runner.join(timeout=6.0)
+
+        def destroy_after_runner() -> None:
             try:
-                os.close(fd)
-            except OSError:
-                pass
+                if runner.is_alive():
+                    runner.join()
+                native.lib.zmb_streamer_destroy(handle)
+            except Exception as exc:
+                log(f'[video] late native destroy warning: {type(exc).__name__}: {exc}')
+            for fd in (native_data_w, native_log_w):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+        if runner.is_alive():
+            log('[video] native runner still unwinding after 6s; deferring destroy without blocking replacement')
+            threading.Thread(target=destroy_after_runner, name='zmb-native-video-destroy', daemon=True).start()
+        else:
+            destroy_after_runner()
         logger.join(timeout=1.0)
         log('[video] disconnected')
 
@@ -1821,7 +1878,7 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
                 f'[video] client profile={quality!r} max_width={max_width} '
                 f'target={target_width}x{target_height} fps={fps:g} bitrate={bitrate} display_id={display_id}'
             )
-            _acquire_video_session(sock, log=log)
+            video_cancel_event = _acquire_video_session(sock, log=log)
             video_ownership_released = False
             if prelogin:
                 # Close the AUTH -> native-lock race. If the control owner vanished
@@ -1841,7 +1898,7 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
             try:
                 video_session(
                     sock, fps, max_width, bitrate, display_id, target_width, target_height,
-                    prelogin=prelogin, log=log, release_ownership=release_video_ownership,
+                    prelogin=prelogin, log=log, release_ownership=release_video_ownership, cancel_event=video_cancel_event,
                 )
             finally:
                 release_video_ownership()

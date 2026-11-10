@@ -426,6 +426,26 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func runBlocking() -> Int32 {
+        if prelogin {
+            // LoginWindow capture uses only bounded callback APIs internally.
+            // Run it directly on the dedicated native runner thread instead of
+            // depending on Swift Concurrency scheduling inside LoginWindow.
+            // This guarantees that the first diagnostic stage is emitted before
+            // any ScreenCaptureKit request and makes a stalled runner observable.
+            log("prelogin-stage=native-run-enter")
+            do {
+                try startPreloginCaptureMatrix()
+                if !withStateLock({ finished }) {
+                    done.wait()
+                }
+            } catch {
+                requestStop(code: 2, reason: "fatal=\(error.localizedDescription)")
+            }
+            try? output.close()
+            try? logOutput.close()
+            return resultCode
+        }
+
         let task = Task {
             do {
                 try await self.start()
@@ -448,9 +468,6 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         stateLock.lock()
         runTask = nil
         stateLock.unlock()
-        // requestStop() closes the data pipe before signalling completion.
-        // Never wait synchronously for a stale writer here: a blocked FileHandle
-        // write used to keep the Python video-session lock alive across reconnects.
         try? output.close()
         try? logOutput.close()
         return resultCode
@@ -474,19 +491,19 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
 
         activeTask?.cancel()
         if let reason { log(reason) }
-        if let activeStream {
-            activeStream.stopCapture(completionHandler: nil)
-        }
-        if let activeCompression {
-            // Remote desktop prefers bounded teardown over draining stale frames.
-            // CompleteFrames can block behind a stuck capture/write callback;
-            // invalidating immediately makes reconnect deterministic.
-            VTCompressionSessionInvalidate(activeCompression)
-        }
-        // Close the pipe immediately so any pending writer wakes with an error.
-        // The queued closure retains self while it unwinds, so this is safe.
-        try? output.close()
+
+        // Signal runBlocking immediately.  ScreenCaptureKit and VideoToolbox
+        // cleanup are best-effort and must never block zmb_streamer_stop(),
+        // otherwise a dead native teardown prevents the next video session.
         done.signal()
+        DispatchQueue.global(qos: .utility).async {
+            if let activeStream {
+                activeStream.stopCapture(completionHandler: nil)
+            }
+            if let activeCompression {
+                VTCompressionSessionInvalidate(activeCompression)
+            }
+        }
     }
 
     private func start() async throws {
@@ -1217,6 +1234,11 @@ public func zmb_display_list_json() -> UnsafeMutablePointer<CChar>? {
 @_cdecl("zmb_string_free")
 public func zmb_string_free(_ pointer: UnsafeMutablePointer<CChar>?) {
     pointer?.deallocate()
+}
+
+@_cdecl("zmb_streamer_build_version")
+public func zmb_streamer_build_version() -> UnsafeMutablePointer<CChar>? {
+    return ownedCString(ZMB_NATIVE_BUILD_VERSION)
 }
 
 @_cdecl("zmb_streamer_create")

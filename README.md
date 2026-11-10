@@ -76,6 +76,8 @@ The LoginWindow input path remains IOHIDSystem-first. macOS can still deny synth
 
 # ZorinMacBridge
 
+> **0.15.37 native lifecycle:** LoginWindow no longer calls the Aqua virtual-display release path before capture (that path synchronously dispatches to the main queue and could block the pre-login helper before the first native progress event). Capture now enters the matrix directly on the native runner thread, exposes every diagnostic progress stage to the Zorin client, uses an explicit replacement cancel-event, and verifies that the loaded `libzmb_streamer.dylib` was built from the same release as the app. Native teardown can no longer hold the Python video-owner lock while a replacement session is waiting.
+
 > **0.15.36 runtime consistency:** pre-login diagnostics are accepted only when the Linux client and Mac server report the same release version. P0 discovery also exposes the installed Mac version.
 
 > **0.15.36 boot pre-login supervisor:** the system P0 LaunchDaemon now actively starts/repairs the LoginWindow helper and verifies its Desktop listener after cold reboot; it no longer waits for an Aqua session or a manual `recover-prelogin` request.

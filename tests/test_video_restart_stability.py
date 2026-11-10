@@ -21,6 +21,7 @@ assert 'deadline = time.monotonic() + VIDEO_RESTART_GRACE_SECONDS' in client
 # interrupts a stale owner instead of passively waiting 20 seconds.
 assert '_VIDEO_SESSION_LOCK = threading.Lock()' in server
 assert '_ACTIVE_VIDEO_SOCKET' in server
+assert '_ACTIVE_VIDEO_CANCEL' in server
 assert 'interrupting stale owner before replacement' in server
 assert 'forced stale video socket shutdown before replacement' in server
 assert 'VIDEO_REPLACEMENT_GRACE_SECONDS = 4.0' in server
@@ -38,9 +39,14 @@ assert 'startup_timeout = VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS if frames == 0
 assert 'disconnect_sock: ssl.SSLSocket | None = None' in server
 assert 'watchers.append(disconnect_sock)' in server
 assert "raise ConnectionError('video client disconnected during native capture')" in server
-assert '_read_exact_file(stream, 4, timeout=startup_timeout, disconnect_sock=sock, idle_callback=flush_pipeline_events)' in server
-assert '_read_exact_file(stream, size, timeout=startup_timeout, disconnect_sock=sock, idle_callback=flush_pipeline_events)' in server
+assert '_read_exact_file(stream, 4, timeout=startup_timeout, disconnect_sock=sock, cancel_event=cancel_event, idle_callback=flush_pipeline_events)' in server
+assert '_read_exact_file(stream, size, timeout=startup_timeout, disconnect_sock=sock, cancel_event=cancel_event, idle_callback=flush_pipeline_events)' in server
+assert "raise ConnectionError('video session cancelled for replacement')" in server
 assert 'deadline = None if timeout is None' in server
 assert 'readable, _, _ = select.select(watchers, [], [], wait_for)' in server
 
 print('video restart stability regression tests: OK')
+
+# Replacement releases Python ownership before native teardown can stall.
+finalizer = server.index('# Release the Python video-owner lock before asking Swift to tear down.')
+assert server.index('release_ownership()', finalizer) < server.index('native.lib.zmb_streamer_stop(handle)', finalizer)

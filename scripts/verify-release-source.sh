@@ -217,6 +217,29 @@ grep -Fq '/bin/sleep 5' native/macos/admin/zmb-system-daemon || {
   echo 'ERROR: P0 boot supervision cadence regressed.' >&2; exit 1;
 }
 
+# 0.15.37: LoginWindow native lifecycle must be observable and replacement-safe.
+grep -Fq 'prelogin-stage=native-run-enter' native/macos/ZMBStreamerLib.swift || {
+  echo 'ERROR: pre-login native runner no longer emits its entry stage.' >&2; exit 1;
+}
+grep -Fq 'try startPreloginCaptureMatrix()' native/macos/ZMBStreamerLib.swift || {
+  echo 'ERROR: pre-login capture matrix no longer runs directly on the native runner.' >&2; exit 1;
+}
+grep -Fq '_ACTIVE_VIDEO_CANCEL' mac_server.py || {
+  echo 'ERROR: video replacement cancel-event is missing.' >&2; exit 1;
+}
+grep -Fq "raise ConnectionError('video session cancelled for replacement')" mac_server.py || {
+  echo 'ERROR: native pipe reader no longer honors replacement cancellation.' >&2; exit 1;
+}
+grep -Fq "state': 'capture-progress'" zmb_session_lifecycle.py || {
+  echo 'ERROR: pre-login diagnostic capture-progress wire state is missing.' >&2; exit 1;
+}
+grep -Fq 'ZMBNativeBuildVersion.swift' scripts/build-macos-streamer.sh || {
+  echo 'ERROR: native streamer build version is not embedded at compile time.' >&2; exit 1;
+}
+grep -Fq 'zmb_streamer_build_version' mac_server.py || {
+  echo 'ERROR: live server no longer verifies native streamer build version.' >&2; exit 1;
+}
+
 echo "[release-source] resilient Aqua + LoginWindow native input fallback gate OK"
 
 # Marker used by readiness regression tests: pre-login READY requires Apple-managed Developer ID/provisioning.

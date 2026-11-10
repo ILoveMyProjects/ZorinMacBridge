@@ -26,7 +26,7 @@ assert 'waitForPreloginAccessUnit(timeout:' in swift
 # soft timeout plus an absolute hard timeout.
 assert 'VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS = 35.0' in server
 assert 'first_frame_hard_deadline = first_frame_started + 40.0' in client
-assert "event.kind in ('pipeline', 'capture-backend', 'capture-failure')" in client
+assert "event.kind in ('pipeline', 'capture-progress', 'capture-backend', 'capture-failure')" in client
 assert "Pre-login video made no capture progress for 10 seconds" in client
 
 print('Aqua + LoginWindow capture-matrix regression tests: OK')

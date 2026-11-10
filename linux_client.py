@@ -1058,12 +1058,15 @@ class ClientApp:
                                     event = parse_session_state(unpack_json(payload))
                                 except Exception:
                                     event = parse_session_state(None)
-                                if self.prelogin_session and video_generation_frames == 0 and event.kind in ('pipeline', 'capture-backend', 'capture-failure'):
+                                if self.prelogin_session and video_generation_frames == 0 and event.kind in ('pipeline', 'capture-progress', 'capture-backend', 'capture-failure'):
                                     now_progress = time.monotonic()
                                     first_frame_progress = event.stage or event.backend or event.reason or event.kind
                                     if first_frame_hard_deadline is not None:
                                         first_frame_deadline = min(first_frame_hard_deadline, now_progress + 10.0)
-                                if event.kind == 'pipeline' and event.stage:
+                                if event.kind == 'capture-progress' and event.stage:
+                                    self._log('INFO', f'Pre-login capture progress: {event.stage}.')
+                                    self.ui_queue.put(('prelogin_capture_progress', event.stage))
+                                elif event.kind == 'pipeline' and event.stage:
                                     if pipeline_progress is not None:
                                         transition = pipeline_progress.observe(event.stage)
                                         if transition.regression:
