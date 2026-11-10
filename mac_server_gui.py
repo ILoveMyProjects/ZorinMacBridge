@@ -55,6 +55,40 @@ def _console_session_user() -> str:
         return ''
 
 
+def _gui_session_available(user: str) -> bool:
+    """Return True when launchd has created the target Aqua bootstrap domain."""
+    try:
+        uid = int(pwd.getpwnam(str(user)).pw_uid)
+    except Exception:
+        return False
+    try:
+        result = subprocess.run(
+            ['/bin/launchctl', 'print', f'gui/{uid}'],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=1.0,
+            check=False,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
+def _detect_aqua_session_user(target_user: str, *, probe_gui_domain: bool = True) -> tuple[str, str]:
+    """Return (user, source) once LoginWindow has transitioned into Aqua."""
+    console_user = _console_session_user()
+    if console_user and console_user not in {'root', 'loginwindow', '_mbsetupuser'}:
+        return console_user, '/dev/console'
+    if probe_gui_domain and _gui_session_available(target_user):
+        try:
+            uid = pwd.getpwnam(str(target_user)).pw_uid
+        except Exception:
+            uid = '?'
+        return str(target_user), f'launchctl gui/{uid}'
+    return '', ''
+
+
 def _serve_aqua_with_handoff_retry(*args, stop_event, log, ready_callback, retry_seconds: float = 8.0, **kwargs) -> None:
     """Retry only EADDRINUSE while LoginWindow releases the shared Desktop port."""
     deadline = time.monotonic() + max(0.0, float(retry_seconds))
@@ -125,14 +159,20 @@ def _prelogin_server_cli() -> int:
     stop_event = threading.Event()
 
     def watch_loginwindow_handoff() -> None:
+        next_gui_probe_at = 0.0
         while not stop_event.wait(0.25):
-            console_user = _console_session_user()
-            if not console_user or console_user in {'root', 'loginwindow', '_mbsetupuser'}:
+            now = time.monotonic()
+            probe_gui = now >= next_gui_probe_at
+            if probe_gui:
+                next_gui_probe_at = now + 0.75
+            aqua_user, source = _detect_aqua_session_user(user, probe_gui_domain=probe_gui)
+            if not aqua_user:
                 continue
-            lease = request_prelogin_handoff(console_user, log=log)
+            log(f'[prelogin/handoff] Aqua session detected user={aqua_user} source={source}')
+            lease = request_prelogin_handoff(aqua_user, log=log)
             if lease is not None:
                 lease.handoff_sent_event.wait(timeout=0.75)
-            log(f'[prelogin/handoff] stopping LoginWindow listener for Aqua user={console_user}')
+            log(f'[prelogin/handoff] stopping LoginWindow listener for Aqua user={aqua_user}')
             stop_event.set()
             return
 

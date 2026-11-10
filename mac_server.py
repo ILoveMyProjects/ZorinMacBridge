@@ -30,6 +30,7 @@ from resources import resource_path
 from zmb_session_lifecycle import (
     PRELOGIN_CONTROL_REPLACEMENT_GRACE_SECONDS, PreloginControlLease,
     PreloginSessionCoordinator, PIPELINE_STAGES, make_capture_backend_state, make_capture_failure_state, make_capture_progress_state, make_handoff_state, make_input_probe_state, make_pipeline_state,
+    make_input_event_state,
 )
 
 from protocol import (
@@ -617,6 +618,8 @@ class LoginWindowInput(MacInput):
         self.last_nx = 0.5
         self.last_ny = 0.5
         self._state_callback = None
+        self._event_callback = None
+        self._channel_override = {'keyboard': '', 'pointer': ''}
         self._activate_from_index(0)
 
     def set_state_callback(self, callback, *, replay: bool = True) -> None:
@@ -624,6 +627,9 @@ class LoginWindowInput(MacInput):
         if replay and callback is not None:
             for row in self.input_probe_states():
                 callback(row)
+
+    def set_event_callback(self, callback) -> None:
+        self._event_callback = callback
 
     @staticmethod
     def _rc_text(rc: int | None) -> str:
@@ -636,6 +642,18 @@ class LoginWindowInput(MacInput):
         callback = self._state_callback
         if callback is not None:
             callback(dict(row))
+
+    def _emit_event(self, *, channel: str, action: str, backend: str, rc: int, result: str, detail: str = '') -> None:
+        callback = self._event_callback
+        if callback is not None:
+            callback({
+                'channel': str(channel),
+                'action': str(action),
+                'backend': str(backend),
+                'rc': int(rc),
+                'result': str(result),
+                'detail': str(detail),
+            })
 
     def _row_for(self, backend: str) -> dict[str, object] | None:
         return next((row for row in self.input_probe_results if row.get('backend') == backend), None)
@@ -659,6 +677,7 @@ class LoginWindowInput(MacInput):
 
     def _activate_from_index(self, start_index: int) -> bool:
         self._close_all_backends()
+        self._channel_override = {'keyboard': '', 'pointer': ''}
         for backend, backend_id in self.BACKEND_ORDER[max(0, int(start_index)):]:
             open_rc = self._open_backend(backend, backend_id)
             row = self._row_for(backend)
@@ -742,8 +761,27 @@ class LoginWindowInput(MacInput):
             row[marker] = bool(ok)
             self._emit_row(row)
 
-    def _dispatch_with_failover(self, operation: str, channel: str, send_current) -> None:
+    def _dispatch_with_failover(self, operation: str, channel: str, send_current, *, action: str, send_quartz_direct=None) -> None:
         failures: list[str] = []
+        override = self._channel_override.get(channel, '')
+        if override == 'quartz-direct' and send_quartz_direct is not None:
+            try:
+                rc = int(send_quartz_direct())
+            except Exception as exc:
+                rc = -32768
+                failures.append(f'quartz-direct:{type(exc).__name__}:{exc}')
+            if rc == 0:
+                self._emit_event(
+                    channel=channel, action=action, backend='quartz-direct', rc=rc,
+                    result='DISPATCH_OK', detail='per-channel Quartz fallback',
+                )
+                return
+            self._emit_event(
+                channel=channel, action=action, backend='quartz-direct', rc=rc,
+                result='DISPATCH_FAIL', detail='per-channel Quartz fallback failed',
+            )
+            self._channel_override[channel] = ''
+
         while self.backend != 'unavailable':
             active = self.backend
             try:
@@ -754,9 +792,41 @@ class LoginWindowInput(MacInput):
             else:
                 if rc == 0:
                     self._mark_runtime_result(active, channel, rc=rc, ok=True, operation=operation)
+                    self._emit_event(
+                        channel=channel, action=action, backend=active, rc=rc,
+                        result='DISPATCH_OK',
+                    )
                     return
                 failures.append(f'{active}:rc={self._rc_text(rc)}')
             self._mark_runtime_result(active, channel, rc=rc, ok=False, operation=operation)
+
+            # IOHIDSystem keyboard and pointer have different privilege surfaces.
+            # Do not demote a working keyboard just because pointer movement is
+            # rejected (or vice versa).  A direct Quartz fallback is scoped to
+            # the failing channel and leaves the IOHIDSystem connection open.
+            if active == 'iohidsystem' and send_quartz_direct is not None:
+                self._emit_event(
+                    channel=channel, action=action, backend=active, rc=rc,
+                    result='DISPATCH_FAIL', detail='trying per-channel Quartz fallback',
+                )
+                try:
+                    quartz_rc = int(send_quartz_direct())
+                except Exception as exc:
+                    quartz_rc = -32768
+                    failures.append(f'quartz-direct:{type(exc).__name__}:{exc}')
+                if quartz_rc == 0:
+                    self._channel_override[channel] = 'quartz-direct'
+                    self._emit_event(
+                        channel=channel, action=action, backend='quartz-direct', rc=quartz_rc,
+                        result='DISPATCH_OK', detail='per-channel Quartz fallback selected; IOHIDSystem kept for other channel',
+                    )
+                    return
+                failures.append(f'quartz-direct:rc={self._rc_text(quartz_rc)}')
+                self._emit_event(
+                    channel=channel, action=action, backend='quartz-direct', rc=quartz_rc,
+                    result='DISPATCH_FAIL', detail='per-channel Quartz fallback failed',
+                )
+
             next_index = self._backend_index(active) + 1
             if not self._activate_from_index(next_index):
                 break
@@ -802,7 +872,10 @@ class LoginWindowInput(MacInput):
         y = int(round(float(bounds.origin.y) + self.last_ny * max(0.0, height - 1.0)))
         return x, y
 
-    def _send_pointer_current(self, *, wheel: int = 0, explicit_event: tuple[int, int] | None = None) -> int:
+    def _send_pointer_current(
+        self, *, wheel: int = 0, explicit_event: tuple[int, int] | None = None,
+        relative_delta: tuple[int, int] | None = None,
+    ) -> int:
         if self.backend == 'corehid':
             return int(self.native.lib.zmb_corehid_input_pointer(
                 self._axis(self.last_nx), self._axis(self.last_ny), self._button_mask(), int(wheel)
@@ -813,6 +886,17 @@ class LoginWindowInput(MacInput):
             ))
         if wheel:
             return int(self.native.lib.zmb_login_input_scroll(0, int(wheel), ctypes.c_uint32(self._flags())))
+        if self.backend == 'iohidsystem':
+            if explicit_event is not None:
+                _etype, button = explicit_event
+                down = _etype in (self.LEFT_DOWN, self.RIGHT_DOWN, self.OTHER_DOWN)
+                return int(self.native.lib.zmb_login_input_button(
+                    int(button), 1 if down else 0, ctypes.c_uint32(self._flags())
+                ))
+            dx, dy = relative_delta or (0, 0)
+            return int(self.native.lib.zmb_login_input_pointer_relative(
+                int(dx), int(dy), ctypes.c_uint8(self._button_mask()), ctypes.c_uint32(self._flags())
+            ))
         x, y = self._legacy_xy()
         if explicit_event is not None:
             etype, button = explicit_event
@@ -828,17 +912,48 @@ class LoginWindowInput(MacInput):
             ctypes.c_uint32(etype), x, y, int(button), ctypes.c_uint32(self._flags())
         ))
 
-    def _pointer_report(self, *, wheel: int = 0, explicit_event: tuple[int, int] | None = None) -> None:
+    def _send_quartz_pointer_direct(self, *, wheel: int = 0, explicit_event: tuple[int, int] | None = None) -> int:
+        if wheel:
+            return int(self.native.lib.zmb_login_input_quartz_scroll(
+                0, int(wheel), ctypes.c_uint32(self._flags())
+            ))
+        x, y = self._legacy_xy()
+        if explicit_event is not None:
+            etype, button = explicit_event
+        elif 1 in self.held_buttons:
+            etype, button = self.LEFT_DRAGGED, 0
+        elif 3 in self.held_buttons:
+            etype, button = self.RIGHT_DRAGGED, 1
+        elif 2 in self.held_buttons:
+            etype, button = self.OTHER_DRAGGED, 2
+        else:
+            etype, button = self.MOUSE_MOVED, 0
+        return int(self.native.lib.zmb_login_input_quartz_pointer(
+            ctypes.c_uint32(etype), x, y, int(button), ctypes.c_uint32(self._flags())
+        ))
+
+    def _pointer_report(
+        self, *, wheel: int = 0, explicit_event: tuple[int, int] | None = None,
+        relative_delta: tuple[int, int] | None = None, action: str = 'move',
+    ) -> None:
         self._ensure_backend()
         self._dispatch_with_failover(
             'login-window pointer report', 'pointer',
-            lambda: self._send_pointer_current(wheel=wheel, explicit_event=explicit_event),
+            lambda: self._send_pointer_current(
+                wheel=wheel, explicit_event=explicit_event, relative_delta=relative_delta,
+            ),
+            action=action,
+            send_quartz_direct=lambda: self._send_quartz_pointer_direct(
+                wheel=wheel, explicit_event=explicit_event,
+            ),
         )
 
     def move(self, nx: float, ny: float) -> None:
+        old_x, old_y = self._legacy_xy()
         self.last_nx = min(1.0, max(0.0, float(nx)))
         self.last_ny = min(1.0, max(0.0, float(ny)))
-        self._pointer_report()
+        new_x, new_y = self._legacy_xy()
+        self._pointer_report(relative_delta=(new_x - old_x, new_y - old_y), action='move')
 
     def button(self, button_num: int, down: bool, nx: float, ny: float) -> None:
         if int(button_num) not in (1, 2, 3):
@@ -856,7 +971,10 @@ class LoginWindowInput(MacInput):
             etype, button = (self.RIGHT_DOWN if down else self.RIGHT_UP), 1
         else:
             etype, button = (self.OTHER_DOWN if down else self.OTHER_UP), 2
-        self._pointer_report(explicit_event=(etype, button))
+        self._pointer_report(
+            explicit_event=(etype, button),
+            action='button-down' if down else 'button-up',
+        )
 
     def scroll(self, dx: int, dy: int) -> None:
         self._ensure_backend()
@@ -868,12 +986,16 @@ class LoginWindowInput(MacInput):
                 lambda: int(self.native.lib.zmb_login_input_scroll(
                     int(dx), int(dy), ctypes.c_uint32(self._flags())
                 )) if self.backend in ('iohidsystem', 'quartz') else self._send_pointer_current(wheel=int(dy)),
+                action='scroll',
+                send_quartz_direct=lambda: int(self.native.lib.zmb_login_input_quartz_scroll(
+                    int(dx), int(dy), ctypes.c_uint32(self._flags())
+                )),
             )
             return
         remaining = int(dy)
         while remaining:
             step = max(-127, min(127, remaining))
-            self._pointer_report(wheel=step)
+            self._pointer_report(wheel=step, action='scroll')
             remaining -= step
 
     def _send_key_current(self, keysym: str, down: bool) -> int:
@@ -896,6 +1018,16 @@ class LoginWindowInput(MacInput):
             int(code), 1 if down else 0, ctypes.c_uint32(self._flags()), 1 if is_mod else 0
         ))
 
+    def _send_quartz_key_direct(self, keysym: str, down: bool) -> int:
+        code = self.KEYCODES.get(keysym)
+        if code is None and len(keysym) == 1:
+            code = self.KEYCODES.get(keysym.lower())
+        if code is None:
+            return 0
+        return int(self.native.lib.zmb_login_input_quartz_key(
+            int(code), 1 if down else 0, ctypes.c_uint32(self._flags())
+        ))
+
     def key(self, keysym: str, down: bool) -> None:
         self._ensure_backend()
         is_mod = keysym in self.MOD_FLAGS
@@ -906,6 +1038,7 @@ class LoginWindowInput(MacInput):
         self._dispatch_with_failover(
             'login-window keyboard report', 'keyboard',
             lambda: self._send_key_current(keysym, down),
+            action='key-down' if down else 'key-up',
         )
 
     def text(self, text: str) -> None:
@@ -1076,8 +1209,18 @@ class NativeStreamerLibrary:
         self.lib.zmb_login_input_key.restype = ctypes.c_int32
         self.lib.zmb_login_input_pointer.argtypes = [ctypes.c_uint32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, ctypes.c_uint32]
         self.lib.zmb_login_input_pointer.restype = ctypes.c_int32
+        self.lib.zmb_login_input_pointer_relative.argtypes = [ctypes.c_int32, ctypes.c_int32, ctypes.c_uint8, ctypes.c_uint32]
+        self.lib.zmb_login_input_pointer_relative.restype = ctypes.c_int32
+        self.lib.zmb_login_input_button.argtypes = [ctypes.c_int32, ctypes.c_int32, ctypes.c_uint32]
+        self.lib.zmb_login_input_button.restype = ctypes.c_int32
         self.lib.zmb_login_input_scroll.argtypes = [ctypes.c_int32, ctypes.c_int32, ctypes.c_uint32]
         self.lib.zmb_login_input_scroll.restype = ctypes.c_int32
+        self.lib.zmb_login_input_quartz_key.argtypes = [ctypes.c_uint16, ctypes.c_int32, ctypes.c_uint32]
+        self.lib.zmb_login_input_quartz_key.restype = ctypes.c_int32
+        self.lib.zmb_login_input_quartz_pointer.argtypes = [ctypes.c_uint32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, ctypes.c_uint32]
+        self.lib.zmb_login_input_quartz_pointer.restype = ctypes.c_int32
+        self.lib.zmb_login_input_quartz_scroll.argtypes = [ctypes.c_int32, ctypes.c_int32, ctypes.c_uint32]
+        self.lib.zmb_login_input_quartz_scroll.restype = ctypes.c_int32
 
     def _owned_string(self, fn) -> str:
         pointer = fn()
@@ -1228,6 +1371,7 @@ def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, prelogin_lea
     log('[control] connected')
     if prelogin:
         log('[control] initializing LoginWindow native input')
+        last_pointer_move_log_at = 0.0
 
         def emit_input_state(row: dict[str, object]) -> None:
             backend = str(row.get('backend') or '')
@@ -1250,6 +1394,31 @@ def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, prelogin_lea
             except OSError as exc:
                 raise ConnectionError('client disconnected while receiving pre-login input state') from exc
 
+        def emit_input_event(event: dict[str, object]) -> None:
+            nonlocal last_pointer_move_log_at
+            channel = str(event.get('channel') or '')
+            action = str(event.get('action') or '')
+            backend = str(event.get('backend') or '')
+            result = str(event.get('result') or '')
+            rc = LoginWindowInput._rc_text(event.get('rc'))
+            detail = str(event.get('detail') or '')
+            if channel == 'pointer' and action == 'move':
+                now = time.monotonic()
+                if now - last_pointer_move_log_at < 0.5:
+                    return
+                last_pointer_move_log_at = now
+            log(
+                '[prelogin/input-event] '
+                f'channel={channel} action={action} backend={backend} result={result} rc={rc}'
+                + (f' detail={detail}' if detail else '')
+            )
+            try:
+                sock.sendall(pack_json(SESSION_STATE, make_input_event_state(
+                    channel, action, backend, result=result, rc=rc, detail=detail,
+                )))
+            except OSError as exc:
+                raise ConnectionError('client disconnected while receiving pre-login input event state') from exc
+
         inp = LoginWindowInput()
         set_state_callback = getattr(inp, 'set_state_callback', None)
         if callable(set_state_callback):
@@ -1259,6 +1428,9 @@ def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, prelogin_lea
             if callable(probe_states):
                 for row in probe_states():
                     emit_input_state(row)
+        set_event_callback = getattr(inp, 'set_event_callback', None)
+        if callable(set_event_callback):
+            set_event_callback(emit_input_event)
         backend_summary = getattr(inp, 'backend_summary', None)
         backend_name = backend_summary() if callable(backend_summary) else type(inp).__name__
         log(f'[control] LoginWindow input backend: {backend_name}')

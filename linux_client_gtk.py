@@ -1872,6 +1872,11 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         if pos:
             pos = self._transform_stream_point(*pos)
             self._enqueue(pack_packet(MOUSE_MOVE, __import__('struct').pack('!ff', pos[0], pos[1])))
+            if self.prelogin_session:
+                now = time.monotonic()
+                if now - self._last_prelogin_mouse_tx_log_at >= 0.5:
+                    self._last_prelogin_mouse_tx_log_at = now
+                    self._log('INFO', f'Pre-login mouse TX: action=move x={pos[0]:.3f} y={pos[1]:.3f}.')
 
     def _gtk_pressed(self, gesture, n_press, x, y):
         button = int(gesture.get_current_button())
@@ -1884,6 +1889,8 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             self.mouse_buttons_down.add(button)
             pos = self._transform_stream_point(*pos)
             self._enqueue(pack_packet(MOUSE_BUTTON, __import__('struct').pack('!BBff', button, 1, pos[0], pos[1])))
+            if self.prelogin_session:
+                self._log('INFO', f'Pre-login mouse TX: action=button-down button={button} x={pos[0]:.3f} y={pos[1]:.3f}.')
         self.picture.grab_focus()
 
     def _gtk_released(self, gesture, _n_press, x, y):
@@ -1895,6 +1902,8 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             self.mouse_buttons_down.discard(button)
             pos = self._transform_stream_point(*pos)
             self._enqueue(pack_packet(MOUSE_BUTTON, __import__('struct').pack('!BBff', button, 0, pos[0], pos[1])))
+            if self.prelogin_session:
+                self._log('INFO', f'Pre-login mouse TX: action=button-up button={button} x={pos[0]:.3f} y={pos[1]:.3f}.')
 
     def _gtk_scroll(self, _controller, dx, dy):
         if self._remote_input_ready():
@@ -1902,6 +1911,8 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             sy = int(round(-dy * 3))
             if sx or sy:
                 self._enqueue(pack_packet(SCROLL, __import__('struct').pack('!ii', sx, sy)))
+                if self.prelogin_session:
+                    self._log('INFO', f'Pre-login mouse TX: action=scroll dx={sx} dy={sy}.')
         return True
 
     @staticmethod
@@ -1946,11 +1957,19 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             self._exit_fullscreen()
             return True
         if self._local_text_input_focused():
+            if self.connected and self.prelogin_session:
+                now = time.monotonic()
+                if now - self._last_prelogin_input_blocked_log_at >= 1.0:
+                    self._last_prelogin_input_blocked_log_at = now
+                    self._log('WARNING', 'Pre-login keyboard TX blocked: a local GTK text editor still has focus.')
             return False
         if not self._remote_input_ready():
             return False
 
         keysym = self._map_keysym(keysym)
+        if self.prelogin_session:
+            category = 'modifier' if keysym in MODIFIER_KEYS or keysym in {'Meta_L', 'Meta_R'} else ('printable' if len(keysym) == 1 else 'special')
+            self._log('INFO', f'Pre-login keyboard TX: action=key-down category={category}.')
         if keysym in MODIFIER_KEYS or keysym in {'Meta_L', 'Meta_R'}:
             if keysym not in self.modifiers_down:
                 self.modifiers_down.add(keysym)
@@ -1985,10 +2004,18 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
 
     def _gtk_key_released(self, _controller, keyval, _keycode, _state):
         if self._local_text_input_focused():
+            if self.connected and self.prelogin_session:
+                now = time.monotonic()
+                if now - self._last_prelogin_input_blocked_log_at >= 1.0:
+                    self._last_prelogin_input_blocked_log_at = now
+                    self._log('WARNING', 'Pre-login keyboard TX blocked: a local GTK text editor still has focus.')
             return False
         if not self._remote_input_ready():
             return False
         keysym = self._map_keysym(self._keysym_name(keyval))
+        if self.prelogin_session:
+            category = 'modifier' if keysym in MODIFIER_KEYS or keysym in {'Meta_L', 'Meta_R'} else ('printable' if len(keysym) == 1 else 'special')
+            self._log('INFO', f'Pre-login keyboard TX: action=key-up category={category}.')
         key_lower = keysym.lower() if len(keysym) == 1 else keysym
         command_was_down = self._command_down()
         if keysym in self.modifiers_down:

@@ -159,6 +159,44 @@ grep -Fq 'Pre-login input check:' linux_client.py || {
   echo 'ERROR: Linux client no longer exposes reboot input readiness/failover results.' >&2
   exit 1
 }
+python3 - <<'PY_INPUT_EVENT_GATE'
+from pathlib import Path
+client = Path('linux_client.py').read_text(encoding='utf-8')
+gtk = Path('linux_client_gtk.py').read_text(encoding='utf-8')
+for required in (
+    "event.kind == 'input-event'",
+    "prefix = 'keyboard' if event.channel == 'keyboard' else 'mouse'",
+    'action={event.action}',
+    'backend={event.backend}',
+    'result={event.result or \"unknown\"}',
+    'rc={event.rc or \"unknown\"}',
+):
+    if required not in client:
+        raise SystemExit(f'ERROR: Linux client lost LoginWindow input-event diagnostic contract: {required}')
+for required in ('Pre-login keyboard TX:', 'Pre-login mouse TX:', 'category={category}'):
+    if required not in gtk:
+        raise SystemExit(f'ERROR: GTK client lost privacy-safe pre-login TX diagnostics: {required}')
+PY_INPUT_EVENT_GATE
+grep -Fq 'zmb_login_input_pointer_relative' native/macos/ZMBLoginInput.c || {
+  echo 'ERROR: LoginWindow IOHIDSystem pointer lost relative-motion fallback.' >&2
+  exit 1
+}
+grep -Fq 'kIOHIDSetRelativeCursorPosition' native/macos/ZMBLoginInput.c || {
+  echo 'ERROR: LoginWindow IOHIDSystem pointer no longer avoids absolute cursor privilege path.' >&2
+  exit 1
+}
+grep -Fq "self._channel_override = {'keyboard': '', 'pointer': ''}" mac_server.py || {
+  echo 'ERROR: LoginWindow input no longer isolates keyboard/pointer runtime fallback.' >&2
+  exit 1
+}
+grep -Fq '_detect_aqua_session_user' mac_server_gui.py || {
+  echo 'ERROR: LoginWindow handoff lost Aqua-session fallback detection.' >&2
+  exit 1
+}
+grep -Fq "'/bin/launchctl', 'print', f'gui/{uid}'" mac_server_gui.py || {
+  echo 'ERROR: LoginWindow handoff no longer verifies the target Aqua launchd domain.' >&2
+  exit 1
+}
 if grep -Fq '#include <IOKit/hid/IOHIDUserDevice.h>' native/macos/ZMBLoginInput.c; then
   echo 'ERROR: Xcode 26.6 SDK does not ship IOHIDUserDevice.h; use runtime symbol resolution.' >&2
   exit 1

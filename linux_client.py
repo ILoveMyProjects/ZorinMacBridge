@@ -792,6 +792,15 @@ class ClientApp:
                                 elif event.backend == 'unavailable' and event.result == 'UNAVAILABLE':
                                     self.prelogin_input_ready = False
                                     self.ui_queue.put(('prelogin_input_unavailable', event.reason or 'no backend available'))
+                            elif event.kind == 'input-event':
+                                prefix = 'keyboard' if event.channel == 'keyboard' else 'mouse'
+                                self._log(
+                                    'INFO',
+                                    f'Pre-login {prefix} dispatch: action={event.action} '
+                                    f'backend={event.backend} result={event.result or "unknown"} '
+                                    f'rc={event.rc or "unknown"}'
+                                    + (f' detail={event.detail}' if event.detail else '')
+                                )
                         elif kind == ERROR:
                             server_error = payload.decode('utf-8', 'replace')
                             last_server_error = server_error

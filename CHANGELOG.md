@@ -1,3 +1,11 @@
+# 0.15.39 — LoginWindow input transport + Aqua handoff diagnostics
+
+- Preserves the physically verified cold-reboot LoginWindow ScreenCaptureKit/VideoToolbox path from 0.15.37/0.15.38 and leaves the P0 boot supervisor unchanged.
+- Changes the IOHIDSystem pointer path from absolute cursor placement to relative `IOHIDPostEvent` movement using `kIOHIDSetRelativeCursorPosition`, avoiding the physical `kIOReturnNotPrivileged (0xe00002c1)` failure seen on the MacBook for `kIOHIDSetCursorPosition`.
+- Makes LoginWindow input failover channel-local when IOHIDSystem pointer dispatch fails: pointer may fall back directly to Quartz without demoting a still-open IOHIDSystem keyboard route. Keyboard failures retain the existing bounded backend failover.
+- Adds privacy-safe pre-login keyboard/mouse transport diagnostics on both Linux TX and Mac dispatch/RX paths. Keyboard logs record only action/category/backend/result/return code and never the typed character or password. Pointer-move logs are rate-limited.
+- Extends LoginWindow→Aqua handoff detection: the pre-login helper now accepts either a real non-LoginWindow `/dev/console` owner or the target user's live `launchctl gui/<uid>` bootstrap domain, fixing cases where the desktop is already visible while console ownership lags.
+
 # 0.15.38 — LoginWindow input readiness + runtime failover
 
 - Preserves the physically verified 0.15.37 cold-reboot LoginWindow video path unchanged; P0, ScreenCaptureKit/VideoToolbox capture, wake/display recovery, and Aqua capture are not modified.

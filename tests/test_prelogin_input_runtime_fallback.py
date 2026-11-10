@@ -66,10 +66,42 @@ class FakeLib:
         self.calls.append(('legacy_pointer', self.active_backend, event_type, int(x), int(y), int(button), flags, rc))
         return rc
 
+    def zmb_login_input_pointer_relative(self, dx, dy, buttons, flags):
+        flags = int(getattr(flags, 'value', flags))
+        buttons = int(getattr(buttons, 'value', buttons))
+        rc = int(self.pointer_rc.get(self.active_backend, 0))
+        self.calls.append(('legacy_pointer_relative', self.active_backend, int(dx), int(dy), buttons, flags, rc))
+        return rc
+
+    def zmb_login_input_button(self, button, down, flags):
+        flags = int(getattr(flags, 'value', flags))
+        rc = int(self.pointer_rc.get(self.active_backend, 0))
+        self.calls.append(('legacy_button', self.active_backend, int(button), int(down), flags, rc))
+        return rc
+
     def zmb_login_input_scroll(self, dx, dy, flags):
         flags = int(getattr(flags, 'value', flags))
         rc = int(self.pointer_rc.get(self.active_backend, 0))
         self.calls.append(('legacy_scroll', self.active_backend, int(dx), int(dy), flags, rc))
+        return rc
+
+    def zmb_login_input_quartz_key(self, code, down, flags):
+        flags = int(getattr(flags, 'value', flags))
+        rc = int(self.key_rc.get(3, 0))
+        self.calls.append(('quartz_key_direct', int(code), int(down), flags, rc))
+        return rc
+
+    def zmb_login_input_quartz_pointer(self, event_type, x, y, button, flags):
+        flags = int(getattr(flags, 'value', flags))
+        event_type = int(getattr(event_type, 'value', event_type))
+        rc = int(self.pointer_rc.get(3, 0))
+        self.calls.append(('quartz_pointer_direct', event_type, int(x), int(y), int(button), flags, rc))
+        return rc
+
+    def zmb_login_input_quartz_scroll(self, dx, dy, flags):
+        flags = int(getattr(flags, 'value', flags))
+        rc = int(self.pointer_rc.get(3, 0))
+        self.calls.append(('quartz_scroll_direct', int(dx), int(dy), flags, rc))
         return rc
 
 
@@ -142,15 +174,35 @@ def run():
         assert any(s['backend'] == 'userdevice' and s['result'] == 'OPEN_READY' and s['selected'] for s in states2)
         inp2.release_all()
 
-        # Pointer dispatch gets the same bounded failover behavior.
+        # IOHIDSystem pointer movement now uses relative cursor movement, which
+        # avoids the absolute kIOHIDSetCursorPosition privilege path seen on the
+        # physical macOS 27 LoginWindow test.
         states3 = []
-        lib3 = FakeLib(corehid_rc=-11, opens={2: 0, 1: 0, 3: 0}, pointer_rc={2: -701, 1: 0})
+        lib3 = FakeLib(corehid_rc=-11, opens={2: 0, 1: 0, 3: 0}, pointer_rc={2: 0, 1: 0, 3: 0})
         inp3 = make_input(lib3, states3)
         inp3.move(0.25, 0.75)
-        assert inp3.backend == 'userdevice'
-        assert any(c[0] == 'legacy_pointer' and c[1] == 2 and c[-1] == -701 for c in lib3.calls)
-        assert any(c[0] == 'userdevice_pointer' and c[-1] == 0 for c in lib3.calls)
+        assert inp3.backend == 'iohidsystem'
+        assert any(c[0] == 'legacy_pointer_relative' and c[1] == 2 and c[-1] == 0 for c in lib3.calls)
         inp3.release_all()
+
+        # If IOHIDSystem pointer dispatch still fails, only POINTER falls back
+        # to direct Quartz. The global backend remains IOHIDSystem so keyboard
+        # does not get demoted merely because cursor movement failed.
+        states3b = []
+        events3b = []
+        lib3b = FakeLib(corehid_rc=-11, opens={2: 0, 1: 0, 3: 0}, pointer_rc={2: -701, 3: 0})
+        inp3b = make_input(lib3b, states3b)
+        inp3b.set_event_callback(events3b.append)
+        inp3b.move(0.25, 0.75)
+        assert inp3b.backend == 'iohidsystem'
+        assert inp3b._channel_override['pointer'] == 'quartz-direct'
+        assert inp3b._channel_override['keyboard'] == ''
+        assert any(c[0] == 'legacy_pointer_relative' and c[-1] == -701 for c in lib3b.calls)
+        assert any(c[0] == 'quartz_pointer_direct' and c[-1] == 0 for c in lib3b.calls)
+        assert any(e['channel'] == 'pointer' and e['backend'] == 'quartz-direct' and e['result'] == 'DISPATCH_OK' for e in events3b)
+        inp3b.key('a', True)
+        assert any(c[:4] == ('legacy_key', 2, 0, 1) and c[-1] == 0 for c in lib3b.calls)
+        inp3b.release_all()
 
         # If every exact backend fails to open, construction remains non-fatal
         # so the proven LoginWindow video stays visible in view-only mode.
