@@ -41,6 +41,7 @@ def initialize_client_runtime_state(client) -> None:
     client.connected = False
     client.prelogin_session = False
     client.prelogin_video_ready = False
+    client.prelogin_input_armed = False
     client.prelogin_input_ready = False
     client._last_prelogin_mouse_tx_log_at = 0.0
     client._last_prelogin_input_blocked_log_at = 0.0

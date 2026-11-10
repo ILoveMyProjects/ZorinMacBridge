@@ -1621,6 +1621,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                     self.prelogin_session = bool(item[1])
                     if self.prelogin_session:
                         self.prelogin_video_ready = False
+                        self.prelogin_input_armed = False
                         self.prelogin_input_ready = False
                     self._refresh_files_state()
                 elif kind == 'prelogin_pipeline':
@@ -1651,25 +1652,42 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                     self.prelogin_video_ready = True
                     if self.connected and self.prelogin_session:
                         if self.prelogin_input_ready:
-                            self.status_var.set('Connected — macOS login window · remote input ready')
+                            self.status_var.set('Connected — macOS login window · remote input active')
+                            if self.capture_input_var.get():
+                                self.picture.grab_focus()
+                        elif self.prelogin_input_armed:
+                            self.status_var.set('Connected — macOS login window · input armed, awaiting first dispatch')
                             if self.capture_input_var.get():
                                 self.picture.grab_focus()
                         else:
-                            self.status_var.set('Connected — macOS login window · waiting for remote input')
+                            self.status_var.set('Connected — macOS login window · waiting for input backend')
                     if self.prelogin_input_ready:
-                        self._log('INFO', f'Pre-login video is visible ({item[1]}x{item[2]}); remote input ready.')
+                        self._log('INFO', f'Pre-login video is visible ({item[1]}x{item[2]}); remote input active.')
+                    elif self.prelogin_input_armed:
+                        self._log('INFO', f'Pre-login video is visible ({item[1]}x{item[2]}); input armed, delivery unverified.')
                     else:
                         self._log('INFO', f'Pre-login video is visible ({item[1]}x{item[2]}); waiting for LoginWindow input backend.')
+                elif kind == 'prelogin_input_armed':
+                    self.prelogin_input_armed = True
+                    backend = str(item[1] or '') if len(item) > 1 else 'unknown'
+                    result = str(item[2] or '') if len(item) > 2 else 'OPEN_READY'
+                    if self.connected and self.prelogin_session and self.prelogin_video_ready:
+                        self.status_var.set('Connected — macOS login window · input armed, awaiting first dispatch')
+                        if self.capture_input_var.get():
+                            self.picture.grab_focus()
+                    self._log('INFO', f'Pre-login remote input armed: backend={backend}, state={result}; delivery not yet verified.')
                 elif kind == 'prelogin_input_ready':
+                    self.prelogin_input_armed = True
                     self.prelogin_input_ready = True
                     backend = str(item[1] or '') if len(item) > 1 else 'unknown'
                     result = str(item[2] or '') if len(item) > 2 else 'OPEN_READY'
                     if self.connected and self.prelogin_session and self.prelogin_video_ready:
-                        self.status_var.set('Connected — macOS login window · remote input ready')
+                        self.status_var.set('Connected — macOS login window · remote input active')
                         if self.capture_input_var.get():
                             self.picture.grab_focus()
-                    self._log('INFO', f'Pre-login remote input ready: backend={backend}, state={result}.')
+                    self._log('INFO', f'Pre-login remote input active: backend={backend}, state={result}.')
                 elif kind == 'prelogin_input_unavailable':
+                    self.prelogin_input_armed = False
                     self.prelogin_input_ready = False
                     reason = str(item[1] or '') if len(item) > 1 else 'no LoginWindow input backend available'
                     if self.connected and self.prelogin_session:
@@ -1861,7 +1879,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         # Never let pointer/keyboard traffic tear down a pre-login session before
         # the user has actually received the first loginwindow frame.
         if self.prelogin_session:
-            if not self.prelogin_video_ready or not self.prelogin_input_ready:
+            if not self.prelogin_video_ready or not self.prelogin_input_armed:
                 return False
         return True
 

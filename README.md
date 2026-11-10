@@ -76,6 +76,8 @@ The LoginWindow input path remains IOHIDSystem-first. macOS can still deny synth
 
 # ZorinMacBridge
 
+> **0.15.40 LoginWindow input control isolation:** the physical 0.15.39 `0xe00002c1` pointer failure can no longer strand the control channel inside Quartz. Quartz fallback runs off-thread with a bounded timeout, pointer failure cannot block the IOHIDSystem keyboard route, failure/timeout logs are never rate-limited, and `OPEN_READY` is shown as input **armed** rather than falsely claiming delivery. The physically verified LoginWindow video/P0 path is unchanged.
+
 > **0.15.39 LoginWindow input + handoff:** the physically observed IOHIDSystem pointer failure (`0xe00002c1`, not privileged) no longer demotes the keyboard route. IOHIDSystem pointer movement uses relative `IOHIDPostEvent`, pointer fallback is channel-local, and Linux/Mac logs now show privacy-safe pre-login keyboard/mouse TX and native dispatch results. LoginWindow→Aqua handoff also detects a live `launchctl gui/<uid>` domain when `/dev/console` still reports LoginWindow. The verified P0 and LoginWindow video path are unchanged.
 
 > **0.15.38 LoginWindow input readiness:** after the physically verified 0.15.37 reboot path reaches a real LoginWindow H.264 frame, control startup no longer blocks on CoreGraphics delivery observation. The server selects the first exact native backend that opens (CoreHID → IOHIDSystem → IOHIDUserDevice → Quartz), reports `OPEN_READY`, and retries the same real key/pointer event on the next backend if native dispatch fails. The Linux client now treats video readiness and input readiness as separate gates and does not claim remote input is enabled until both are ready. P0, LoginWindow video, Aqua capture, and sleep/wake recovery are unchanged.

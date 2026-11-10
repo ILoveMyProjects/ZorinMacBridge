@@ -620,6 +620,7 @@ class ClientApp:
                 )
             if self.prelogin_session:
                 self.prelogin_video_ready = False
+                self.prelogin_input_armed = False
                 self.prelogin_input_ready = False
                 self._desktop_session_token = str(auth_info.get('session_token') or '')
                 try:
@@ -786,10 +787,15 @@ class ClientApp:
                                 )
                                 if event.reason:
                                     self._log('DEBUG', f'Pre-login input check detail ({event.backend}): {event.reason}')
-                                if event.selected and event.result in ('OPEN_READY', 'ACTIVE'):
+                                if event.selected and event.result == 'OPEN_READY':
+                                    self.prelogin_input_armed = True
+                                    self.ui_queue.put(('prelogin_input_armed', event.backend, event.result))
+                                elif event.selected and event.result == 'ACTIVE':
+                                    self.prelogin_input_armed = True
                                     self.prelogin_input_ready = True
                                     self.ui_queue.put(('prelogin_input_ready', event.backend, event.result))
                                 elif event.backend == 'unavailable' and event.result == 'UNAVAILABLE':
+                                    self.prelogin_input_armed = False
                                     self.prelogin_input_ready = False
                                     self.ui_queue.put(('prelogin_input_unavailable', event.reason or 'no backend available'))
                             elif event.kind == 'input-event':
@@ -1221,23 +1227,36 @@ class ClientApp:
                     self.prelogin_session = bool(item[1])
                     if self.prelogin_session:
                         self.prelogin_video_ready = False
+                        self.prelogin_input_armed = False
                         self.prelogin_input_ready = False
                 elif item[0] == 'prelogin_video_ready':
                     self.prelogin_video_ready = True
                     if self.connected and self.prelogin_session:
                         if self.prelogin_input_ready:
-                            self.status_var.set('Connected — macOS login window · remote input ready')
+                            self.status_var.set('Connected — macOS login window · remote input active')
+                            if self.capture_input_var.get():
+                                self.canvas.focus_set()
+                        elif self.prelogin_input_armed:
+                            self.status_var.set('Connected — macOS login window · input armed, awaiting first dispatch')
                             if self.capture_input_var.get():
                                 self.canvas.focus_set()
                         else:
-                            self.status_var.set('Connected — macOS login window · waiting for remote input')
+                            self.status_var.set('Connected — macOS login window · waiting for input backend')
+                elif item[0] == 'prelogin_input_armed':
+                    self.prelogin_input_armed = True
+                    if self.connected and self.prelogin_session and self.prelogin_video_ready:
+                        self.status_var.set('Connected — macOS login window · input armed, awaiting first dispatch')
+                        if self.capture_input_var.get():
+                            self.canvas.focus_set()
                 elif item[0] == 'prelogin_input_ready':
+                    self.prelogin_input_armed = True
                     self.prelogin_input_ready = True
                     if self.connected and self.prelogin_session and self.prelogin_video_ready:
-                        self.status_var.set('Connected — macOS login window · remote input ready')
+                        self.status_var.set('Connected — macOS login window · remote input active')
                         if self.capture_input_var.get():
                             self.canvas.focus_set()
                 elif item[0] == 'prelogin_input_unavailable':
+                    self.prelogin_input_armed = False
                     self.prelogin_input_ready = False
                     if self.connected and self.prelogin_session:
                         self.status_var.set('Connected — macOS login window · view only (input unavailable)')
@@ -1484,7 +1503,7 @@ class ClientApp:
         if not self.connected or not self.capture_input_var.get():
             return False
         if self.prelogin_session:
-            return bool(self.prelogin_video_ready and self.prelogin_input_ready)
+            return bool(self.prelogin_video_ready and self.prelogin_input_armed)
         return True
 
     def _mouse_move(self, event) -> None:

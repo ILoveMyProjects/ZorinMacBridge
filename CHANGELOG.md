@@ -1,3 +1,14 @@
+# 0.15.40 — LoginWindow input control-thread isolation
+
+- Fixes the physical 0.15.39 failure where IOHIDSystem pointer dispatch returned `kIOReturnNotPrivileged (0xe00002c1)` and the immediate Quartz fallback could stall the same control thread that receives all later keyboard/mouse packets.
+- Moves all LoginWindow Quartz `CGEventPost` fallback calls to isolated daemon workers. The control/TLS/video session never waits for Quartz; one unresolved fallback per channel is bounded by a 0.75-second diagnostic watchdog and then disabled for that channel.
+- Keeps the IOHIDSystem keyboard route alive when only pointer/scroll fails. A hung pointer fallback therefore cannot prevent the next real keyboard event from being dispatched through IOHIDSystem.
+- Reports `DISPATCH_PENDING`, `DISPATCH_TIMEOUT`, `DISPATCH_FAIL`, or `DISPATCH_ACCEPTED_UNVERIFIED` for Quartz. A zero return from `CGEventPost` is no longer mislabeled as proof that LoginWindow consumed the event.
+- Fixes pre-login diagnostics so failure/fallback/timeout pointer events are never hidden by the mouse-move rate limiter; only repetitive successful/accepted movement chatter is rate-limited.
+- Splits Linux pre-login input state into **armed** (`OPEN_READY`, events may be sent) and **active** (`ACTIVE`, a native non-Quartz dispatch returned success). The UI no longer claims “remote input ready” merely because a backend opened.
+- Adds a regression that intentionally hangs Quartz after the physical `0xe00002c1` pointer failure and proves that a following keyboard event is still processed while the Quartz worker remains blocked.
+- Leaves P0 boot supervision, LoginWindow ScreenCaptureKit/VideoToolbox capture, pairing/TLS, wake/display recovery, and Aqua capture unchanged.
+
 # 0.15.39 — LoginWindow input transport + Aqua handoff diagnostics
 
 - Preserves the physically verified cold-reboot LoginWindow ScreenCaptureKit/VideoToolbox path from 0.15.37/0.15.38 and leaves the P0 boot supervisor unchanged.

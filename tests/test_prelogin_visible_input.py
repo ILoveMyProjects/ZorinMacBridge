@@ -38,3 +38,9 @@ assert 'self.prelogin_session and not self.prelogin_video_ready' in gtk
 assert 'waiting for first frame' in gtk
 
 print('pre-login visible/input regression tests: OK')
+
+# 0.15.40: Quartz can never run synchronously on the pre-login control thread.
+assert 'Quartz fallback isolated from control thread' in server
+assert "result in ('DISPATCH_OK', 'DISPATCH_ACCEPTED_UNVERIFIED')" in server
+assert 'DISPATCH_TIMEOUT' in server
+assert "channel_local_quartz=True" in server

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from pathlib import Path
 import sys
+import threading
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -186,8 +188,9 @@ def run():
         inp3.release_all()
 
         # If IOHIDSystem pointer dispatch still fails, only POINTER falls back
-        # to direct Quartz. The global backend remains IOHIDSystem so keyboard
-        # does not get demoted merely because cursor movement failed.
+        # to Quartz, and Quartz must run OUTSIDE the control thread.  A successful
+        # CGEventPost return is diagnostic-only because LoginWindow delivery is
+        # not independently observable.
         states3b = []
         events3b = []
         lib3b = FakeLib(corehid_rc=-11, opens={2: 0, 1: 0, 3: 0}, pointer_rc={2: -701, 3: 0})
@@ -195,14 +198,55 @@ def run():
         inp3b.set_event_callback(events3b.append)
         inp3b.move(0.25, 0.75)
         assert inp3b.backend == 'iohidsystem'
-        assert inp3b._channel_override['pointer'] == 'quartz-direct'
+        assert inp3b._channel_override['pointer'] == 'quartz-async'
         assert inp3b._channel_override['keyboard'] == ''
         assert any(c[0] == 'legacy_pointer_relative' and c[-1] == -701 for c in lib3b.calls)
+        deadline = time.monotonic() + 1.0
+        while not any(c[0] == 'quartz_pointer_direct' for c in lib3b.calls) and time.monotonic() < deadline:
+            time.sleep(0.005)
+        inp3b.drain_async_events()
         assert any(c[0] == 'quartz_pointer_direct' and c[-1] == 0 for c in lib3b.calls)
-        assert any(e['channel'] == 'pointer' and e['backend'] == 'quartz-direct' and e['result'] == 'DISPATCH_OK' for e in events3b)
+        assert any(e['channel'] == 'pointer' and e['backend'] == 'quartz-async' and e['result'] == 'DISPATCH_ACCEPTED_UNVERIFIED' for e in events3b)
         inp3b.key('a', True)
         assert any(c[:4] == ('legacy_key', 2, 0, 1) and c[-1] == 0 for c in lib3b.calls)
         inp3b.release_all()
+
+        # Regression for the physical 0.15.39 failure: a Quartz pointer call may
+        # never return.  The move call must still return immediately, the next
+        # keyboard packet must stay on IOHIDSystem, and a bounded timeout must be
+        # reported without killing the control path.
+        states3c = []
+        events3c = []
+        lib3c = FakeLib(corehid_rc=-11, opens={2: 0, 1: 0, 3: 0}, pointer_rc={2: -536870207, 3: 0})
+        gate = threading.Event()
+        original_quartz_pointer = lib3c.zmb_login_input_quartz_pointer
+
+        def hanging_quartz_pointer(*args):
+            lib3c.calls.append(('quartz_pointer_hang_enter',))
+            gate.wait(2.0)
+            return original_quartz_pointer(*args)
+
+        lib3c.zmb_login_input_quartz_pointer = hanging_quartz_pointer
+        inp3c = make_input(lib3c, states3c)
+        inp3c.QUARTZ_ASYNC_TIMEOUT_SECONDS = 0.05
+        inp3c.set_event_callback(events3c.append)
+        started = time.monotonic()
+        inp3c.move(0.25, 0.75)
+        assert time.monotonic() - started < 0.04, 'pointer fallback blocked the control thread'
+        assert any(c[0] == 'quartz_pointer_hang_enter' for c in lib3c.calls)
+
+        # This is the key acceptance: keyboard is processed while Quartz pointer
+        # remains hung in a daemon worker.
+        inp3c.key('a', True)
+        assert any(c[:4] == ('legacy_key', 2, 0, 1) and c[-1] == 0 for c in lib3c.calls)
+        assert any(e['channel'] == 'keyboard' and e['backend'] == 'iohidsystem' and e['result'] == 'DISPATCH_OK' for e in events3c)
+
+        time.sleep(0.08)
+        inp3c.drain_async_events()
+        assert any(e['channel'] == 'pointer' and e['backend'] == 'quartz-async' and e['result'] == 'DISPATCH_TIMEOUT' for e in events3c)
+        assert inp3c._channel_override['pointer'] == 'quartz-disabled'
+        gate.set()
+        inp3c.release_all()
 
         # If every exact backend fails to open, construction remains non-fatal
         # so the proven LoginWindow video stays visible in view-only mode.

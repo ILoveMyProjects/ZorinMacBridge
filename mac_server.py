@@ -620,6 +620,11 @@ class LoginWindowInput(MacInput):
         self._state_callback = None
         self._event_callback = None
         self._channel_override = {'keyboard': '', 'pointer': ''}
+        self._async_dispatch_results: queue.SimpleQueue[tuple] = queue.SimpleQueue()
+        self._quartz_inflight = {'keyboard': None, 'pointer': None}
+        self._quartz_disabled: set[str] = set()
+        self._quartz_token = 0
+        self._released = False
         self._activate_from_index(0)
 
     def set_state_callback(self, callback, *, replay: bool = True) -> None:
@@ -742,7 +747,12 @@ class LoginWindowInput(MacInput):
                 return index
         return len(self.BACKEND_ORDER)
 
-    def _mark_runtime_result(self, backend: str, channel: str, *, rc: int, ok: bool, operation: str) -> None:
+    QUARTZ_ASYNC_TIMEOUT_SECONDS = 0.75
+
+    def _mark_runtime_result(
+        self, backend: str, channel: str, *, rc: int, ok: bool, operation: str,
+        preserve_selected_on_failure: bool = False,
+    ) -> None:
         row = self._row_for(backend)
         if row is None:
             return
@@ -753,7 +763,7 @@ class LoginWindowInput(MacInput):
             f'{operation} dispatch accepted by native backend'
             if ok else f'{operation} failed: rc={self._rc_text(rc)}; trying next backend'
         )
-        if not ok:
+        if not ok and not preserve_selected_on_failure:
             row['selected'] = False
         # Emit first real delivery-attempt result and every failure/failover.
         marker = f'_reported_{channel}_ok'
@@ -761,29 +771,127 @@ class LoginWindowInput(MacInput):
             row[marker] = bool(ok)
             self._emit_row(row)
 
-    def _dispatch_with_failover(self, operation: str, channel: str, send_current, *, action: str, send_quartz_direct=None) -> None:
-        failures: list[str] = []
-        override = self._channel_override.get(channel, '')
-        if override == 'quartz-direct' and send_quartz_direct is not None:
+    def _queue_quartz_dispatch(self, channel: str, action: str, send_quartz_direct) -> bool:
+        """Run Quartz outside the control thread with a bounded diagnostic timeout.
+
+        CGEventPost has no delivery acknowledgement and has physically stalled the
+        LoginWindow control path on macOS.  Never execute it inline.  At most one
+        Quartz call per channel may be in flight; if that call does not return in
+        time, the channel is disabled for Quartz while the control/TLS/video session
+        stays alive.
+        """
+        if send_quartz_direct is None or self._released:
+            return False
+        if channel in self._quartz_disabled:
+            self._emit_event(
+                channel=channel, action=action, backend='quartz-async', rc=-1,
+                result='DISPATCH_UNAVAILABLE',
+                detail='Quartz fallback disabled after an earlier timeout/failure; control thread remains live',
+            )
+            return False
+        if self._quartz_inflight.get(channel) is not None:
+            # Mouse movement is coalesced by the Linux client.  Do not create an
+            # unbounded thread backlog while one native Quartz call is unresolved.
+            return True
+
+        self._quartz_token += 1
+        token = self._quartz_token
+        done = threading.Event()
+        self._quartz_inflight[channel] = token
+        self._channel_override[channel] = 'quartz-async'
+        self._emit_event(
+            channel=channel, action=action, backend='quartz-async', rc=0,
+            result='DISPATCH_PENDING',
+            detail='Quartz fallback isolated from control thread; awaiting bounded native return',
+        )
+
+        def worker() -> None:
             try:
                 rc = int(send_quartz_direct())
+                error = ''
             except Exception as exc:
                 rc = -32768
-                failures.append(f'quartz-direct:{type(exc).__name__}:{exc}')
-            if rc == 0:
+                error = f'{type(exc).__name__}: {exc}'
+            finally:
+                done.set()
+            self._async_dispatch_results.put(('result', token, channel, action, rc, error))
+
+        def watchdog() -> None:
+            if not done.wait(self.QUARTZ_ASYNC_TIMEOUT_SECONDS):
+                self._async_dispatch_results.put(('timeout', token, channel, action, -1, ''))
+
+        threading.Thread(target=worker, name=f'zmb-quartz-{channel}', daemon=True).start()
+        threading.Thread(target=watchdog, name=f'zmb-quartz-watchdog-{channel}', daemon=True).start()
+        return True
+
+    def drain_async_events(self) -> None:
+        """Publish worker results from the control-session thread only."""
+        while True:
+            try:
+                kind, token, channel, action, rc, error = self._async_dispatch_results.get_nowait()
+            except queue.Empty:
+                return
+            if self._quartz_inflight.get(channel) != token:
+                # Late result from a native call that already timed out.
+                continue
+            if kind == 'timeout':
+                self._quartz_inflight[channel] = None
+                self._quartz_disabled.add(channel)
+                self._channel_override[channel] = 'quartz-disabled'
                 self._emit_event(
-                    channel=channel, action=action, backend='quartz-direct', rc=rc,
-                    result='DISPATCH_OK', detail='per-channel Quartz fallback',
+                    channel=channel, action=action, backend='quartz-async', rc=rc,
+                    result='DISPATCH_TIMEOUT',
+                    detail=(
+                        f'Quartz native call did not return within {self.QUARTZ_ASYNC_TIMEOUT_SECONDS:.2f}s; '
+                        'fallback disabled for this channel, control thread remains live'
+                    ),
+                )
+                continue
+
+            self._quartz_inflight[channel] = None
+            if rc == 0:
+                self._channel_override[channel] = 'quartz-async'
+                self._emit_event(
+                    channel=channel, action=action, backend='quartz-async', rc=rc,
+                    result='DISPATCH_ACCEPTED_UNVERIFIED',
+                    detail='CGEventPost returned success; LoginWindow delivery is not independently verified',
+                )
+            else:
+                self._quartz_disabled.add(channel)
+                self._channel_override[channel] = 'quartz-disabled'
+                self._emit_event(
+                    channel=channel, action=action, backend='quartz-async', rc=rc,
+                    result='DISPATCH_FAIL',
+                    detail='Quartz fallback returned failure' + (f': {error}' if error else ''),
+                )
+
+    def _dispatch_with_failover(
+        self, operation: str, channel: str, send_current, *, action: str,
+        send_quartz_direct=None, channel_local_quartz: bool = False,
+    ) -> None:
+        failures: list[str] = []
+        override = self._channel_override.get(channel, '')
+        if override in ('quartz-async', 'quartz-disabled') and send_quartz_direct is not None:
+            if override == 'quartz-disabled':
+                self._emit_event(
+                    channel=channel, action=action, backend='quartz-async', rc=-1,
+                    result='DISPATCH_UNAVAILABLE',
+                    detail='Quartz fallback disabled for this channel; control thread remains live',
                 )
                 return
-            self._emit_event(
-                channel=channel, action=action, backend='quartz-direct', rc=rc,
-                result='DISPATCH_FAIL', detail='per-channel Quartz fallback failed',
-            )
-            self._channel_override[channel] = ''
+            self._queue_quartz_dispatch(channel, action, send_quartz_direct)
+            return
 
         while self.backend != 'unavailable':
             active = self.backend
+
+            # Quartz is diagnostic-only at LoginWindow.  Never call CGEventPost
+            # synchronously from the control thread because a native stall would
+            # stop every following keyboard/mouse packet.
+            if active == 'quartz' and send_quartz_direct is not None:
+                self._queue_quartz_dispatch(channel, action, send_quartz_direct)
+                return
+
             try:
                 rc = int(send_current())
             except Exception as exc:
@@ -798,34 +906,24 @@ class LoginWindowInput(MacInput):
                     )
                     return
                 failures.append(f'{active}:rc={self._rc_text(rc)}')
-            self._mark_runtime_result(active, channel, rc=rc, ok=False, operation=operation)
 
-            # IOHIDSystem keyboard and pointer have different privilege surfaces.
-            # Do not demote a working keyboard just because pointer movement is
-            # rejected (or vice versa).  A direct Quartz fallback is scoped to
-            # the failing channel and leaves the IOHIDSystem connection open.
-            if active == 'iohidsystem' and send_quartz_direct is not None:
+            preserve_selected = bool(active == 'iohidsystem' and channel_local_quartz)
+            self._mark_runtime_result(
+                active, channel, rc=rc, ok=False, operation=operation,
+                preserve_selected_on_failure=preserve_selected,
+            )
+
+            # The physical 0.15.39 test proved that IOHIDSystem pointer dispatch
+            # can fail with kIOReturnNotPrivileged while the keyboard route still
+            # needs to be tried.  Keep the global IOHIDSystem backend intact and
+            # isolate only the failing pointer/scroll channel behind async Quartz.
+            if active == 'iohidsystem' and channel_local_quartz and send_quartz_direct is not None:
                 self._emit_event(
                     channel=channel, action=action, backend=active, rc=rc,
-                    result='DISPATCH_FAIL', detail='trying per-channel Quartz fallback',
+                    result='DISPATCH_FAIL', detail='trying isolated per-channel Quartz fallback',
                 )
-                try:
-                    quartz_rc = int(send_quartz_direct())
-                except Exception as exc:
-                    quartz_rc = -32768
-                    failures.append(f'quartz-direct:{type(exc).__name__}:{exc}')
-                if quartz_rc == 0:
-                    self._channel_override[channel] = 'quartz-direct'
-                    self._emit_event(
-                        channel=channel, action=action, backend='quartz-direct', rc=quartz_rc,
-                        result='DISPATCH_OK', detail='per-channel Quartz fallback selected; IOHIDSystem kept for other channel',
-                    )
-                    return
-                failures.append(f'quartz-direct:rc={self._rc_text(quartz_rc)}')
-                self._emit_event(
-                    channel=channel, action=action, backend='quartz-direct', rc=quartz_rc,
-                    result='DISPATCH_FAIL', detail='per-channel Quartz fallback failed',
-                )
+                self._queue_quartz_dispatch(channel, action, send_quartz_direct)
+                return
 
             next_index = self._backend_index(active) + 1
             if not self._activate_from_index(next_index):
@@ -946,6 +1044,7 @@ class LoginWindowInput(MacInput):
             send_quartz_direct=lambda: self._send_quartz_pointer_direct(
                 wheel=wheel, explicit_event=explicit_event,
             ),
+            channel_local_quartz=True,
         )
 
     def move(self, nx: float, ny: float) -> None:
@@ -990,6 +1089,7 @@ class LoginWindowInput(MacInput):
                 send_quartz_direct=lambda: int(self.native.lib.zmb_login_input_quartz_scroll(
                     int(dx), int(dy), ctypes.c_uint32(self._flags())
                 )),
+                channel_local_quartz=True,
             )
             return
         remaining = int(dy)
@@ -1039,6 +1139,7 @@ class LoginWindowInput(MacInput):
             'login-window keyboard report', 'keyboard',
             lambda: self._send_key_current(keysym, down),
             action='key-down' if down else 'key-up',
+            send_quartz_direct=lambda: self._send_quartz_key_direct(keysym, down),
         )
 
     def text(self, text: str) -> None:
@@ -1064,6 +1165,7 @@ class LoginWindowInput(MacInput):
                     self.key('Shift_L', False)
 
     def release_all(self) -> None:
+        self._released = True
         for key in list(self.held_modifiers):
             try:
                 self.key(key, False)
@@ -1402,7 +1504,7 @@ def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, prelogin_lea
             result = str(event.get('result') or '')
             rc = LoginWindowInput._rc_text(event.get('rc'))
             detail = str(event.get('detail') or '')
-            if channel == 'pointer' and action == 'move':
+            if channel == 'pointer' and action == 'move' and result in ('DISPATCH_OK', 'DISPATCH_ACCEPTED_UNVERIFIED'):
                 now = time.monotonic()
                 if now - last_pointer_move_log_at < 0.5:
                     return
@@ -1444,6 +1546,9 @@ def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, prelogin_lea
     sock.settimeout(0.25)
     try:
         while True:
+            drain_async = getattr(inp, 'drain_async_events', None)
+            if callable(drain_async):
+                drain_async()
             if prelogin_lease is not None and prelogin_lease.handoff_event.is_set():
                 payload = make_handoff_state(
                     user=prelogin_lease.handoff_user, generation=prelogin_lease.generation,

@@ -141,8 +141,12 @@ grep -Fq '_dispatch_with_failover' mac_server.py || {
   echo 'ERROR: reboot LoginWindow input matrix lost real-event runtime failover.' >&2
   exit 1
 }
-grep -Fq "event.result in ('OPEN_READY', 'ACTIVE')" linux_client.py || {
-  echo 'ERROR: Linux client no longer gates pre-login input on backend readiness.' >&2
+grep -Fq "event.result == 'OPEN_READY'" linux_client.py || {
+  echo 'ERROR: Linux client no longer arms pre-login input after exact backend open.' >&2
+  exit 1
+}
+grep -Fq "event.result == 'ACTIVE'" linux_client.py || {
+  echo 'ERROR: Linux client no longer distinguishes verified native dispatch from OPEN_READY.' >&2
   exit 1
 }
 python3 - <<'PY_GATE'
@@ -187,6 +191,18 @@ grep -Fq 'kIOHIDSetRelativeCursorPosition' native/macos/ZMBLoginInput.c || {
 }
 grep -Fq "self._channel_override = {'keyboard': '', 'pointer': ''}" mac_server.py || {
   echo 'ERROR: LoginWindow input no longer isolates keyboard/pointer runtime fallback.' >&2
+  exit 1
+}
+grep -Fq 'Quartz fallback isolated from control thread' mac_server.py || {
+  echo 'ERROR: LoginWindow Quartz fallback returned to synchronous control-thread dispatch.' >&2
+  exit 1
+}
+grep -Fq 'DISPATCH_TIMEOUT' mac_server.py || {
+  echo 'ERROR: LoginWindow Quartz fallback lost its bounded timeout evidence.' >&2
+  exit 1
+}
+grep -Fq 'prelogin_input_armed' linux_client.py || {
+  echo 'ERROR: Linux client again conflates OPEN_READY with verified input activity.' >&2
   exit 1
 }
 grep -Fq '_detect_aqua_session_user' mac_server_gui.py || {
