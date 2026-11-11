@@ -1261,14 +1261,30 @@ def main() -> None:
         try:
             from zmb_macos_virtual_hid import DriverKitVirtualHIDClient
             client = DriverKitVirtualHIDClient()
-            rc = client.open(wait_seconds=2.5)
+            try:
+                wait_seconds = float(os.environ.get('ZMB_VHID_SELFTEST_WAIT', '2.5'))
+            except ValueError:
+                wait_seconds = 2.5
+            wait_seconds = max(0.1, min(15.0, wait_seconds))
+            rc = client.open(wait_seconds=wait_seconds)
             if rc != 0:
-                raise RuntimeError(f'virtual HID backend not ready: rc={rc}; {client.last_error}')
+                status = client.status()
+                detail = (
+                    f'rc={rc}; {client.last_error}; '
+                    f'driver_activated={status.get("driver_activated")} '
+                    f'driver_connected={status.get("driver_connected")} '
+                    f'keyboard={status.get("keyboard_ready")} '
+                    f'pointing={status.get("pointing_ready")}'
+                )
+                client.close()
+                raise RuntimeError('virtual HID backend not ready: ' + detail)
             try:
                 client.release_all()
                 status = client.status()
                 print(
                     'SELFTEST OK: DriverKit virtual HID ready: '
+                    f'driver_activated={status.get("driver_activated")} '
+                    f'driver_connected={status.get("driver_connected")} '
                     f'keyboard={status["keyboard_ready"]} pointing={status["pointing_ready"]} '
                     f'protocol={status["protocol_version"]}'
                 )

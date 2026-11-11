@@ -31,6 +31,8 @@ CMD_POST_KEYBOARD = 6
 CMD_POST_POINTING = 11
 
 # response.hpp
+STATUS_DRIVER_ACTIVATED = 1
+STATUS_DRIVER_CONNECTED = 2
 STATUS_DRIVER_VERSION_MISMATCH = 3
 STATUS_KEYBOARD_READY = 4
 STATUS_POINTING_READY = 5
@@ -70,6 +72,8 @@ class DriverKitVirtualHIDClient:
         self._reader: threading.Thread | None = None
         self._heartbeat: threading.Thread | None = None
         self._request_id = 0
+        self.driver_activated: bool | None = None
+        self.driver_connected: bool | None = None
         self.keyboard_ready = False
         self.pointing_ready = False
         self.driver_version_mismatched = False
@@ -94,6 +98,8 @@ class DriverKitVirtualHIDClient:
         with self._lock:
             return {
                 'connected': self._sock is not None,
+                'driver_activated': self.driver_activated,
+                'driver_connected': self.driver_connected,
                 'keyboard_ready': bool(self.keyboard_ready),
                 'pointing_ready': bool(self.pointing_ready),
                 'driver_version_mismatched': bool(self.driver_version_mismatched),
@@ -126,6 +132,8 @@ class DriverKitVirtualHIDClient:
 
         with self._lock:
             self._sock = sock
+            self.driver_activated = None
+            self.driver_connected = None
             self.keyboard_ready = False
             self.pointing_ready = False
             self.driver_version_mismatched = False
@@ -165,9 +173,14 @@ class DriverKitVirtualHIDClient:
         status = self.status()
         self.last_error = (
             'virtual HID daemon connected but devices not ready: '
+            f'driver_activated={status["driver_activated"]} '
+            f'driver_connected={status["driver_connected"]} '
             f'keyboard={status["keyboard_ready"]} pointing={status["pointing_ready"]}'
         )
-        self.close()
+        # Keep the root-only daemon connection alive. DriverKit can finish
+        # publishing the virtual devices after the initial bounded wait,
+        # especially directly after boot. The background reader will promote
+        # keyboard/pointing readiness as soon as the daemon reports it.
         return RC_NOT_READY
 
     def close(self) -> None:
@@ -175,6 +188,8 @@ class DriverKitVirtualHIDClient:
         with self._lock:
             sock = self._sock
             self._sock = None
+            self.driver_activated = None
+            self.driver_connected = None
             self.keyboard_ready = False
             self.pointing_ready = False
             self._ready_event.set()
@@ -315,7 +330,13 @@ class DriverKitVirtualHIDClient:
             for offset in range(0, len(payload), 2):
                 status_type = payload[offset]
                 value = payload[offset + 1] != 0
-                if status_type == STATUS_KEYBOARD_READY:
+                if status_type == STATUS_DRIVER_ACTIVATED:
+                    changed = changed or self.driver_activated is None or self.driver_activated != value
+                    self.driver_activated = value
+                elif status_type == STATUS_DRIVER_CONNECTED:
+                    changed = changed or self.driver_connected is None or self.driver_connected != value
+                    self.driver_connected = value
+                elif status_type == STATUS_KEYBOARD_READY:
                     changed = changed or self.keyboard_ready != value
                     self.keyboard_ready = value
                 elif status_type == STATUS_POINTING_READY:
@@ -342,6 +363,8 @@ class DriverKitVirtualHIDClient:
                 return
             current = self._sock
             self._sock = None
+            self.driver_activated = None
+            self.driver_connected = None
             self.keyboard_ready = False
             self.pointing_ready = False
             self._ready_event.set()

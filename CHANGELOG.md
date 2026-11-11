@@ -1,3 +1,14 @@
+# 0.15.45 — DriverKit activation/readiness recovery
+
+- Fixes the physical 0.15.44 failure where the virtual-HID daemon socket was reachable but DriverKit still reported `keyboard=False` and `pointing=False`; ZMB no longer treats daemon-socket presence as device readiness.
+- Tracks the upstream `driver_activated` and `driver_connected` states in addition to keyboard/pointing readiness, and includes all four states in LoginWindow diagnostics.
+- Keeps the DriverKit client connection alive when the initial bounded open returns `STARTING`, allowing a just-booted driver to publish its virtual devices without losing the Desktop session.
+- Reserves the LoginWindow input path for DriverKit while it is starting instead of immediately falling through to IOHIDSystem/Quartz paths already proven non-functional on the physical Mac.
+- Promotes `STARTING → OPEN_READY` live when the daemon reports both virtual devices ready; subsequent real keyboard/mouse reports then move the backend to `ACTIVE`.
+- Hardens the virtual-HID installer: it verifies the System Extension is `[activated enabled]`, runs a real root virtual-HID self-test, performs one bounded daemon restart/retry, and distinguishes approval-required, daemon-socket-missing, and devices-not-ready states.
+- Extends `zmb-admin status` with System Extension state and the actual virtual-HID self-test detail.
+- Leaves the physically passing post-reboot ScreenCaptureKit/VideoToolbox capture path, TLS/pairing, wake, boot supervisor, and normal Aqua input unchanged.
+
 # 0.15.44 — Mac driver-backed virtual HID LoginWindow input
 
 - Adds a Mac-side driver-backed virtual keyboard and relative pointing device as the first LoginWindow input backend; Zorin continues to send ordinary keyboard/mouse events over the existing authenticated network control channel.

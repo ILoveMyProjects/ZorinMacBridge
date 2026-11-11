@@ -1667,6 +1667,15 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                         self._log('INFO', f'Pre-login video is visible ({item[1]}x{item[2]}); input armed, delivery unverified.')
                     else:
                         self._log('INFO', f'Pre-login video is visible ({item[1]}x{item[2]}); waiting for LoginWindow input backend.')
+                elif kind == 'prelogin_input_starting':
+                    self.prelogin_input_armed = False
+                    self.prelogin_input_ready = False
+                    backend = str(item[1] or '') if len(item) > 1 else 'driverkit'
+                    result = str(item[2] or '') if len(item) > 2 else 'STARTING'
+                    reason = str(item[3] or '') if len(item) > 3 else ''
+                    if self.connected and self.prelogin_session:
+                        self.status_var.set('Connected — macOS login window · virtual HID starting')
+                    self._log('INFO', f'Pre-login virtual HID pending: backend={backend}, state={result}' + (f'; {reason}' if reason else ''))
                 elif kind == 'prelogin_input_armed':
                     self.prelogin_input_armed = True
                     backend = str(item[1] or '') if len(item) > 1 else 'unknown'

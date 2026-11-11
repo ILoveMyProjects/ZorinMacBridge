@@ -217,7 +217,10 @@ VIRTUAL_HID_RC=$?
 set -e
 if [ "$VIRTUAL_HID_RC" -eq 75 ]; then
   VIRTUAL_HID_SETUP=pending-activation
-  echo 'REQUIRED: approve ZorinMacBridge Virtual HID in System Settings > General > Login Items & Extensions > Driver Extensions, then reboot once.' >&2
+  echo 'REQUIRED: enable the already-installed ZorinMacBridge Virtual HID Driver Extension once in System Settings > General > Login Items & Extensions > Driver Extensions, then reboot if macOS requests it.' >&2
+elif [ "$VIRTUAL_HID_RC" -eq 76 ]; then
+  VIRTUAL_HID_SETUP=devices-not-ready
+  echo 'WARNING: Virtual HID extension/daemon are present but keyboard/mouse devices are not ready; diagnostics were written to /var/tmp/zmb-vhid-selftest.log and /var/log/zorinmacbridge-virtualhid.err.' >&2
 elif [ "$VIRTUAL_HID_RC" -ne 0 ]; then
   VIRTUAL_HID_SETUP=failed
   echo "WARNING: Virtual HID setup failed with rc=$VIRTUAL_HID_RC; pre-login keyboard/mouse will remain unavailable until repaired." >&2

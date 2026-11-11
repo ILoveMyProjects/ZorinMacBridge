@@ -10,9 +10,28 @@ BUNDLED_PKG="$HERE/../virtualhid/$PKG_NAME"
 MANAGER='/Applications/.Karabiner-VirtualHIDDevice-Manager.app/Contents/MacOS/Karabiner-VirtualHIDDevice-Manager'
 DAEMON='/Library/Application Support/org.pqrs/Karabiner-DriverKit-VirtualHIDDevice/Applications/Karabiner-VirtualHIDDevice-Daemon.app/Contents/MacOS/Karabiner-VirtualHIDDevice-Daemon'
 SOCKET='/Library/Application Support/org.pqrs/tmp/rootonly/karabiner_virtual_hid_device_service.sock'
+EXTENSION_ID='org.pqrs.Karabiner-DriverKit-VirtualHIDDevice'
+APP_BIN='/Applications/ZorinMacBridge Server.app/Contents/MacOS/ZorinMacBridge Server'
 LABEL='com.ilovemyprojects.zorinmacbridge.virtualhid'
 PLIST="/Library/LaunchDaemons/${LABEL}.plist"
 SOURCE_PLIST="$HERE/${LABEL}.plist"
+ACTIVATE_LOG='/var/tmp/zmb-vhid-activate.log'
+SELFTEST_LOG='/var/tmp/zmb-vhid-selftest.log'
+
+extension_line() {
+  /usr/bin/systemextensionsctl list 2>/dev/null | /usr/bin/grep -F "$EXTENSION_ID" | /usr/bin/tail -n 1 || true
+}
+
+extension_ready() {
+  local line
+  line="$(extension_line)"
+  [ -n "$line" ] && printf '%s' "$line" | /usr/bin/grep -Fqi '[activated enabled]'
+}
+
+selftest_ready() {
+  [ -x "$APP_BIN" ] || return 1
+  ZMB_VHID_SELFTEST_WAIT=10 "$APP_BIN" --self-test-virtual-hid >"$SELFTEST_LOG" 2>&1
+}
 
 if [ ! -x "$MANAGER" ] || [ ! -x "$DAEMON" ]; then
   [ -f "$BUNDLED_PKG" ] || { echo "Bundled virtual HID package missing: $BUNDLED_PKG" >&2; exit 66; }
@@ -24,10 +43,24 @@ fi
 [ -x "$MANAGER" ] || { echo 'Virtual HID manager was not installed.' >&2; exit 69; }
 [ -x "$DAEMON" ] || { echo 'Virtual HID daemon was not installed.' >&2; exit 69; }
 
-# Submit the already-signed DriverKit system extension. macOS may keep the
-# activation request pending until its one-time Driver Extensions approval.
-if ! "$MANAGER" activate >/var/tmp/zmb-vhid-activate.log 2>&1; then
-  "$MANAGER" forceActivate >>/var/tmp/zmb-vhid-activate.log 2>&1 || true
+# A daemon socket alone is not readiness: the daemon can be alive while the
+# DriverKit extension is still awaiting approval or has not attached. Submit
+# activation, then verify the actual System Extension state.
+: >"$ACTIVATE_LOG"
+if ! extension_ready; then
+  "$MANAGER" activate >>"$ACTIVATE_LOG" 2>&1 || true
+fi
+if ! extension_ready; then
+  "$MANAGER" forceActivate >>"$ACTIVATE_LOG" 2>&1 || true
+fi
+if ! extension_ready; then
+  echo 'virtual_hid=approval-required'
+  echo "virtual_hid_extension=${EXTENSION_ID}"
+  echo "virtual_hid_extension_state=$(extension_line)"
+  echo "virtual_hid_version=$VERSION"
+  echo 'REQUIRED: enable the already-installed ZorinMacBridge virtual HID Driver Extension once in System Settings > General > Login Items & Extensions > Driver Extensions, then reboot if macOS requests it.' >&2
+  /usr/bin/tail -n 20 "$ACTIVATE_LOG" >&2 2>/dev/null || true
+  exit 75
 fi
 
 /usr/bin/plutil -lint "$SOURCE_PLIST" >/dev/null
@@ -37,14 +70,38 @@ fi
 /bin/launchctl bootstrap system "$PLIST" >/dev/null 2>&1 || true
 /bin/launchctl kickstart -k "system/${LABEL}" >/dev/null 2>&1 || true
 
+socket_ready=0
 for _ in $(/usr/bin/seq 1 40); do
-  if [ -S "$SOCKET" ]; then
+  if [ -S "$SOCKET" ]; then socket_ready=1; break; fi
+  /bin/sleep 0.25
+done
+if [ "$socket_ready" != 1 ]; then
+  echo 'virtual_hid=daemon-socket-missing'
+  echo "virtual_hid_extension_state=$(extension_line)"
+  echo "virtual_hid_version=$VERSION"
+  exit 76
+fi
+
+# Strong readiness gate: verify that the root client actually sees BOTH
+# virtual devices. Retry across the short DriverKit publication window seen
+# directly after activation/boot. One bounded daemon restart is allowed.
+for phase in 1 2; do
+  if selftest_ready; then
     echo 'virtual_hid=ready'
+    echo "virtual_hid_extension_state=$(extension_line)"
     echo "virtual_hid_version=$VERSION"
     exit 0
   fi
-  /bin/sleep 0.25
+  if [ "$phase" = 1 ]; then
+    /bin/launchctl kickstart -k "system/${LABEL}" >/dev/null 2>&1 || true
+    /bin/sleep 1
+  fi
 done
-echo 'virtual_hid=pending-activation'
+
+echo 'virtual_hid=devices-not-ready'
+echo "virtual_hid_extension_state=$(extension_line)"
 echo "virtual_hid_version=$VERSION"
-exit 75
+/usr/bin/tail -n 20 "$SELFTEST_LOG" >&2 2>/dev/null || true
+/usr/bin/tail -n 40 /var/log/zorinmacbridge-virtualhid.err >&2 2>/dev/null || true
+/usr/bin/tail -n 40 /var/log/karabiner/virtual_hid_device_service.log >&2 2>/dev/null || true
+exit 76

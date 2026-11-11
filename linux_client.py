@@ -790,6 +790,10 @@ class ClientApp:
                                 if event.selected and event.result == 'OPEN_READY':
                                     self.prelogin_input_armed = True
                                     self.ui_queue.put(('prelogin_input_armed', event.backend, event.result))
+                                elif event.selected and event.result in ('STARTING', 'DISCONNECTED'):
+                                    self.prelogin_input_armed = False
+                                    self.prelogin_input_ready = False
+                                    self.ui_queue.put(('prelogin_input_starting', event.backend, event.result, event.reason or ''))
                                 elif event.selected and event.result == 'ACTIVE':
                                     self.prelogin_input_armed = True
                                     self.prelogin_input_ready = True

@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
 from resources import resource_path
-from zmb_macos_virtual_hid import DriverKitVirtualHIDClient, chunk_relative
+from zmb_macos_virtual_hid import DriverKitVirtualHIDClient, RC_NOT_READY, chunk_relative
 
 from zmb_session_lifecycle import (
     PRELOGIN_CONTROL_REPLACEMENT_GRACE_SECONDS, PreloginControlLease,
@@ -630,6 +630,7 @@ class LoginWindowInput(MacInput):
         self._quartz_disabled: set[str] = set()
         self._quartz_token = 0
         self._released = False
+        self._driverkit_status_signature = None
         self._activate_from_index(0)
 
     def set_state_callback(self, callback, *, replay: bool = True) -> None:
@@ -725,6 +726,19 @@ class LoginWindowInput(MacInput):
                 })
             if backend == 'corehid':
                 self.corehid_open_rc = open_rc
+            if backend == 'driverkit' and open_rc == RC_NOT_READY and self.virtual_hid.connected:
+                # A freshly booted DriverKit extension can publish its virtual HID
+                # devices after the daemon socket is already reachable. Keep the
+                # daemon connection alive and reserve the LoginWindow input path
+                # for DriverKit instead of immediately falling into legacy
+                # synthetic-event backends that are known to be rejected here.
+                self.backend = backend
+                row['selected'] = True
+                row['result'] = 'STARTING'
+                row['reason'] = self.virtual_hid.last_error or 'DriverKit virtual HID devices are still starting'
+                self._driverkit_status_signature = None
+                self._emit_row(row)
+                return True
             if open_rc != 0:
                 if backend == 'driverkit':
                     row['reason'] = self.virtual_hid.last_error or 'DriverKit virtual HID backend not ready'
@@ -845,6 +859,42 @@ class LoginWindowInput(MacInput):
 
     def drain_async_events(self) -> None:
         """Publish worker results from the control-session thread only."""
+        if self.backend == 'driverkit':
+            status = self.virtual_hid.status()
+            signature = (
+                status.get('connected'), status.get('driver_activated'),
+                status.get('driver_connected'), status.get('keyboard_ready'),
+                status.get('pointing_ready'), status.get('driver_version_mismatched'),
+            )
+            if signature != self._driverkit_status_signature:
+                self._driverkit_status_signature = signature
+                row = self._row_for('driverkit')
+                if row is not None:
+                    row['selected'] = True
+                    if self.virtual_hid.ready:
+                        row['open_rc'] = 0
+                        row['result'] = 'OPEN_READY'
+                        row['reason'] = (
+                            'DriverKit virtual HID ready: '
+                            f'driver_activated={status.get("driver_activated")} '
+                            f'driver_connected={status.get("driver_connected")} '
+                            f'keyboard={status.get("keyboard_ready")} '
+                            f'pointing={status.get("pointing_ready")}'
+                        )
+                    elif status.get('connected'):
+                        row['result'] = 'STARTING'
+                        row['reason'] = (
+                            'DriverKit virtual HID starting: '
+                            f'driver_activated={status.get("driver_activated")} '
+                            f'driver_connected={status.get("driver_connected")} '
+                            f'keyboard={status.get("keyboard_ready")} '
+                            f'pointing={status.get("pointing_ready")}'
+                        )
+                    else:
+                        row['result'] = 'DISCONNECTED'
+                        row['reason'] = 'DriverKit virtual HID daemon connection closed'
+                    self._emit_row(row)
+
         while True:
             try:
                 kind, token, channel, action, rc, error = self._async_dispatch_results.get_nowait()
@@ -926,6 +976,26 @@ class LoginWindowInput(MacInput):
                     return
                 failures.append(f'{active}:rc={self._rc_text(rc)}')
 
+            if active == 'driverkit' and rc == RC_NOT_READY and self.virtual_hid.connected:
+                status = self.virtual_hid.status()
+                row = self._row_for('driverkit')
+                if row is not None:
+                    row['selected'] = True
+                    row['result'] = 'STARTING'
+                    row['reason'] = (
+                        'DriverKit virtual HID not ready yet: '
+                        f'driver_activated={status.get("driver_activated")} '
+                        f'driver_connected={status.get("driver_connected")} '
+                        f'keyboard={status.get("keyboard_ready")} '
+                        f'pointing={status.get("pointing_ready")}'
+                    )
+                    self._emit_row(row)
+                self._emit_event(
+                    channel=channel, action=action, backend='driverkit', rc=rc,
+                    result='DISPATCH_PENDING', detail=row['reason'] if row is not None else 'DriverKit virtual HID is still starting',
+                )
+                return
+
             preserve_selected = bool(active == 'iohidsystem' and channel_local_quartz)
             self._mark_runtime_result(
                 active, channel, rc=rc, ok=False, operation=operation,
@@ -954,6 +1024,13 @@ class LoginWindowInput(MacInput):
         label = self.BACKEND_LABELS.get(self.backend, self.backend)
         if self.backend == 'unavailable':
             return 'unavailable — no LoginWindow input backend opened'
+        if self.backend == 'driverkit' and not self.virtual_hid.ready:
+            status = self.virtual_hid.status()
+            return (
+                f'{label}; STARTING; driver_activated={status.get("driver_activated")} '
+                f'driver_connected={status.get("driver_connected")} '
+                f'keyboard={status.get("keyboard_ready")} pointing={status.get("pointing_ready")}'
+            )
         return f'{label}; OPEN_READY; real-event dispatch verification active'
 
     def input_probe_states(self) -> list[dict[str, object]]:

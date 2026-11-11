@@ -839,7 +839,7 @@ desktop_tls_fingerprint() {
 
 status_cmd() {
   require_root
-  local host server_id osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening prelogin_agent_exists prelogin_agent_loaded prelogin_ready prelogin_console auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired desktop_tls_fp ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg auto_update_mode update_current update_latest update_available update_checked update_result update_error power_lines developer_dir wake_mac prelogin_probe_present prelogin_probe_current prelogin_probe_ready prelogin_probe_overall prelogin_probe_capture prelogin_probe_input_result prelogin_probe_input_selected prelogin_probe_input_corehid prelogin_probe_input_userdevice prelogin_probe_input_iohidsystem prelogin_probe_input_quartz prelogin_probe_input_legacy prelogin_release_identity_ready proof_version proof_cdhash app_version app_cdhash virtual_hid_installed virtual_hid_daemon_loaded virtual_hid_socket_ready virtual_hid_input_ready prelogin_capture_proof_ready
+  local host server_id osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening prelogin_agent_exists prelogin_agent_loaded prelogin_ready prelogin_console auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired desktop_tls_fp ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg auto_update_mode update_current update_latest update_available update_checked update_result update_error power_lines developer_dir wake_mac prelogin_probe_present prelogin_probe_current prelogin_probe_ready prelogin_probe_overall prelogin_probe_capture prelogin_probe_input_result prelogin_probe_input_selected prelogin_probe_input_corehid prelogin_probe_input_userdevice prelogin_probe_input_iohidsystem prelogin_probe_input_quartz prelogin_probe_input_legacy prelogin_release_identity_ready proof_version proof_cdhash app_version app_cdhash virtual_hid_installed virtual_hid_daemon_loaded virtual_hid_socket_ready virtual_hid_extension_ready virtual_hid_extension_state virtual_hid_input_ready virtual_hid_input_detail prelogin_capture_proof_ready
   host="$(/bin/hostname 2>/dev/null || echo unknown)"
   server_id="$(config_value SERVER_ID unknown)"
   osver="$(/usr/bin/sw_vers -productVersion 2>/dev/null || echo unknown)"
@@ -850,7 +850,7 @@ status_cmd() {
   [ -n "$user" ] || user="$(console_user || true)"
   uid=""; home=""; settings=""; plist=""; port="$DEFAULT_PORT"; bind="unknown"
   app_installed=0; app_running=0; agent_exists=0; agent_loaded=0; listening=0; session=0; prelogin_agent_exists=0; prelogin_agent_loaded=0; prelogin_ready=0; prelogin_console=0; prelogin_release_identity_ready=0
-  virtual_hid_installed=0; virtual_hid_daemon_loaded=0; virtual_hid_socket_ready=0; virtual_hid_input_ready=0; prelogin_capture_proof_ready=0
+  virtual_hid_installed=0; virtual_hid_daemon_loaded=0; virtual_hid_socket_ready=0; virtual_hid_extension_ready=0; virtual_hid_extension_state=''; virtual_hid_input_ready=0; virtual_hid_input_detail='not-tested'; prelogin_capture_proof_ready=0
   auto_start="unknown"; launch_at_login="unknown"
   [ -d "$APP_PATH" ] && app_installed=1
   [ -f "$PRELOGIN_PLIST" ] && prelogin_agent_exists=1 || true
@@ -862,7 +862,15 @@ status_cmd() {
     virtual_hid_daemon_loaded=1
   fi
   [ -S "$VIRTUAL_HID_SOCKET" ] && virtual_hid_socket_ready=1 || true
-  if [ -x "$APP_BIN" ] && "$APP_BIN" --self-test-virtual-hid >/dev/null 2>&1; then virtual_hid_input_ready=1; fi
+  virtual_hid_extension_state="$(/usr/bin/systemextensionsctl list 2>/dev/null | /usr/bin/grep -F 'org.pqrs.Karabiner-DriverKit-VirtualHIDDevice' | /usr/bin/tail -n 1 || true)"
+  if [ -n "$virtual_hid_extension_state" ] && printf '%s' "$virtual_hid_extension_state" | /usr/bin/grep -Fqi '[activated enabled]'; then
+    virtual_hid_extension_ready=1
+  fi
+  if [ -x "$APP_BIN" ]; then
+    virtual_hid_input_detail="$(ZMB_VHID_SELFTEST_WAIT=2.5 "$APP_BIN" --self-test-virtual-hid 2>&1)" && virtual_hid_input_ready=1 || true
+    virtual_hid_input_detail="$(printf '%s' "$virtual_hid_input_detail" | /usr/bin/tail -n 1 | /usr/bin/tr '\n' ' ' | /usr/bin/cut -c1-500)"
+    [ -n "$virtual_hid_input_detail" ] || virtual_hid_input_detail='no-selftest-output'
+  fi
 
   if [ -n "$user" ]; then
     uid="$(user_uid "$user" || true)"
@@ -980,7 +988,10 @@ status_cmd() {
   printf 'virtual_hid_installed=%s\n' "$virtual_hid_installed"
   printf 'virtual_hid_daemon_loaded=%s\n' "$virtual_hid_daemon_loaded"
   printf 'virtual_hid_socket_ready=%s\n' "$virtual_hid_socket_ready"
+  printf 'virtual_hid_extension_ready=%s\n' "$virtual_hid_extension_ready"
+  printf 'virtual_hid_extension_state=%s\n' "$virtual_hid_extension_state"
   printf 'virtual_hid_input_ready=%s\n' "$virtual_hid_input_ready"
+  printf 'virtual_hid_input_detail=%s\n' "$virtual_hid_input_detail"
   printf 'prelogin_capture_proof_ready=%s\n' "$prelogin_capture_proof_ready"
   printf 'prelogin_release_identity_ready=%s\n' "$prelogin_release_identity_ready"
   printf 'prelogin_probe_present=%s\n' "$prelogin_probe_present"

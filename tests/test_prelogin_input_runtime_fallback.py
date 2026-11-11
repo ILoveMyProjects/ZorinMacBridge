@@ -111,10 +111,15 @@ class FakeLib:
 
 class FakeVirtualHID:
     def __init__(self, open_rc=-211):
-        self.open_rc=int(open_rc); self.last_error='test virtual HID unavailable' if open_rc else ''; self.calls=[]; self.ready=open_rc==0
-    def open(self, *, wait_seconds=2.5): self.calls.append(('open',float(wait_seconds))); self.ready=self.open_rc==0; return self.open_rc
-    def close(self): self.calls.append(('close',)); self.ready=False
+        self.open_rc=int(open_rc); self.last_error='test virtual HID unavailable' if open_rc else ''; self.calls=[]
+        self.connected=self.open_rc in (0,-213); self.ready=self.open_rc==0
+        self.driver_activated=True if self.connected else None; self.driver_connected=True if self.connected else None
+    def open(self, *, wait_seconds=2.5):
+        self.calls.append(('open',float(wait_seconds))); self.connected=self.open_rc in (0,-213); self.ready=self.open_rc==0; return self.open_rc
+    def close(self): self.calls.append(('close',)); self.connected=False; self.ready=False
     def release_all(self): self.calls.append(('release_all',))
+    def status(self):
+        return {'connected':self.connected,'driver_activated':self.driver_activated,'driver_connected':self.driver_connected,'keyboard_ready':self.ready,'pointing_ready':self.ready,'driver_version_mismatched':False}
     def post_keyboard(self, modifiers, usages): self.calls.append(('keyboard',int(modifiers),tuple(sorted(usages)))); return 0 if self.ready else -213
     def post_pointing(self, buttons, dx=0, dy=0, wheel_y=0, wheel_x=0): self.calls.append(('pointing',int(buttons),int(dx),int(dy),int(wheel_y),int(wheel_x))); return 0 if self.ready else -213
 
@@ -170,6 +175,26 @@ def run():
         assert any(c[0]=='pointing' and (c[2] or c[3]) for c in inp0._test_virtual_hid.calls)
         assert any(r['backend']=='driverkit' and r['result']=='ACTIVE' for r in states0)
         inp0.release_all()
+
+        # If the daemon is connected but DriverKit is still publishing the two
+        # devices, reserve the LoginWindow path for DriverKit. Do not fall into
+        # IOHIDSystem/Quartz. A later status transition promotes STARTING to
+        # OPEN_READY without reconnecting the Desktop session.
+        states_pending=[]
+        lib_pending=FakeLib(corehid_rc=-11, opens={2:0,1:0,3:0})
+        inp_pending=make_input(lib_pending,states_pending,vhid_rc=-213)
+        assert inp_pending.backend=='driverkit'
+        assert states_pending[-1]['backend']=='driverkit' and states_pending[-1]['result']=='STARTING' and states_pending[-1]['selected']
+        assert not any(c[0] in ('corehid_open','legacy_open_backend') for c in lib_pending.calls)
+        events_pending=[]; inp_pending.set_event_callback(events_pending.append)
+        inp_pending.key('a',True)
+        assert any(e['backend']=='driverkit' and e['result']=='DISPATCH_PENDING' for e in events_pending)
+        inp_pending._test_virtual_hid.ready=True
+        inp_pending.drain_async_events()
+        assert any(s['backend']=='driverkit' and s['result']=='OPEN_READY' for s in states_pending)
+        inp_pending.key('a',True)
+        assert any(c[0]=='keyboard' and c[2]==(4,) for c in inp_pending._test_virtual_hid.calls)
+        inp_pending.release_all()
 
         # Real historical CoreHID failure (-11) must fall directly to root
         # IOHIDSystem before IOHIDUserDevice and become usable immediately.
