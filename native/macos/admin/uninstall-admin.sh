@@ -12,12 +12,13 @@ TARGET_HOME="$(/usr/bin/dscl . -read "/Users/$TARGET_USER" NFSHomeDirectory 2>/d
 
 /bin/launchctl bootout "system/com.ilovemyprojects.zorinmacbridge.admin" >/dev/null 2>&1 || true
 /bin/launchctl bootout "system/com.ilovemyprojects.zorinmacbridge.update" >/dev/null 2>&1 || true
+/bin/launchctl bootout "system/com.ilovemyprojects.zorinmacbridge.virtualhid" >/dev/null 2>&1 || true
 /bin/launchctl bootout loginwindow/com.ilovemyprojects.zorinmacbridge.prelogin >/dev/null 2>&1 || true
 /bin/launchctl unload -w -S LoginWindow "/Library/LaunchAgents/com.ilovemyprojects.zorinmacbridge.prelogin.plist" >/dev/null 2>&1 || true
-/bin/rm -f "/Library/LaunchDaemons/com.ilovemyprojects.zorinmacbridge.admin.plist" "/Library/LaunchDaemons/com.ilovemyprojects.zorinmacbridge.update.plist" "/Library/LaunchAgents/com.ilovemyprojects.zorinmacbridge.prelogin.plist"
+/bin/rm -f "/Library/LaunchDaemons/com.ilovemyprojects.zorinmacbridge.admin.plist" "/Library/LaunchDaemons/com.ilovemyprojects.zorinmacbridge.update.plist" "/Library/LaunchDaemons/com.ilovemyprojects.zorinmacbridge.virtualhid.plist" "/Library/LaunchAgents/com.ilovemyprojects.zorinmacbridge.prelogin.plist"
 /bin/rm -f /etc/sudoers.d/zorinmacbridge-admin
 /bin/rm -f /usr/local/sbin/zmb-admin /usr/local/libexec/zmb-admin-ssh /usr/local/libexec/zmb-system-daemon
-/bin/rm -f /var/log/zorinmacbridge-update.log /var/log/zorinmacbridge-update.err /var/log/zorinmacbridge-prelogin.log /var/log/zorinmacbridge-prelogin.err
+/bin/rm -f /var/log/zorinmacbridge-update.log /var/log/zorinmacbridge-update.err /var/log/zorinmacbridge-prelogin.log /var/log/zorinmacbridge-prelogin.err /var/log/zorinmacbridge-virtualhid.log /var/log/zorinmacbridge-virtualhid.err
 /bin/rm -rf "/Library/Application Support/ZorinMacBridge/Admin" /var/run/zorinmacbridge-admin
 
 # Remove only ZMB administration keys; preserve all unrelated SSH keys and settings.

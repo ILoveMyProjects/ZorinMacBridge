@@ -32,11 +32,13 @@ assert 'ZorinMacBridge-Server_macOS-arm64-signing.txt' in workflow
 assert '--local-sign-app "$STAGED"' in installer
 assert 'stage_and_sign' in updater
 
-# Normal Aqua READY remains available on the free path, but reboot-to-LoginWindow
-# READY now explicitly requires the Apple-managed Developer ID/provisioning path.
-assert "'prelogin_release_identity'" in requirements
-assert "'prelogin_release_identity_ready'" in requirements
-assert 'pre-login READY requires Apple-managed Developer ID/provisioning' in source_gate
+# Normal Aqua READY remains available on the free path. Reboot-to-LoginWindow
+# input readiness is provided independently by the bundled driver-backed virtual HID.
+assert "'prelogin_virtual_hid'" in requirements
+assert "'virtual_hid_input_ready'" in requirements
+assert 'pre-login READY requires driver-backed virtual HID input plus current capture proof' in source_gate
 assert 'resilient Aqua fallback' in source_gate
+assert "VIRTUAL_HID_VERSION='8.8.0'" in workflow
+assert 'Karabiner-DriverKit-VirtualHIDDevice-' in workflow
 
-print('resilient Aqua release + managed pre-login upgrade regression checks: OK')
+print('resilient Aqua release + Mac virtual HID pre-login regression checks: OK')

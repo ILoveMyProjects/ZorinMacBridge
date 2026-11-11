@@ -15,7 +15,8 @@ def main() -> None:
         'ssh_host_key_ready': True,
         'prelogin_agent_exists': True,
         'prelogin_agent_contract_ready': True,
-        'prelogin_release_identity_ready': True,
+        'virtual_hid_input_ready': True,
+        'prelogin_capture_proof_ready': True,
         'prelogin_probe_ready': True,
     }
     requirements = evaluate_setup_requirements(
@@ -51,7 +52,7 @@ def main() -> None:
     prelogin_broken = dict(ready_state)
     prelogin_broken.update(
         prelogin_agent_contract_ready=False,
-        prelogin_probe_ready=False,
+        prelogin_capture_proof_ready=False,
     )
     requirements = evaluate_setup_requirements(
         screen_recording=True,
@@ -64,13 +65,12 @@ def main() -> None:
     # Pre-login verification is intentionally separate from normal Aqua READY.
     assert not missing_setup_requirements(requirements)
     prelogin_missing = {item.key for item in missing_setup_requirements(evaluate_prelogin_requirements(prelogin_broken))}
-    assert {'prelogin_agent', 'prelogin_capability_proof'} <= prelogin_missing
-    assert 'prelogin_release_identity' not in prelogin_missing
+    assert {'prelogin_agent', 'prelogin_capture_proof'} <= prelogin_missing
 
-    signing_broken = dict(ready_state)
-    signing_broken['prelogin_release_identity_ready'] = False
-    signing_missing = {item.key for item in missing_setup_requirements(evaluate_prelogin_requirements(signing_broken))}
-    assert 'prelogin_release_identity' in signing_missing
+    hid_broken = dict(ready_state)
+    hid_broken['virtual_hid_input_ready'] = False
+    hid_missing = {item.key for item in missing_setup_requirements(evaluate_prelogin_requirements(hid_broken))}
+    assert 'prelogin_virtual_hid' in hid_missing
 
     gui = (ROOT / 'mac_server_gui.py').read_text(encoding='utf-8')
     terminal = (ROOT / 'mac_terminal_setup.py').read_text(encoding='utf-8')
@@ -86,13 +86,14 @@ def main() -> None:
     assert '#c62828' in gui
     assert 'REQUIRED: setup incomplete' in gui
     assert 'READY — normal Aqua/Desktop/Files/System/Terminal operation is available.' in gui
-    assert 'required physical LoginWindow capture + CoreHID proof' in gui
+    assert 'LoginWindow capture has not been physically verified' in gui
     assert 'Required setup incomplete' in gui
     assert "'ssh_port_ready': ssh_port_ready" in admin
     assert "'ssh_host_key_ready': bool(ssh_host_fingerprints())" in admin
     assert "'prelogin_agent_contract_ready': _prelogin_agent_contract_ready()" in admin
     assert "'release_signing_mode': signing_mode" in admin
-    assert "'prelogin_release_identity_ready': signing_mode == 'developer-id'" in admin
+    assert "'virtual_hid_input_ready': bool(virtual_hid_installed and virtual_hid_daemon_loaded and virtual_hid_extension_ready)" in admin
+    assert "'prelogin_capture_proof_ready': bool(current and proof.get('capture_result') == 'PASS')" in admin
     assert "'prelogin_probe_ready': ready" in admin
     assert "if 'remote login: on' in remote_text" in admin
     assert "elif 'remote login: off' in remote_text" in admin

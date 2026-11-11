@@ -160,6 +160,10 @@ class SessionStateEvent:
     pointer: str = ''
     open_rc: str = ''
     selected: bool = False
+    channel: str = ''
+    action: str = ''
+    rc: str = ''
+    detail: str = ''
     generation: int | None = None
 
 
@@ -180,6 +184,10 @@ def make_capture_failure_state(reason: str) -> dict[str, str]:
     return {'state': 'capture-failure', 'reason': str(reason or '')}
 
 
+def make_capture_progress_state(stage: str) -> dict[str, str]:
+    return {'state': 'capture-progress', 'stage': str(stage or '')}
+
+
 def make_input_probe_state(
     backend: str, *, result: str, keyboard: str, pointer: str, open_rc: str, selected: bool, reason: str = ''
 ) -> dict[str, Any]:
@@ -192,6 +200,20 @@ def make_input_probe_state(
         'open_rc': str(open_rc or ''),
         'selected': bool(selected),
         'reason': str(reason or ''),
+    }
+
+
+def make_input_event_state(
+    channel: str, action: str, backend: str, *, result: str, rc: str, detail: str = ''
+) -> dict[str, Any]:
+    return {
+        'state': 'input-event',
+        'channel': str(channel or ''),
+        'action': str(action or ''),
+        'backend': str(backend or ''),
+        'result': str(result or ''),
+        'rc': str(rc or ''),
+        'detail': str(detail or ''),
     }
 
 
@@ -211,6 +233,11 @@ def parse_session_state(value: Any) -> SessionStateEvent:
         stage = str(value.get('stage') or '')
         if stage in _PIPELINE_INDEX and stage != 'client-decoded':
             return SessionStateEvent('pipeline', stage=stage)
+        return SessionStateEvent('unknown')
+    if state == 'capture-progress':
+        stage = str(value.get('stage') or '')
+        if stage:
+            return SessionStateEvent('capture-progress', stage=stage)
         return SessionStateEvent('unknown')
     if state == 'capture-backend':
         backend = str(value.get('backend') or '')
@@ -235,6 +262,21 @@ def parse_session_state(value: Any) -> SessionStateEvent:
             open_rc=str(value.get('open_rc') or ''),
             selected=bool(value.get('selected')),
             reason=str(value.get('reason') or ''),
+        )
+    if state == 'input-event':
+        channel = str(value.get('channel') or '')
+        action = str(value.get('action') or '')
+        backend = str(value.get('backend') or '')
+        if not channel or not action or not backend:
+            return SessionStateEvent('unknown')
+        return SessionStateEvent(
+            'input-event',
+            channel=channel,
+            action=action,
+            backend=backend,
+            result=str(value.get('result') or ''),
+            rc=str(value.get('rc') or ''),
+            detail=str(value.get('detail') or ''),
         )
     if state == 'handoff' and str(value.get('target') or '') == 'aqua':
         generation = value.get('generation')

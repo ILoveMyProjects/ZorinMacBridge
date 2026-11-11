@@ -85,6 +85,7 @@ echo 'CoreHID probe support: required and linked for macOS 26+ target'
 echo '=== verify exported ABI ==='
 nm -gU build/libzmb_streamer.dylib | tee build/libzmb_streamer.nm.txt
 for symbol in \
+  _zmb_streamer_build_version \
   _zmb_streamer_create \
   _zmb_streamer_run \
   _zmb_streamer_stop \

@@ -131,73 +131,47 @@ def evaluate_setup_requirements(
 def evaluate_prelogin_requirements(
     admin_state: Mapping[str, object] | None,
 ) -> list[SetupRequirement]:
-    """Return requirements for the optional reboot-to-LoginWindow remote-login path.
-
-    These requirements deliberately do not participate in the host's normal
-    READY state. A logged-in Aqua host can be fully ready for Desktop, Files,
-    System, Terminal and Projects even when pre-login capability verification
-    has not been run for the current build.
-    """
+    """Return requirements for reboot-to-LoginWindow remote login."""
     if admin_state is None:
         return [
-            SetupRequirement(
-                'prelogin_release_identity',
-                'Apple-managed pre-login capabilities',
-                'requires Developer ID provisioning with Persistent Content Capture and CoreHID Virtual Device entitlements',
-                False,
-            ),
-            SetupRequirement(
-                'prelogin_agent',
-                'LoginWindow pre-login agent',
-                'required for remote Desktop before macOS login after reboot',
-                False,
-            ),
-            SetupRequirement(
-                'prelogin_capability_proof',
-                'Verified LoginWindow capture and CoreHID input',
-                'requires a current physical LoginWindow proof for this exact Mac/build',
-                False,
-            ),
+            SetupRequirement('prelogin_virtual_hid', 'Virtual HID keyboard + mouse', 'required for physical-style LoginWindow input', False),
+            SetupRequirement('prelogin_agent', 'LoginWindow pre-login agent', 'required for remote Desktop before login', False),
+            SetupRequirement('prelogin_capture_proof', 'Verified LoginWindow capture', 'requires a current capture proof for this exact Mac/build', False),
         ]
-
     installed = bool(admin_state.get('installed'))
     return [
         SetupRequirement(
-            'prelogin_release_identity',
-            'Apple-managed pre-login capabilities',
-            'requires Developer ID provisioning with Persistent Content Capture and CoreHID Virtual Device entitlements',
-            bool(admin_state.get('prelogin_release_identity_ready')),
+            'prelogin_virtual_hid',
+            'Virtual HID keyboard + mouse',
+            'required for physical-style LoginWindow keyboard and mouse input',
+            bool(admin_state.get('virtual_hid_input_ready')),
         ),
         SetupRequirement(
             'prelogin_agent',
             'LoginWindow pre-login agent',
-            'required for remote Desktop before macOS login after reboot',
-            installed
-            and bool(admin_state.get('prelogin_agent_exists'))
-            and bool(admin_state.get('prelogin_agent_contract_ready')),
+            'required for remote Desktop before login',
+            installed and bool(admin_state.get('prelogin_agent_exists')) and bool(admin_state.get('prelogin_agent_contract_ready')),
         ),
         SetupRequirement(
-            'prelogin_capability_proof',
-            'Verified LoginWindow capture and CoreHID input',
-            'requires a current physical LoginWindow proof for this exact Mac/build',
-            installed and bool(admin_state.get('prelogin_probe_ready')),
+            'prelogin_capture_proof',
+            'Verified LoginWindow capture',
+            'requires a current capture proof for this exact Mac/build',
+            installed and bool(admin_state.get('prelogin_capture_proof_ready')),
         ),
     ]
 
 def prelogin_readiness_state(admin_state: Mapping[str, object] | None) -> str:
-    """Return VERIFIED, UNVERIFIED, NOT_READY or UNKNOWN for reboot pre-login."""
     if admin_state is None:
         return 'UNKNOWN'
     requirements = {item.key: item for item in evaluate_prelogin_requirements(admin_state)}
-    release_identity = requirements['prelogin_release_identity'].ready
+    virtual_hid = requirements['prelogin_virtual_hid'].ready
     agent = requirements['prelogin_agent'].ready
-    proof = requirements['prelogin_capability_proof'].ready
-    if not release_identity or not agent:
+    capture = requirements['prelogin_capture_proof'].ready
+    if not virtual_hid or not agent:
         return 'NOT_READY'
-    if proof:
+    if capture:
         return 'VERIFIED'
     return 'UNVERIFIED'
-
 
 def missing_setup_requirements(requirements: list[SetupRequirement]) -> list[SetupRequirement]:
     return [item for item in requirements if not item.ready]

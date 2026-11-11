@@ -65,9 +65,9 @@ def main() -> None:
     assert backend.machine_state(ready) == 'DESKTOP_READY'
     assert backend.machine_state({**ready, 'zmb_app_running': '0'}) == 'RECOVERY_NEEDED'
     assert backend.machine_state({**ready, 'user_session_available': '0'}) == 'SYSTEM_ONLINE'
-    assert backend.status_summary({**ready, 'user_session_available': '0', 'prelogin_ready': '1'}).startswith('LOGIN WINDOW VERIFIED')
-    assert 'blocked by missing managed Apple capabilities' in backend.status_summary({**ready, 'user_session_available': '0', 'prelogin_ready': '0', 'prelogin_release_identity_ready': '0'})
-    assert 'not yet physically verified' in backend.status_summary({**ready, 'user_session_available': '0', 'prelogin_ready': '0', 'prelogin_release_identity_ready': '1', 'prelogin_probe_ready': '0'})
+    assert backend.status_summary({**ready, 'user_session_available': '0', 'prelogin_ready': '1'}).startswith('LOGIN WINDOW READY')
+    assert 'virtual keyboard/mouse is not ready' in backend.status_summary({**ready, 'user_session_available': '0', 'prelogin_ready': '0', 'virtual_hid_input_ready': '0'})
+    assert 'not yet physically verified' in backend.status_summary({**ready, 'user_session_available': '0', 'prelogin_ready': '0', 'virtual_hid_input_ready': '1', 'prelogin_capture_proof_ready': '0'})
     assert backend.machine_state({**ready, 'admin_heartbeat_age_seconds': '99'}) == 'DEGRADED'
     blocked, notes = backend.reboot_readiness({'filevault': 'on', 'filevault_ssh_unlock_eligible': '0'})
     assert blocked is False and notes

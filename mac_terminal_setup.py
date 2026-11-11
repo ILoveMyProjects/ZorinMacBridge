@@ -142,14 +142,14 @@ def run_terminal_setup() -> int:
     prelogin_state = prelogin_readiness_state(state)
     print(f'PRELOGIN_AFTER_REBOOT={prelogin_state}')
     if prelogin_state == 'VERIFIED':
-        print('PRELOGIN_NOTE=LoginWindow capture/input proof is current for this Mac/build and applies to all paired Zorin clients.')
+        print('PRELOGIN_NOTE=LoginWindow capture proof is current and the virtual HID keyboard/mouse path is ready for this Mac/build.')
     elif prelogin_state == 'UNVERIFIED':
-        print('PRELOGIN_NOTE=Managed pre-login signing is ready, but the required physical LoginWindow capture + CoreHID probe has not passed for this exact build.')
+        print('PRELOGIN_NOTE=Virtual HID input is ready, but LoginWindow capture has not been physically verified for this exact build.')
     elif prelogin_state == 'NOT_READY':
-        if not state.get('prelogin_release_identity_ready'):
-            print('PRELOGIN_NOTE=This build is Aqua-only. Reboot-to-LoginWindow remote login requires Developer ID provisioning with Apple-managed Persistent Content Capture + CoreHID Virtual Device capabilities.')
+        if not state.get('virtual_hid_input_ready'):
+            print('PRELOGIN_NOTE=Virtual HID keyboard/mouse is not active yet. Use Enable / Repair and complete the one-time Driver Extensions approval if macOS requests it.')
         else:
-            print('PRELOGIN_NOTE=Managed pre-login signing is ready, but the LoginWindow agent is not ready. Use Enable / Repair.')
+            print('PRELOGIN_NOTE=Virtual HID is ready, but the LoginWindow agent is not ready. Use Enable / Repair.')
     if missing:
         print('REQUIRED_SETUP_BEGIN')
         for item in missing:

@@ -6,6 +6,10 @@ ADMIN_LABEL="com.ilovemyprojects.zorinmacbridge.admin"
 UPDATE_LABEL="com.ilovemyprojects.zorinmacbridge.update"
 PRELOGIN_LABEL="com.ilovemyprojects.zorinmacbridge.prelogin"
 PRELOGIN_PLIST="/Library/LaunchAgents/${PRELOGIN_LABEL}.plist"
+VIRTUAL_HID_LABEL="com.ilovemyprojects.zorinmacbridge.virtualhid"
+VIRTUAL_HID_MANAGER="/Applications/.Karabiner-VirtualHIDDevice-Manager.app/Contents/MacOS/Karabiner-VirtualHIDDevice-Manager"
+VIRTUAL_HID_DAEMON="/Library/Application Support/org.pqrs/Karabiner-DriverKit-VirtualHIDDevice/Applications/Karabiner-VirtualHIDDevice-Daemon.app/Contents/MacOS/Karabiner-VirtualHIDDevice-Daemon"
+VIRTUAL_HID_SOCKET="/Library/Application Support/org.pqrs/tmp/rootonly/karabiner_virtual_hid_device_service.sock"
 APP_NAME="ZorinMacBridge Server"
 APP_PATH="/Applications/ZorinMacBridge Server.app"
 DEFAULT_PORT="45950"
@@ -19,6 +23,7 @@ DAEMON_ERR="/var/log/zorinmacbridge-admin.err"
 RECOVERY_LOG="/var/log/zorinmacbridge-recovery.log"
 ADVERTISER_PID_FILE="$HEARTBEAT_DIR/advertiser.pid"
 PORT_FAIL_FILE="$HEARTBEAT_DIR/port-fail-count"
+PRELOGIN_PORT_FAIL_FILE="$HEARTBEAT_DIR/prelogin-port-fail-count"
 ADMIN_PLIST="/Library/LaunchDaemons/${ADMIN_LABEL}.plist"
 UPDATE_PLIST="/Library/LaunchDaemons/com.ilovemyprojects.zorinmacbridge.update.plist"
 APP_BACKUP="${APP_PATH}.zmb-update-backup"
@@ -405,6 +410,81 @@ prelogin_process_running() {
   [ -n "$(prelogin_process_pids)" ]
 }
 
+prelogin_job_loaded() {
+  /bin/launchctl print "loginwindow/${PRELOGIN_LABEL}" >/dev/null 2>&1
+}
+
+wait_prelogin_port() {
+  local port="$1" attempts="${2:-20}" i=1
+  while [ "$i" -le "$attempts" ]; do
+    prelogin_console_active || return 2
+    port_listening "$port" && return 0
+    /bin/sleep 0.25
+    i=$((i + 1))
+  done
+  return 1
+}
+
+autoheal_prelogin() {
+  # P0 is a system LaunchDaemon and must make LoginWindow recovery autonomous.
+  # Do not wait for a Zorin client recover-prelogin request: as soon as the
+  # console enters LoginWindow, keep the helper loaded and its Desktop port up.
+  local user uid home port count
+  prelogin_console_active || { /bin/rm -f "$PRELOGIN_PORT_FAIL_FILE" 2>/dev/null || true; return 0; }
+  [ -x "$APP_BIN" ] || { recovery_log ERROR PRELOGIN_APP_MISSING "Pre-login autoheal cannot start because the installed app executable is missing."; return 0; }
+  user="$(target_user || true)"; [ -n "$user" ] || return 0
+  uid="$(user_uid "$user" || true)"; [ -n "$uid" ] || return 0
+  home="$(user_home "$user" || true)"; [ -n "$home" ] || return 0
+  port="$(settings_value "$home/.zorin-mac-bridge/server-settings.json" port "$DEFAULT_PORT")"
+
+  if port_listening "$port"; then
+    /bin/rm -f "$PRELOGIN_PORT_FAIL_FILE" 2>/dev/null || true
+    return 0
+  fi
+
+  # Repair a missing/invalid installed plist from the signed application payload.
+  if [ ! -f "$PRELOGIN_PLIST" ] || ! /usr/bin/plutil -lint "$PRELOGIN_PLIST" >/dev/null 2>&1; then
+    if ! repair_prelogin_agent; then
+      recovery_log ERROR PRELOGIN_AUTOHEAL_PLIST_FAILED "P0 could not restore/register the LoginWindow pre-login LaunchAgent."
+      return 0
+    fi
+    recovery_log INFO PRELOGIN_AUTOHEAL_PLIST_REPAIRED "P0 restored and registered the LoginWindow pre-login LaunchAgent."
+  elif ! prelogin_job_loaded || ! prelogin_process_running; then
+    if load_prelogin_current_session; then
+      recovery_log INFO PRELOGIN_AUTOHEAL_STARTED "P0 started the LoginWindow pre-login Desktop helper automatically after boot."
+    else
+      recovery_log WARN PRELOGIN_AUTOHEAL_START_PENDING "LoginWindow exists but the pre-login helper has not started yet; P0 will retry."
+    fi
+  fi
+
+  if wait_prelogin_port "$port" 8; then
+    /bin/rm -f "$PRELOGIN_PORT_FAIL_FILE" 2>/dev/null || true
+    recovery_log INFO PRELOGIN_AUTOHEAL_READY "LoginWindow Desktop endpoint is listening on port $port."
+    return 0
+  fi
+  prelogin_console_active || return 0
+
+  count="$(/bin/cat "$PRELOGIN_PORT_FAIL_FILE" 2>/dev/null || echo 0)"
+  printf '%s' "$count" | /usr/bin/grep -Eq '^[0-9]+$' || count=0
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$PRELOGIN_PORT_FAIL_FILE"
+  /bin/chmod 644 "$PRELOGIN_PORT_FAIL_FILE" 2>/dev/null || true
+
+  # Two consecutive P0 ticks with a missing listener means the helper is stale
+  # or launchd never activated it. Restart only the LoginWindow helper; never
+  # touch the Aqua desktop path here.
+  if [ "$count" -ge 2 ]; then
+    recovery_log WARN PRELOGIN_AUTOHEAL_PORT_STUCK "LoginWindow helper did not open port $port for two recovery ticks; restarting only the pre-login helper."
+    /bin/rm -f "$PRELOGIN_PORT_FAIL_FILE"
+    if restart_prelogin_current_session && wait_prelogin_port "$port" 20; then
+      recovery_log INFO PRELOGIN_AUTOHEAL_RECOVERED "P0 restarted the LoginWindow helper and restored port $port."
+    else
+      recovery_log ERROR PRELOGIN_AUTOHEAL_RESTART_FAILED "P0 could not restore the LoginWindow Desktop endpoint; it will retry on the next daemon tick."
+    fi
+  fi
+  return 0
+}
+
 restart_prelogin_current_session() {
   # Updates can replace the app while LoginWindow is already active.  A running
   # LaunchAgent process keeps executing the old mapped executable until it is
@@ -759,7 +839,7 @@ desktop_tls_fingerprint() {
 
 status_cmd() {
   require_root
-  local host server_id osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening prelogin_agent_exists prelogin_agent_loaded prelogin_ready prelogin_console auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired desktop_tls_fp ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg auto_update_mode update_current update_latest update_available update_checked update_result update_error power_lines developer_dir wake_mac prelogin_probe_present prelogin_probe_current prelogin_probe_ready prelogin_probe_overall prelogin_probe_capture prelogin_probe_input_result prelogin_probe_input_selected prelogin_probe_input_corehid prelogin_probe_input_userdevice prelogin_probe_input_iohidsystem prelogin_probe_input_quartz prelogin_probe_input_legacy prelogin_release_identity_ready proof_version proof_cdhash app_version app_cdhash
+  local host server_id osver build major arch user uid home settings plist port bind app_installed app_running agent_exists agent_loaded listening prelogin_agent_exists prelogin_agent_loaded prelogin_ready prelogin_console auto_start launch_at_login session daemon_loaded hb_age remote_login fv wake mem disk paired desktop_tls_fp ssh_unlock reboot_risk autoheal_enabled autoheal_paused top_out cpu_usage memory_summary loadavg auto_update_mode update_current update_latest update_available update_checked update_result update_error power_lines developer_dir wake_mac prelogin_probe_present prelogin_probe_current prelogin_probe_ready prelogin_probe_overall prelogin_probe_capture prelogin_probe_input_result prelogin_probe_input_selected prelogin_probe_input_corehid prelogin_probe_input_userdevice prelogin_probe_input_iohidsystem prelogin_probe_input_quartz prelogin_probe_input_legacy prelogin_release_identity_ready proof_version proof_cdhash app_version app_cdhash virtual_hid_installed virtual_hid_daemon_loaded virtual_hid_socket_ready virtual_hid_input_ready prelogin_capture_proof_ready
   host="$(/bin/hostname 2>/dev/null || echo unknown)"
   server_id="$(config_value SERVER_ID unknown)"
   osver="$(/usr/bin/sw_vers -productVersion 2>/dev/null || echo unknown)"
@@ -770,11 +850,19 @@ status_cmd() {
   [ -n "$user" ] || user="$(console_user || true)"
   uid=""; home=""; settings=""; plist=""; port="$DEFAULT_PORT"; bind="unknown"
   app_installed=0; app_running=0; agent_exists=0; agent_loaded=0; listening=0; session=0; prelogin_agent_exists=0; prelogin_agent_loaded=0; prelogin_ready=0; prelogin_console=0; prelogin_release_identity_ready=0
+  virtual_hid_installed=0; virtual_hid_daemon_loaded=0; virtual_hid_socket_ready=0; virtual_hid_input_ready=0; prelogin_capture_proof_ready=0
   auto_start="unknown"; launch_at_login="unknown"
   [ -d "$APP_PATH" ] && app_installed=1
   [ -f "$PRELOGIN_PLIST" ] && prelogin_agent_exists=1 || true
   prelogin_process_running && prelogin_agent_loaded=1 || true
   prelogin_console_active && prelogin_console=1 || true
+  if [ -x "$VIRTUAL_HID_MANAGER" ] && [ -x "$VIRTUAL_HID_DAEMON" ]; then virtual_hid_installed=1; fi
+  if /bin/launchctl print "system/${VIRTUAL_HID_LABEL}" >/dev/null 2>&1 \
+      || /bin/launchctl print "system/org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon" >/dev/null 2>&1; then
+    virtual_hid_daemon_loaded=1
+  fi
+  [ -S "$VIRTUAL_HID_SOCKET" ] && virtual_hid_socket_ready=1 || true
+  if [ -x "$APP_BIN" ] && "$APP_BIN" --self-test-virtual-hid >/dev/null 2>&1; then virtual_hid_input_ready=1; fi
 
   if [ -n "$user" ]; then
     uid="$(user_uid "$user" || true)"
@@ -856,6 +944,7 @@ status_cmd() {
   if [ "$prelogin_probe_current" = "1" ] && [ "$prelogin_probe_overall" = "PASS" ] && [ "$prelogin_probe_capture" = "PASS" ] && [ "$prelogin_probe_input_result" = "PASS" ]; then
     prelogin_probe_ready=1
   fi
+  if [ "$prelogin_probe_current" = "1" ] && [ "$prelogin_probe_capture" = "PASS" ]; then prelogin_capture_proof_ready=1; fi
   ssh_unlock=0
   if printf '%s' "$major" | /usr/bin/grep -Eq '^[0-9]+$' && [ "$major" -ge 26 ] && [ "$remote_login" = "on" ]; then
     ssh_unlock=1
@@ -883,11 +972,16 @@ status_cmd() {
   printf 'zmb_app_running=%s\n' "$app_running"
   printf 'launch_agent_exists=%s\n' "$agent_exists"
   printf 'launch_agent_loaded=%s\n' "$agent_loaded"
-  if [ "$session" != "1" ] && [ "$listening" = "1" ] && [ "$prelogin_release_identity_ready" = "1" ] && [ "$prelogin_probe_ready" = "1" ]; then prelogin_ready=1; fi
+  if [ "$session" != "1" ] && [ "$listening" = "1" ] && [ "$virtual_hid_input_ready" = "1" ] && [ "$prelogin_capture_proof_ready" = "1" ]; then prelogin_ready=1; fi
   printf 'prelogin_agent_exists=%s\n' "$prelogin_agent_exists"
   printf 'prelogin_agent_loaded=%s\n' "$prelogin_agent_loaded"
   printf 'prelogin_console_active=%s\n' "$prelogin_console"
   printf 'prelogin_ready=%s\n' "$prelogin_ready"
+  printf 'virtual_hid_installed=%s\n' "$virtual_hid_installed"
+  printf 'virtual_hid_daemon_loaded=%s\n' "$virtual_hid_daemon_loaded"
+  printf 'virtual_hid_socket_ready=%s\n' "$virtual_hid_socket_ready"
+  printf 'virtual_hid_input_ready=%s\n' "$virtual_hid_input_ready"
+  printf 'prelogin_capture_proof_ready=%s\n' "$prelogin_capture_proof_ready"
   printf 'prelogin_release_identity_ready=%s\n' "$prelogin_release_identity_ready"
   printf 'prelogin_probe_present=%s\n' "$prelogin_probe_present"
   printf 'prelogin_probe_current=%s\n' "$prelogin_probe_current"
@@ -1063,7 +1157,12 @@ autoheal() {
   [ ! -f "$PAUSE_FILE" ] || return 0
   user="$(target_user || true)"; [ -n "$user" ] || return 0
   uid="$(user_uid "$user" || true)"; [ -n "$uid" ] || return 0
-  user_session_available "$uid" || { /bin/rm -f "$PORT_FAIL_FILE" 2>/dev/null || true; return 0; }
+  if ! user_session_available "$uid"; then
+    /bin/rm -f "$PORT_FAIL_FILE" 2>/dev/null || true
+    autoheal_prelogin
+    return 0
+  fi
+  /bin/rm -f "$PRELOGIN_PORT_FAIL_FILE" 2>/dev/null || true
   [ -d "$APP_PATH" ] || return 0
   home="$(user_home "$user" || true)"; [ -n "$home" ] || return 0
   plist="$home/Library/LaunchAgents/${LABEL}.plist"

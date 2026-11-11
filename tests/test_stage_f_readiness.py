@@ -23,7 +23,8 @@ def _base_state(**changes):
         'ssh_host_key_ready': True,
         'prelogin_agent_exists': True,
         'prelogin_agent_contract_ready': True,
-        'prelogin_release_identity_ready': True,
+        'virtual_hid_input_ready': True,
+        'prelogin_capture_proof_ready': True,
         'prelogin_probe_ready': True,
     }
     state.update(changes)
@@ -47,9 +48,9 @@ def main() -> None:
     # Stage F proof is a separate reboot-login verification mode. It must not
     # block normal Aqua READY.
     for key, field in (
-        ('prelogin_release_identity', 'prelogin_release_identity_ready'),
+        ('prelogin_virtual_hid', 'virtual_hid_input_ready'),
         ('prelogin_agent', 'prelogin_agent_contract_ready'),
-        ('prelogin_capability_proof', 'prelogin_probe_ready'),
+        ('prelogin_capture_proof', 'prelogin_capture_proof_ready'),
     ):
         state = _base_state(**{field: False})
         assert not missing_setup_requirements(_requirements(state))
@@ -57,9 +58,9 @@ def main() -> None:
         assert key in missing
 
     assert prelogin_readiness_state(_base_state()) == 'VERIFIED'
-    assert prelogin_readiness_state(_base_state(prelogin_probe_ready=False)) == 'UNVERIFIED'
+    assert prelogin_readiness_state(_base_state(prelogin_capture_proof_ready=False)) == 'UNVERIFIED'
     assert prelogin_readiness_state(_base_state(prelogin_agent_contract_ready=False)) == 'NOT_READY'
-    assert prelogin_readiness_state(_base_state(prelogin_release_identity_ready=False)) == 'NOT_READY'
+    assert prelogin_readiness_state(_base_state(virtual_hid_input_ready=False)) == 'NOT_READY'
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -78,6 +79,7 @@ def main() -> None:
             state = mac_admin_setup._prelogin_probe_state()
             assert state['prelogin_probe_current'] is True
             assert state['prelogin_probe_ready'] is True
+            assert state['prelogin_capture_proof_ready'] is True
 
         proof.write_text(
             f'app_version={CURRENT_VERSION}\n'
@@ -137,13 +139,12 @@ def main() -> None:
     assert "printf 'app_cdhash=%s\\n'" in admin
     assert "printf 'prelogin_probe_current=%s\\n'" in admin
     assert "printf 'prelogin_probe_ready=%s\\n'" in admin
-    assert 'prelogin_release_identity_ready' in gui
-    assert 'managed-capabilities={managed}' in gui
-    assert 'Persistent Content Capture + CoreHID Virtual Device capabilities' in gui
-    assert 'Normal Aqua use is unaffected.' in gui
-    assert 'required physical LoginWindow capture + CoreHID proof' in gui
+    assert 'virtual_hid_input_ready' in gui
+    assert 'virtual-hid={vhid}' in gui
+    assert 'virtual HID' in gui
+    assert 'LoginWindow capture has not been physically verified' in gui
     assert 'PRELOGIN_AFTER_REBOOT=' in terminal
-    assert 'This build is Aqua-only.' in terminal
+    assert 'Virtual HID keyboard/mouse is not active yet.' in terminal
     print('Stage F pre-login readiness gate tests: OK')
 
 

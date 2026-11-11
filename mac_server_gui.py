@@ -55,6 +55,40 @@ def _console_session_user() -> str:
         return ''
 
 
+def _gui_session_available(user: str) -> bool:
+    """Return True when launchd has created the target Aqua bootstrap domain."""
+    try:
+        uid = int(pwd.getpwnam(str(user)).pw_uid)
+    except Exception:
+        return False
+    try:
+        result = subprocess.run(
+            ['/bin/launchctl', 'print', f'gui/{uid}'],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=1.0,
+            check=False,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
+def _detect_aqua_session_user(target_user: str, *, probe_gui_domain: bool = True) -> tuple[str, str]:
+    """Return (user, source) once LoginWindow has transitioned into Aqua."""
+    console_user = _console_session_user()
+    if console_user and console_user not in {'root', 'loginwindow', '_mbsetupuser'}:
+        return console_user, '/dev/console'
+    if probe_gui_domain and _gui_session_available(target_user):
+        try:
+            uid = pwd.getpwnam(str(target_user)).pw_uid
+        except Exception:
+            uid = '?'
+        return str(target_user), f'launchctl gui/{uid}'
+    return '', ''
+
+
 def _serve_aqua_with_handoff_retry(*args, stop_event, log, ready_callback, retry_seconds: float = 8.0, **kwargs) -> None:
     """Retry only EADDRINUSE while LoginWindow releases the shared Desktop port."""
     deadline = time.monotonic() + max(0.0, float(retry_seconds))
@@ -125,14 +159,20 @@ def _prelogin_server_cli() -> int:
     stop_event = threading.Event()
 
     def watch_loginwindow_handoff() -> None:
+        next_gui_probe_at = 0.0
         while not stop_event.wait(0.25):
-            console_user = _console_session_user()
-            if not console_user or console_user in {'root', 'loginwindow', '_mbsetupuser'}:
+            now = time.monotonic()
+            probe_gui = now >= next_gui_probe_at
+            if probe_gui:
+                next_gui_probe_at = now + 0.75
+            aqua_user, source = _detect_aqua_session_user(user, probe_gui_domain=probe_gui)
+            if not aqua_user:
                 continue
-            lease = request_prelogin_handoff(console_user, log=log)
+            log(f'[prelogin/handoff] Aqua session detected user={aqua_user} source={source}')
+            lease = request_prelogin_handoff(aqua_user, log=log)
             if lease is not None:
                 lease.handoff_sent_event.wait(timeout=0.75)
-            log(f'[prelogin/handoff] stopping LoginWindow listener for Aqua user={console_user}')
+            log(f'[prelogin/handoff] stopping LoginWindow listener for Aqua user={aqua_user}')
             stop_event.set()
             return
 
@@ -505,11 +545,10 @@ class ServerGUI:
         if state == 'VERIFIED':
             return 'Pre-login after reboot: VERIFIED for this Mac/build; the proof applies to all paired Zorin clients.'
         if state == 'NOT_READY':
-            if not admin.get('prelogin_release_identity_ready'):
+            if not admin.get('virtual_hid_input_ready'):
                 return (
-                    'Pre-login after reboot: NOT READY — this installed build is Aqua-only. '
-                    'Remote login after reboot requires a Developer ID provisioned build with Apple-managed '
-                    'Persistent Content Capture + CoreHID Virtual Device capabilities. Normal Aqua use is unaffected.'
+                    'Pre-login after reboot: NOT READY — virtual HID keyboard/mouse is not active. '
+                    'Use Enable / Repair once to install/activate the bundled virtual HID driver.'
                 )
             return 'Pre-login after reboot: NOT READY — the LoginWindow agent needs Enable / Repair. Normal Aqua use is unaffected.'
         if state == 'UNKNOWN':
@@ -519,7 +558,7 @@ class ServerGUI:
         overall = str(admin.get('prelogin_probe_overall') or 'never')
         if overall not in {'never', 'PASS'}:
             return f'Pre-login after reboot: UNVERIFIED — last capability probe result: {overall}. Normal Aqua use is unaffected.'
-        return 'Pre-login after reboot: UNVERIFIED — the required physical LoginWindow capture + CoreHID proof has not been run for this build.'
+        return 'Pre-login after reboot: UNVERIFIED — LoginWindow capture has not been physically verified for this build.'
 
     def _update_required_setup(self) -> None:
         if not (self._permissions_checked and self._admin_checked):
@@ -665,8 +704,8 @@ class ServerGUI:
                     probe_text = 'UNVERIFIED/stale'
                 else:
                     probe_text = 'UNVERIFIED/' + str(state.get('prelogin_probe_overall') or 'never')
-                managed = 'ready' if state.get('prelogin_release_identity_ready') else 'blocked'
-                text += f' · Pre-login after reboot: managed-capabilities={managed}, agent={agent}, proof={probe_text} · Signing: {signing}'
+                vhid = 'ready' if state.get('virtual_hid_input_ready') else 'not-ready'
+                text += f' · Pre-login after reboot: virtual-hid={vhid}, agent={agent}, proof={probe_text} · Signing: {signing}'
             self.admin_status_var.set(text)
             self._update_required_setup()
 
@@ -1218,6 +1257,29 @@ def main() -> None:
         except Exception as exc:
             print(f'RELEASE SIGNING FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)
             raise SystemExit(1)
+    if '--self-test-virtual-hid' in sys.argv:
+        try:
+            from zmb_macos_virtual_hid import DriverKitVirtualHIDClient
+            client = DriverKitVirtualHIDClient()
+            rc = client.open(wait_seconds=2.5)
+            if rc != 0:
+                raise RuntimeError(f'virtual HID backend not ready: rc={rc}; {client.last_error}')
+            try:
+                client.release_all()
+                status = client.status()
+                print(
+                    'SELFTEST OK: DriverKit virtual HID ready: '
+                    f'keyboard={status["keyboard_ready"]} pointing={status["pointing_ready"]} '
+                    f'protocol={status["protocol_version"]}'
+                )
+            finally:
+                client.close()
+            raise SystemExit(0)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            print(f'SELFTEST FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)
+            raise SystemExit(1)
     if '--self-test-permission-apis' in sys.argv:
         try:
             names = permission_api_self_test()
@@ -1237,7 +1299,11 @@ def main() -> None:
     if '--self-test-streamer-load' in sys.argv:
         try:
             native = NativeStreamerLibrary()
-            print(f'SELFTEST OK: in-process streamer library loaded from {native.path}')
+            native_version = native.build_version()
+            expected_version = current_version()
+            if native_version != expected_version:
+                raise RuntimeError(f'native streamer version mismatch: app={expected_version} dylib={native_version}')
+            print(f'SELFTEST OK: in-process streamer library loaded from {native.path}; version={native_version}')
             raise SystemExit(0)
         except Exception as exc:
             print(f'SELFTEST FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)

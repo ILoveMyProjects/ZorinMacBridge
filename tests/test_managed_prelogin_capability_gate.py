@@ -14,24 +14,25 @@ ROOT = Path(__file__).resolve().parents[1]
 def _state(**changes):
     value = {
         'installed': True,
-        'prelogin_release_identity_ready': True,
+        'virtual_hid_input_ready': True,
         'prelogin_agent_exists': True,
         'prelogin_agent_contract_ready': True,
+        'prelogin_capture_proof_ready': True,
         'prelogin_probe_ready': True,
     }
     value.update(changes)
     return value
 
 
-# Reboot-to-LoginWindow readiness now has three independent gates: verified
-# managed signing, the LoginWindow agent, and a current physical capability proof.
+# Reboot-to-LoginWindow readiness now has three independent gates: virtual HID input,
+# the LoginWindow agent, and a current physical capture proof.
 req = {item.key: item for item in evaluate_prelogin_requirements(_state())}
-assert req['prelogin_release_identity'].ready is True
+assert req['prelogin_virtual_hid'].ready is True
 assert req['prelogin_agent'].ready is True
-assert req['prelogin_capability_proof'].ready is True
+assert req['prelogin_capture_proof'].ready is True
 assert prelogin_readiness_state(_state()) == 'VERIFIED'
-assert prelogin_readiness_state(_state(prelogin_release_identity_ready=False)) == 'NOT_READY'
-assert prelogin_readiness_state(_state(prelogin_probe_ready=False)) == 'UNVERIFIED'
+assert prelogin_readiness_state(_state(virtual_hid_input_ready=False)) == 'NOT_READY'
+assert prelogin_readiness_state(_state(prelogin_capture_proof_ready=False)) == 'UNVERIFIED'
 
 # A Developer ID/pre-login-capable installation must never be silently replaced
 # by a free/ad-hoc update, because that would remove the managed entitlements.
@@ -69,7 +70,8 @@ source_gate = (ROOT / 'scripts/verify-release-source.sh').read_text(encoding='ut
 assert 'EXISTING_PRELOGIN_CAPABLE=0' in installer
 assert 'Refusing to replace a pre-login-capable Developer ID installation with a free/ad-hoc build.' in installer
 assert '--verify-release-app "$APP_PATH"' in admin
-assert 'PRELOGIN_MANAGED_CAPABILITIES=ready' in admin_install
-assert 'pre-login READY requires Apple-managed Developer ID/provisioning' in source_gate
+assert 'PRELOGIN_VIRTUAL_HID=%s' in admin_install
+assert 'install-virtual-hid.sh' in admin_install
+assert 'pre-login READY requires driver-backed virtual HID input plus current capture proof' in source_gate
 
 print('managed pre-login capability gate regression checks passed')

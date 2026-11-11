@@ -1,124 +1,4 @@
-## 0.15.34 macOS 26 IOHIDUserDevice SDK build fix
-
-0.15.34 is a compile-only compatibility hotfix for the 0.15.33 reboot LoginWindow matrix. Xcode 26.6 no longer exposes `IOKit/hid/IOHIDUserDevice.h` in the public macOS SDK, so ZorinMacBridge no longer includes that header. The optional IOHIDUserDevice row is resolved from IOKit at runtime; missing symbols become `FAIL_OPEN` for that row rather than preventing the entire native streamer from building. ScreenCaptureKit/VideoToolbox capture, sleep/wake recovery, TLS, and the other input candidates are unchanged.
-
-## 0.15.33 reboot LoginWindow evidence matrix
-
-0.15.33 keeps the working ScreenCaptureKit/VideoToolbox LoginWindow capture and sleep/wake recovery unchanged. After a reboot, the pre-login control path now tests **CoreHID HIDVirtualDevice**, **IOHIDUserDevice**, **IOHIDSystem/IOHIDPostEvent**, and **kCGSessionEventTap** independently. A backend is not trusted because `open()` or a send call returned success: ZorinMacBridge requires an observed Shift transition in the combined LoginWindow session and checks pointer move+restore before selecting it. The complete matrix is sent to the Zorin client log as `Pre-login input check: ...`. If no backend proves delivery, control/video remain connected so the failure is diagnosable instead of collapsing into an ownerless reconnect loop.
-
-The reboot acceptance sequence is documented in `docs/acceptance/0.15.33_REBOOT_LOGIN_MATRIX.md`. No re-pairing, reconfiguration, VNC, Screen Sharing, or third-party remote desktop is introduced.
-
-## 0.15.32 IOHIDUserDevice LoginWindow fallback
-
-0.15.32 fixes the remaining design flaw in the 0.15.30 fallback. A successful `CGEventPost(kCGSessionEventTap)` call does not prove that LoginWindow accepted the event, so Quartz is no longer the first fallback after CoreHID failure. The production pre-login input order is now CoreHID `HIDVirtualDevice` -> IOKit `IOHIDUserDevice` virtual keyboard/pointer -> IOHIDSystem -> Quartz as last-resort diagnostics. IOHIDUserDevice sends USB HID reports through the kernel HID stack and keeps the existing ZMB control/video session and LoginWindow-to-Aqua handoff unchanged.
-
-## 0.15.30 LoginWindow native input fallback
-
-0.15.30 fixes the real post-reboot loop observed on the Mac where Desktop authentication reached `macOS login window`, CoreHID device creation returned `rc=-11`, the control owner was closed, and pre-login video was then rejected because no active Desktop owner remained. CoreHID stays primary. When it cannot be created, the production server now falls back automatically to the bundled IOHIDSystem bridge and then `kCGSessionEventTap`; CoreHID failure alone no longer tears down control/video.
-
-## 0.15.29 capability-probe native link fix
-
-0.15.29 fixes the macOS 26/Xcode 26 native capability-probe build by removing duplicate `@_silgen_name` declarations for the shared production CoreHID symbols. The probe and production CoreHID implementation are compiled into one Swift module, so the probe now calls those functions directly. Runtime architecture is unchanged.
-
-## 0.15.28 macOS 26 native build hotfix
-
-0.15.28 keeps the 0.15.27 production managed-prelogin architecture and only hardens CoreHID source compatibility for the Xcode 26 macOS CI toolchain plus newer SDK imports.
-
-## 0.15.27 production managed pre-login runtime
-
-The actual LoginWindow runtime now uses the same Apple-managed mechanisms that the physical capability probe verifies. Pre-login video uses bounded ScreenCaptureKit `SCStream` with Persistent Content Capture; pre-login keyboard and pointer use CoreHID `HIDVirtualDevice`. The old `/usr/sbin/screencapture` workaround and production IOHIDSystem/Quartz injection are removed. The probe now requires a real SCStream first frame plus CoreHID keyboard and pointer proof for the exact installed build. The existing TLS protocol, pairing, VideoToolbox/H.264 transport, single-owner pre-login session and automatic LoginWindow → Aqua handoff remain unchanged. No VNC, Screen Sharing, port 5900, or third-party remote desktop backend is used.
-
-## 0.15.26 resilient macOS release
-
-Tagged releases no longer fail only because managed Apple signing is unavailable or misconfigured. The macOS job first attempts the Developer ID/provisioning path with the managed pre-login capabilities. If that validation succeeds, the normal DMG is pre-login-capability signed; otherwise the same release continues with the working Aqua/ad-hoc path. The published `ZorinMacBridge-Server_macOS-arm64-signing.txt` identifies which signing tier was produced. LoginWindow READY still requires the managed identity plus a current physical capture/CoreHID capability proof. No VNC, Screen Sharing, port 5900, or third-party backend is introduced.
-
-## 0.15.25 managed-only macOS release gate
-
-Official tagged macOS releases now require the Developer ID/provisioning path with both Apple-managed pre-login capabilities. GitHub Actions fails instead of publishing an Aqua-only/ad-hoc DMG when the required signing secrets are absent. The installer also reads interactive terminal setup from `/dev/tty`, so `curl ... | bash` no longer loses its prompts to the script pipe. No VNC, Screen Sharing or port 5900 is introduced.
-
-## 0.15.23 LoginWindow direct capture fix
-
-0.15.23 keeps the 0.15.22 reboot/wake recovery and fixes the remaining LoginWindow first-frame hang. The pre-login process no longer waits for `SCShareableContent` or `SCStream.startCapture()` before trying the system capture path. It reads the main display geometry through CoreGraphics, starts the existing VideoToolbox H.264 encoder, and immediately uses bounded `/usr/sbin/screencapture -m` capture inside the LoginWindow launchd/Mach bootstrap session. Normal logged-in Aqua desktop capture remains on continuous ScreenCaptureKit `SCStream`. Capture backend, pipeline and failure states continue to reach the client. No VNC, Screen Sharing or port 5900 is introduced.
-
-## 0.15.21 LoginWindow first-frame recovery
-
-On macOS 26+ LoginWindow video now starts with continuous ScreenCaptureKit `SCStream`. If SCStream starts but does not submit an initial frame for encoding within two seconds, ZorinMacBridge switches to the `SCScreenshotManager` one-shot fallback. The Zorin client logs which backend is active and continues to report the Stage D first-frame pipeline (`capture-frame` → `pixel-buffer` → `encode-submit` → `h264-written` → decoded frame). CGDisplayStream remains unsupported and is not used.
-
-## 0.15.20 Aqua readiness / pre-login verification split
-
-0.15.20 separates normal host readiness from reboot-to-LoginWindow verification. A logged-in Aqua host can report **READY** when Desktop, Files, System, Terminal and Projects prerequisites are satisfied even if the optional LoginWindow capability probe has not been run for the current build. Pre-login is reported separately as **VERIFIED**, **UNVERIFIED** or **NOT READY**. One capability proof belongs to the Mac/app build and applies to all paired Zorin clients; it is not repeated per client.
-
-## 0.15.18 macOS 26 native build fix
-
-0.15.18 fixes the macOS 26/Xcode 26.6 native CI blockers found after 0.15.17: a Swift 6.3 exclusive-access violation in the capability probe and a stale CGDisplayStream regression test that must not remain tracked. The supported platform remains Apple Silicon (M1+) on macOS 26.0 or later. GitHub Actions remains responsible for building the installable Linux `.deb` and macOS `.dmg`.
-
-## 0.15.17 Apple Silicon / macOS 26+ target
-
-The supported Mac platform is deliberately narrow: **Apple Silicon arm64 (M1 or newer) running macOS 26.0 Tahoe or later**. Intel Macs and macOS 25 or older are unsupported. Native C/Swift artifacts are compiled with deployment target 26.0 and the release app declares `LSMinimumSystemVersion=26.0`. Native CI and tagged macOS packaging run on the Apple-Silicon `macos-26` runner.
-
-LoginWindow capture uses `SCScreenshotManager.captureSampleBuffer()` and the existing VideoToolbox H.264 pipeline. Aqua capture remains on continuous `SCStream`. Stage-B capability probing requires CoreHID on this target and still compares it with the legacy IOHID/Quartz path for diagnostics.
-
-## 0.15.16 Apple Silicon / macOS 15+ target
-
-The supported Mac platform is now deliberately narrow: **Apple Silicon arm64 (M1 or newer) running macOS 15.0 Sequoia or later**. Intel Macs and macOS 14 or older are unsupported. Native C/Swift artifacts are compiled with deployment target 15.0 and the release app declares `LSMinimumSystemVersion=15.0`. CI compiles on the M1 `macos-15` runner as the oldest supported environment and also on `macos-26` for current-SDK compatibility; Xcode 27 is not a required product target.
-
-LoginWindow capture uses `SCScreenshotManager.captureSampleBuffer()` and the existing VideoToolbox H.264 pipeline. Aqua capture remains on continuous `SCStream`. Stage-B CoreHID probing no longer raises the application minimum OS: on the macOS 15 SDK the probe uses ScreenCaptureKit plus the legacy IOHID/Quartz input path; newer SDKs may compile CoreHID only as an optional runtime-gated diagnostic.
-
-## 0.15.8 CGDisplayStream Swift/Xcode fix
-
-0.15.8 targets the real post-reboot LoginWindow failure chain. The server no longer keeps global video ownership during slow native cleanup after capture has already been stopped; this removes the repeated `previous video session did not stop within 4s` reconnect loop seen on real hardware.
-
-For LoginWindow video, the primary capture backend is now `CGDisplayStreamCreateWithDispatchQueue` on the physical display. Frames arrive as IOSurfaces, are wrapped as `CVPixelBuffer`s, and go through the existing VideoToolbox H.264 encoder. `SCScreenshotManager.captureSampleBuffer()` remains a fallback when the display stream cannot be started. The normal logged-in Aqua desktop continues to use `SCStream`.
-
-The first H.264 access unit is still required within six seconds. If neither pre-login capture backend produces a frame, the server returns native diagnostics instead of leaving the client indefinitely on `Waiting for first frame`.
-
-The LoginWindow input path remains IOHIDSystem-first. macOS can still deny synthetic keyboard/click events at SecureEventInput on some builds even when video works; 0.15.8 does not claim to bypass that OS security boundary. Accessibility remains REQUIRED and rejected input is logged per event without tearing down the control session.
-
 # ZorinMacBridge
-
-## 0.15.5 pre-login capture + activation fix
-
-0.15.5 combines the 0.15.4 LoginWindow screenshot-capture path with the missing pre-login update activation step. After `update-now` at LoginWindow, the old pre-login PID must exit and a new process from the updated `/Applications` bundle must reopen the Desktop port before the update can report success. The screenshot-capture fix from 0.15.4 remains unchanged. After a successful Mac update, the System page also triggers a fresh Bonjour scan so the UI reflects the newly running version instead of retaining a stale pre-update label.
-
-For the macOS LoginWindow session on supported macOS 26+, pre-login video now uses `SCScreenshotManager.captureSampleBuffer()` and feeds those samples into the existing VideoToolbox H.264 encoder. The normal logged-in Aqua desktop keeps the existing continuous `SCStream` path. LoginWindow also performs the same Screen Recording preflight instead of silently entering a zero-frame capture when TCC is unavailable.
-
-The 0.15.2 input hardening remains: remote input waits for the first decoded pre-login frame, individual rejected input events do not kill the Desktop session, and the IOHID-to-Quartz fallback is retained.
-
-**0.15.3 is withdrawn and should not be released.** It was based on the incorrect conclusion that 0.15.2 had not become active after the update.
-
-## 0.15.0 pre-login connect fix
-
-When Bonjour/P0 reports **system online** but the normal Aqua Desktop is absent, the client now treats the Mac as awake and recovers the LoginWindow endpoint through the paired P0 channel. It no longer sends Wake-on-LAN merely because the Desktop role is missing. The macOS helper also removes the invalid `gui/0` assumption and can load the pre-login LaunchAgent into an already-existing LoginWindow session after an in-place update.
-
-
-## v0.14.18 reboot/login-window recovery + stable video reconfiguration
-
-After a normal macOS reboot, ZorinMacBridge now installs a dedicated `LoginWindow` LaunchAgent that starts the same authenticated ZMB Desktop endpoint before the target user has an Aqua session. It reuses the existing TLS identity and password verifier, shows the physical macOS login window, and uses a native IOHIDSystem path for pre-login keyboard/mouse. After successful login, launchd tears down the LoginWindow context and the normal Aqua ZMB server takes over; the Linux client reconnects and restores the selected desktop mode. Files and 2K/4K virtual-display mode remain disabled while still at loginwindow.
-
-0.14.18 also hardens FPS/Quality/Resolution changes: rapid UI changes are coalesced into one video restart, the old native streamer is cleaned up before a replacement owns ScreenCaptureKit, and the Mac notices a closed replacement socket immediately instead of leaving the old capture alive until its pipe timeout.
-
-**Important real-device boundary:** the LoginWindow LaunchAgent and native IOHID code are compiled/tested by the macOS release workflow, but actual login-window capture and password typing must still be accepted on the target M1/macOS build. FileVault preboot is not a macOS loginwindow session and is not covered.
-## v0.14.17 fullscreen during video retry
-
-A transient H.264/ScreenCaptureKit failure no longer disables the **Full Screen** control while the authenticated Desktop/control session remains connected. The client reports `Connected — video retrying: ...`, keeps keyboard/mouse available, and retries video independently.
-
-
-## v0.14.10 repository layout cleanup
-
-0.14.10 is a source-layout cleanup only; runtime behavior is unchanged from 0.14.9. Regression tests now live in `tests/`, acceptance checklists in `docs/acceptance/`, developer notes in `docs/development/`, and CI/release use the single `scripts/run-tests.sh` entry point.
-
-## v0.14.9 default input + explicit fullscreen controls
-
-0.14.9 enables keyboard and mouse forwarding by default as soon as the Desktop session connects. The remote image no longer uses double-click as a local full-screen gesture: every click, including double-click, is forwarded to the Mac. Full-screen is entered only with the explicit **Full Screen** button and exited with **Exit Full Screen**, **Esc**, or **Alt+Esc**. The existing **Capture keyboard & mouse** switch remains available as an explicit view-only override.
-
-## v0.14.8 keyboard reconnect + fullscreen escape regression fix
-
-0.14.8 fixes the keyboard regression introduced in 0.14.6 where ordinary input could tear down the control channel on real macOS. Printable ASCII is sent through the established physical KEY path, Unicode TEXT is fallback-only, and one input-injection error no longer disconnects the session. It also fixes fullscreen recovery: reconnect no longer clears the fullscreen state, **Exit Full Screen** is idempotent, and both **Esc** and **Alt+Esc** are captured locally before remote input forwarding.
-
-## v0.14.7 updater / shutdown reliability
-
-Transient GitHub/CDN gateway responses no longer abort an update on the first failure: update assets retry up to four times with bounded backoff and partial files are discarded before retry. Closing the GTK client is also non-blocking: the window quits immediately while tray/process cleanup is signalled outside the GTK main thread. Update/discovery workers cannot close the application. Persistent lifecycle/crash diagnostics are written to `~/.local/state/zorinmacbridge/client.log` so an unexpected window/process exit leaves evidence outside the GUI.
-
 
 <p align="center">
   <img src="assets/client.png" width="190" alt="ZorinMacBridge Client icon">
@@ -134,9 +14,13 @@ The remote session does **not** require a vendor cloud, relay, account, telemetr
 
 > **Status:** experimental. This project is still under active development and has not received an independent security audit.
 
+> **User-requested note:** `jestes jbaa scedrksa kurwa jbanadizdkeo`
+
+> **Release history:** version-by-version changes live only in [`CHANGELOG.md`](CHANGELOG.md). README documents the current project state, setup and usage.
+
 ## Native Zorin/GNOME client UI
 
-v0.5 moves the Linux client to **GTK4 + libadwaita**. On Zorin OS / Ubuntu, controls, spacing, dialogs, switches and file browsing now use the desktop's native GTK/libadwaita theme instead of the old raw Tkinter interface.
+The Linux client uses **GTK4 + libadwaita**. On Zorin OS / Ubuntu, controls, spacing, dialogs, switches and file browsing now use the desktop's native GTK/libadwaita theme instead of the old raw Tkinter interface.
 
 The `.deb` declares the required Ubuntu/Zorin runtime packages, so the one-command installer still handles everything through `apt`. The client uses system symbolic icons and native file dialogs.
 
@@ -191,15 +75,15 @@ curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/mast
 
 The macOS server supports **Apple Silicon (arm64) only**. The installer verifies the Mac architecture, downloads the arm64 `.dmg`, verifies SHA-256, and installs **ZorinMacBridge Server** into `/Applications`. Intel Macs are not supported.
 
-Starting with **0.15.19**, normal logged-in Aqua operation still has a certificate-free path: GitHub Actions can use ad-hoc transport signing and installation/update applies one stable per-Mac local ad-hoc designated requirement. Starting with **0.15.24**, reboot-to-LoginWindow remote login is a separate stricter capability tier: it can become READY only on a Developer ID provisioned build carrying the Apple-managed Persistent Content Capture and CoreHID Virtual Device entitlements, followed by a physical LoginWindow capability proof for that exact build.
+Normal logged-in Aqua operation keeps the stable per-Mac local application identity used by existing installs. Reboot-to-LoginWindow input is handled independently by a bundled, signed driver-backed virtual HID keyboard and pointing device installed during **Enable / Repair**.
 
-Starting with **0.15.27**, managed ScreenCaptureKit `SCStream` and CoreHID `HIDVirtualDevice` became the primary production LoginWindow mechanisms. **0.15.30** keeps CoreHID primary but adds the bundled IOHIDSystem → `kCGSessionEventTap` production fallback so a CoreHID-open failure does not destroy the control/video owner. The managed CoreHID probe remains the strongest VERIFIED readiness path; the fallback is validated separately on real hardware.
+For LoginWindow, ScreenCaptureKit/VideoToolbox remains the video path. Keyboard and mouse events still arrive over the existing authenticated ZMB control connection, but the Mac now terminates them as real virtual HID reports through the root-only virtual-HID service. The DriverKit backend is selected before the older CoreHID/IOHIDSystem/IOHIDUserDevice/Quartz fallbacks. The first setup submits the driver-extension activation request; if macOS asks for one-time Driver Extensions approval, approve it and reboot once. Physical readiness is verified separately on real hardware.
 
 ## Remote desktop architecture
 
 The old prototype captured individual JPEG screenshots and sent them on the same connection used for mouse and keyboard input. That design could eventually fill the TLS socket buffer and block/disconnect the whole remote session.
 
-v0.4 changes the architecture:
+The current architecture is:
 
 ```text
 Linux client                         macOS server
@@ -209,7 +93,7 @@ video TLS socket     ◄────────────── H.264 stream
 file TLS sockets     ◄─────────────► files / folders
 ```
 
-Starting with **0.15.12 Stage D**, LoginWindow is treated as one explicit remote session rather than three unrelated authenticated sockets. Desktop authentication owns the pre-login input session and returns an in-memory `session_token`; the video connection must present that token and cannot outlive a replaced Desktop owner. The server reports native pipeline progress (`capture-frame -> pixel-buffer -> encode-submit -> h264-written`), while the Linux client confirms the final `client-decoded` step with `First H.264 frame decoded`. When macOS changes `/dev/console` from LoginWindow to the logged-in user, the server announces an explicit Aqua handoff, releases the pre-login listener, and the client performs a fast reconnect to the normal user-session server.
+LoginWindow is treated as one explicit remote session rather than three unrelated authenticated sockets. Desktop authentication owns the pre-login input session and returns an in-memory `session_token`; the video connection must present that token and cannot outlive a replaced Desktop owner. The server reports native pipeline progress (`capture-frame -> pixel-buffer -> encode-submit -> h264-written`), while the Linux client confirms the final `client-decoded` step with `First H.264 frame decoded`. When macOS changes `/dev/console` from LoginWindow to the logged-in user, the server announces an explicit Aqua handoff, releases the pre-login listener, and the client performs a fast reconnect to the normal user-session server.
 
 The video path uses:
 
@@ -236,7 +120,7 @@ Quality does **not** change resolution or frame rate. The fixed bitrate presets 
 
 1. Install **ZorinMacBridge Server**.
 2. Open it locally once.
-3. In the macOS server window, use **Request Screen Recording Access** if the status says *Not granted*, then approve **ZorinMacBridge Server** in macOS. v0.4.3+ keeps capture inside that same app process.
+3. In the macOS server window, use **Request Screen Recording Access** if the status says *Not granted*, then approve **ZorinMacBridge Server** in macOS. capture stays inside that same app process.
 4. Use **Request Mouse/Keyboard Access** if input control is not granted. The app requests permission for synthetic Core Graphics events and opens the relevant macOS privacy pane when needed.
 5. Enter a session password of at least 12 characters.
 6. Keep **Remember password verifier on this Mac** enabled.
@@ -273,13 +157,13 @@ ZorinMacBridge uses two different credentials:
 `install-macos.sh` now performs unattended setup by default: it enables Remote Login (SSH), installs/repairs P0, verifies that SSH was enabled, and prompts for the ZorinMacBridge session password. Use `./install-macos.sh --app-only` only when you intentionally want to install the app without P0/SSH setup.
 
 
-### Desktop trust is part of System pairing (v0.14.4)
+### Desktop trust is part of System pairing
 
 On the Zorin GTK client, Desktop no longer has a second user-managed SHA trust workflow. Pair the Mac once in **System**. The client persists the Desktop TLS fingerprint learned through that verified SSH channel and uses it automatically for Desktop connections. The Desktop trust field is read-only diagnostics.
 
 For Macs still running an older P0 helper, the Zorin client can recover the existing Desktop certificate fingerprint through the already-pinned SSH profile, so migration does not require walking back to the Mac to copy another SHA. Once a Desktop TLS identity is pinned, a different certificate is treated as an identity change and is blocked rather than silently replacing saved trust.
 
-### Remembered SSH identity and migration hotfix (v0.14.3)
+### Remembered SSH identity and migration
 
 After the first verified System pairing, ZorinMacBridge reuses the pinned SSH host key from its private `known_hosts` file. Reconfiguration automatically compares the live Mac key with the remembered key; normal reboot, logout, DHCP changes and updates do **not** require another trip to the Mac. A genuinely changed SSH host key is treated as a security event and requires explicit re-verification.
 
@@ -287,11 +171,11 @@ When pairing against an older P0 helper that does not yet report the Desktop TLS
 
 The macOS root updater also canonicalizes its `/var/tmp` staging directory before containment checks, avoiding the macOS `/var` → `/private/var` alias false-positive.
 
-### One pairing, shared trust (v0.14.2)
+### One pairing, shared trust
 
 A successful **System → Pair this Mac** now becomes the single trust ceremony for the selected Mac. The user still verifies the macOS SSH host fingerprint once. After that verification, P0 returns the desktop TLS SHA-256 fingerprint through the already-pinned SSH channel, and the Zorin client stores it as the Desktop certificate pin automatically. Bonjour/mDNS is **not** used as a source of trust. Terminal / Project Actions, Xcode and Files refresh their state immediately after pairing, so they no longer remain stuck on stale "not paired" UI until the machine is reselected. Files still requires an active authenticated Desktop session because file transfer is carried on that channel.
 
-Starting with **v0.14.0**, the Mac app treats normal Aqua prerequisites as an explicit setup contract rather than optional-looking status. The **Required setup for normal Aqua operation** panel turns red and lists missing items such as Screen Recording, Accessibility, the saved ZMB session password, P0/recovery services, Remote Login/SSH readiness and host fingerprint, launch-at-login, and automatic desktop-server start. **0.15.20 corrects Stage F:** the LoginWindow LaunchAgent and capability proof no longer block normal READY. Reboot-to-LoginWindow readiness is shown separately as VERIFIED / UNVERIFIED / NOT READY. The proof is still bound to app version + CDHash, but it is Mac/build-scoped rather than client-scoped, so one successful probe from any paired Zorin client applies to all paired clients for that build.
+The Mac app treats normal Aqua prerequisites as an explicit setup contract rather than optional-looking status. The **Required setup for normal Aqua operation** panel turns red and lists missing items such as Screen Recording, Accessibility, the saved ZMB session password, P0/recovery services, Remote Login/SSH readiness and host fingerprint, launch-at-login, and automatic desktop-server start. The LoginWindow LaunchAgent and physical capture proof do not block normal Aqua READY. Reboot-to-LoginWindow readiness is shown separately as VERIFIED / UNVERIFIED / NOT READY and now requires the virtual HID keyboard/mouse path plus a current LoginWindow capture proof for the installed build.
 
 ## LAN discovery and changing DHCP addresses
 
@@ -321,10 +205,10 @@ The system layer does not bypass macOS login, FileVault, Screen Recording, or Ac
 
 ### Remote Login and Full Disk Access on current macOS
 
-macOS may refuse `systemsetup -setremotelogin on` unless the invoking process has Full Disk Access. The P0 files can still be installed safely, but v0.14.0 no longer presents that state as effectively finished: command-line setup reports `SETUP_COMPLETE=0`, and the Mac UI shows **REQUIRED: Remote Login (SSH)** in red until **System Settings → General → Sharing → Remote Login** is turned on. Pairing, System, Terminal, and Project actions are not considered ready while this requirement is missing. Rerunning P0 is not required after enabling the switch; **Enable / Repair** can also repair missing SSH host keys.
+macOS may refuse `systemsetup -setremotelogin on` unless the invoking process has Full Disk Access. The P0 files can still be installed safely, and ZorinMacBridge does not present that state as finished: command-line setup reports `SETUP_COMPLETE=0`, and the Mac UI shows **REQUIRED: Remote Login (SSH)** in red until **System Settings → General → Sharing → Remote Login** is turned on. Pairing, System, Terminal, and Project actions are not considered ready while this requirement is missing. Rerunning P0 is not required after enabling the switch; **Enable / Repair** can also repair missing SSH host keys.
 
 
-## Xcode and Simulator control (v0.9.0)
+## Xcode and Simulator control
 
 After P0 pairing, the Zorin client includes an **Xcode** tab. It reads the active Xcode developer directory and Xcode version, lists available Simulator devices, can boot/shut down a selected Simulator, and can open Xcode or Simulator in the logged-in macOS GUI session. These commands use Apple's `xcodebuild`/`xcrun simctl` toolchain and the same restricted SSH administration key; the key still cannot execute an arbitrary shell command.
 
@@ -333,7 +217,7 @@ The **System** tab also exposes a P1 machine state (`DESKTOP READY`, `SYSTEM ONL
 For real-Mac validation before tagging the release, follow [`docs/acceptance/P1_P2_ACCEPTANCE.md`](docs/acceptance/P1_P2_ACCEPTANCE.md).
 
 
-## Terminal and Project Actions (v0.10.0)
+## Terminal and Project Actions
 
 P3 adds two normal pages to the Zorin client: **Terminal** and **Projects**. They use a separate pinned Ed25519 key for the paired macOS user; they do not reuse or weaken the restricted P0 admin key. Re-open **System → Pair / Configure** once after upgrading and keep **Enable Terminal / Project Actions** checked to install that user-level key. The macOS account password is used only for that one pairing login and is not saved.
 
@@ -341,9 +225,9 @@ The **Terminal** page uses GTK4 VTE for a real PTY-backed SSH session. The **Pro
 
 Because projects are bound to the persistent `server_id`, a DHCP address change only updates the transport address; it does not create a new project identity.
 
-See [`docs/acceptance/P3_ACCEPTANCE.md`](docs/acceptance/P3_ACCEPTANCE.md) before publishing the first 0.10.0 release.
+See [`docs/acceptance/P3_ACCEPTANCE.md`](docs/acceptance/P3_ACCEPTANCE.md) for acceptance checks.
 
-## Project Sync (v0.11.0)
+## Project Sync
 
 P4 extends each saved **Projects** profile with an absolute **Local Zorin project directory**, the existing remote macOS project directory, and optional extra exclude patterns. **Preview sync** performs dry-run comparisons in both directions and classifies changes as outgoing, protected Mac-side changes, or remote-only files. **Sync Zorin → Mac** is deliberately one-way: it never uses `--delete`, uses rsync `--update`, and exact-excludes every path identified as a protected conflict before the real transfer starts.
 
@@ -351,9 +235,9 @@ The default excludes are `.git/`, `DerivedData/`, `.build/`, `build/`, `xcuserda
 
 The first P4 release intentionally does **not** implement blind bidirectional sync or remote deletion. A newer/different Mac-side file is treated as something to protect, not something to overwrite automatically.
 
-See [`docs/acceptance/P4_ACCEPTANCE.md`](docs/acceptance/P4_ACCEPTANCE.md) before publishing the first 0.11.0 release.
+See [`docs/acceptance/P4_ACCEPTANCE.md`](docs/acceptance/P4_ACCEPTANCE.md) for acceptance checks.
 
-## Remote desktop performance (v0.12.0)
+## Remote desktop performance
 
 P5 adds an **Adaptive** video mode intended for running Xcode and Simulator on the Mac without wasting CPU/GPU/network bandwidth on pixels the Zorin window cannot present. Adaptive starts from the current desktop viewport, monitors client latest-frame drops in five-second windows, drops to a cheaper tier quickly when the client falls behind, and only raises quality after sustained stability. Manual Low/Balanced/High/Ultra profiles remain available.
 
@@ -361,19 +245,19 @@ Changing video quality no longer tears down the authenticated desktop/control se
 
 Both ends are deliberately latency-biased: the Linux frame queue stores only the newest frame; GTK avoids texture work while unmapped; the native ScreenCaptureKit queue depth is two; VideoToolbox is configured for real-time one-frame delay; and the Swift pipe writer never accumulates more than one pending encoded access unit. If the consumer slows down, stale video is discarded instead of being delivered late.
 
-See [`docs/acceptance/P5_ACCEPTANCE.md`](docs/acceptance/P5_ACCEPTANCE.md) before publishing the first 0.12.0 release.
+See [`docs/acceptance/P5_ACCEPTANCE.md`](docs/acceptance/P5_ACCEPTANCE.md) for acceptance checks.
 
-## Layered recovery (v0.13.0)
+## Layered recovery
 
 P6 turns recovery into an explicit diagnostic workflow. **System → Run diagnostics** reports which layer failed (P0 daemon/heartbeat, system Bonjour, SSH transport, application/signature/verified backup, desktop LaunchAgent/process/port, updater lock or update scheduler) and marks each issue as automatic or manual. The Zorin client also classifies failures that happen before the Mac helper can answer, including a pinned SSH host-key change, connection refusal, network unreachable and timeout. A changed host key is never accepted automatically.
 
 **Recover all safe layers** is deliberately bounded: it can reload valid launchd jobs, regenerate the user LaunchAgent, clear only a stale updater lock, restore only a verified update backup, and restart/verify the desktop service. It does not alter FileVault or user accounts, does not force-enable SSH, and refuses to launch an unverified application when no verified backup exists. Autoheal records a bounded recovery event log and waits for three consecutive desktop-port failures before restarting a still-running process.
 
-See [`docs/acceptance/P6_ACCEPTANCE.md`](docs/acceptance/P6_ACCEPTANCE.md) before publishing the first 0.13.0 release.
+See [`docs/acceptance/P6_ACCEPTANCE.md`](docs/acceptance/P6_ACCEPTANCE.md) for acceptance checks.
 
 ## Stable macOS permissions
 
-macOS controls Screen Recording and mouse/keyboard control through its privacy/TCC system. ZorinMacBridge cannot silently grant itself those permissions. In v0.5.2+, the server window has explicit **Request Screen Recording Access** and **Request Mouse/Keyboard Access** buttons. Those APIs are invoked only by a local click on the Mac; a remote connection never triggers a privacy prompt.
+macOS controls Screen Recording and mouse/keyboard control through its privacy/TCC system. ZorinMacBridge cannot silently grant itself those permissions. The server window has explicit **Request Screen Recording Access** and **Request Mouse/Keyboard Access** buttons. Those APIs are invoked only by a local click on the Mac; a remote connection never triggers a privacy prompt.
 
 For permissions and restricted capabilities to survive updates, production releases use one Apple-issued code identity from build through installation. The stable bundle identifier is:
 
@@ -381,7 +265,7 @@ For permissions and restricted capabilities to survive updates, production relea
 com.ilovemyprojects.zorinmacbridge.server
 ```
 
-The Stage-B probe reports the effective `com.apple.developer.persistent-content-capture` and `com.apple.developer.hid.virtual.device` entitlements. Starting with **0.15.24**, they are not required for normal Aqua Desktop, but they **are required** before reboot-to-LoginWindow remote login can become READY. Signing alone is still not enough: the exact installed build must also pass the physical LoginWindow capture + CoreHID proof. See [`SIGNING.md`](SIGNING.md).
+The historical Stage-B probe still records the older capture/input capability matrix for diagnostics. Current reboot-to-LoginWindow input readiness no longer depends on that old CoreHID result: ZMB checks that the driver-backed virtual HID keyboard/mouse is actually ready and separately retains the current physical LoginWindow capture proof.
 
 ## Remote controls
 
@@ -427,7 +311,7 @@ The connection card also shows live P5 video telemetry. **Auto reconnect** is en
 
 Use **Right Ctrl+C** when you need real macOS `Control+C`, for example to interrupt a process in Terminal.
 
-Starting with v0.14.6, ordinary printable ASCII keys are delivered with their real macOS virtual keycodes (plus the intended Unicode character). This matters for Xcode's iOS Simulator, which can treat keycode-only/Unicode-only synthetic events differently from normal AppKit text fields; typing `b`, `c`, digits, punctuation, and shifted ASCII no longer reuses the physical `A` keycode.
+Ordinary printable ASCII keys are delivered with their real macOS virtual keycodes (plus the intended Unicode character). This matters for Xcode's iOS Simulator, which can treat keycode-only/Unicode-only synthetic events differently from normal AppKit text fields; typing `b`, `c`, digits, punctuation, and shifted ASCII no longer reuses the physical `A` keycode.
 
 ## Clipboard
 
@@ -495,20 +379,9 @@ On Linux, the regular in-app update path continues to use the verified `.deb` an
 You can also re-run the one-command installers.
 
 
-
-## Xcode and Simulator control (v0.9.0)
-
-After P0 pairing, the Zorin client includes an **Xcode** tab. It reads the active Xcode developer directory and Xcode version, lists available Simulator devices, can boot/shut down a selected Simulator, and can open Xcode or Simulator in the logged-in macOS GUI session. These commands use Apple's `xcodebuild`/`xcrun simctl` toolchain and the same restricted SSH administration key; the key still cannot execute an arbitrary shell command.
-
-The **System** tab also exposes a P1 machine state (`DESKTOP READY`, `SYSTEM ONLINE`, `RECOVERY NEEDED`, or `DEGRADED`), power/battery information, **Recover desktop**, and the macOS Wake-for-network-access setting. The client can use the paired Mac network address for Wake-on-Connect; whether a sleeping MacBook actually wakes still depends on its hardware, power state, Wi-Fi/Ethernet path, and network.
-
-For real-Mac validation before tagging the release, follow [`docs/acceptance/P1_P2_ACCEPTANCE.md`](docs/acceptance/P1_P2_ACCEPTANCE.md).
-
 ## Stable macOS permissions across updates
 
-There is no signing setup to run on Zorin/Linux. Normal Aqua Desktop can still use the free ad-hoc release/install path. Reboot-to-LoginWindow remote login is different: starting with **0.15.24** it requires a Developer ID provisioned build with the Apple-managed Persistent Content Capture + CoreHID Virtual Device capabilities. The installer preserves that publisher signature/profile and refuses a later ad-hoc downgrade that would remove those capabilities.
-
-See [`SIGNING.md`](SIGNING.md) for the Aqua-only and managed pre-login signing paths.
+There is no extra signing setup to run on Zorin/Linux for the virtual-HID input path. The macOS release bundles the pinned signed virtual-HID package; **Enable / Repair** installs it and keeps its root daemon loaded across reboot. A system update can retain that already-installed extension, while ZMB updates continue to refresh the client protocol and LaunchDaemon configuration. See [`SIGNING.md`](SIGNING.md) for release-signing details unrelated to the virtual-HID client protocol.
 
 ## Security model
 
@@ -583,17 +456,13 @@ Starting with 0.15.9, native macOS compilation is also a required **push/pull-re
 
 0.15.10 adds a diagnostic-only capability probe. It runs as the existing `ZorinMacBridge Server.app` identity inside the real `LoginWindow` launchd session and classifies capture and input independently. Capture PASS requires a real non-uniform ScreenCaptureKit image saved as `/var/tmp/zmb-capability-probe.png`; input PASS requires a harmless Shift down/up to be observable in the LoginWindow session. The probe also reports the effective Persistent Content Capture and CoreHID virtual-device entitlements. It does **not** type text, does not know the login password, and does not modify the production video/input paths. See `docs/development/STAGE_B_CAPABILITY_PROBE.md`.
 
-### Stage C history, 0.15.19 Aqua free signing, and 0.15.24 managed pre-login
-
-0.15.11 introduced a Developer ID/provisioning gate. 0.15.19 removed it as a requirement for normal Aqua operation and retained a free ad-hoc release/install path. **0.15.24 restores Developer ID/provisioning only for the stricter reboot-to-LoginWindow capability tier**: pre-login READY now requires both Apple-managed entitlements plus a current physical capability proof. Aqua READY remains independent of that signing tier. See [`SIGNING.md`](SIGNING.md).
-
 ## Troubleshooting
 
 The Linux client includes a **Logs** tab. Connection logs show TCP, TLS, fingerprint verification, authentication, control-channel state, H.264 video-channel state, decode errors, and disconnect reasons. Passwords are never written to the logs.
 
 If macOS asks for Screen Recording **when you press Connect**, make sure you are on v0.4.3 or newer. v0.4.0-v0.4.2 launched a separate native capture executable, which could be treated as separate TCC-responsible code. v0.4.3 runs ScreenCaptureKit in the main server process instead.
 
-On 0.15.24+ the normal free installation reports a stable local ad-hoc identity and is explicitly **Aqua-only** for readiness purposes. A Developer ID/profile build with both managed pre-login entitlements is eligible for reboot-login verification, but signing alone still does not prove LoginWindow support; the exact build must pass the Stage-B physical capture + CoreHID probe.
+The normal free installation reports a stable local ad-hoc identity and is explicitly **Aqua-only** for readiness purposes. A Developer ID/profile build with both managed pre-login entitlements is eligible for reboot-login verification, but signing alone still does not prove LoginWindow support; the exact build must pass the Stage-B physical capture + CoreHID probe.
 
 If video works but mouse/keyboard does not, check the Mac server log for:
 
@@ -613,14 +482,14 @@ Screen Recording and Accessibility are macOS TCC permissions tied to the app's c
 
 ### macOS privacy permissions across updates
 
-Starting with **0.15.19**, the default free update path reuses one stable per-Mac ad-hoc designated requirement across releases. Optional Developer ID builds preserve their publisher signature instead. See [`SIGNING.md`](SIGNING.md).
+The default free update path reuses one stable per-Mac ad-hoc designated requirement across releases. Optional Developer ID builds preserve their publisher signature instead. See [`SIGNING.md`](SIGNING.md).
 
 
-### True 2K/4K virtual desktop and sleep resilience (0.14.14)
+### True 2K/4K virtual desktop and sleep resilience
 
-The MacBook still has only its own built-in panel; your 2K/4K monitors are on **Zorin**. In 0.14.14, selecting **2K** or **4K** no longer enlarges or crops the MacBook panel. ZorinMacBridge creates a real macOS virtual display at exactly **2560×1440** or **3840×2160**, makes that virtual desktop primary for the current login session, and asks ScreenCaptureKit to capture that display ID directly.
+The MacBook still has only its own built-in panel; your 2K/4K monitors are on **Zorin**. Selecting **2K** or **4K** does not enlarge or crop the MacBook panel. ZorinMacBridge creates a real macOS virtual display at exactly **2560×1440** or **3840×2160**, makes that virtual desktop primary for the current login session, and asks ScreenCaptureKit to capture that display ID directly.
 
-The resolution selector is therefore a real remote-desktop mode: **1080p** uses the physical Mac display, while **2K / 4K** create a virtual macOS desktop. In 0.14.17, the built-in MacBook panel is detached from the active workspace while 2K/4K is in use, so windows/menu bar cannot remain stranded on the broken physical panel. The detach is session-scoped and the built-in display is restored before returning to 1080p or when the owning Desktop control session ends.
+The resolution selector is therefore a real remote-desktop mode: **1080p** uses the physical Mac display, while **2K / 4K** create a virtual macOS desktop. The built-in MacBook panel is detached from the active workspace while 2K/4K is in use, so windows/menu bar cannot remain stranded on the broken physical panel. The detach is session-scoped and the built-in display is restored before returning to 1080p or when the owning Desktop control session ends.
 
 The virtual-display path uses the private `CGVirtualDisplay` API plus the private `SLS/CGSConfigureDisplayEnabled` symbol, both resolved at runtime. If Apple removes or changes them, ZMB reports the failure; it does not silently fall back to fake upscaling or to the physical panel for an explicit virtual-display request. ScreenCaptureKit waits for the exact virtual display ID before starting capture.
 
@@ -630,7 +499,7 @@ For the sleep problem, ZorinMacBridge Server now holds a runtime idle-sleep asse
 
 If ScreenCaptureKit is interrupted anyway, the control/input connection stays alive and only the video channel is retried.
 
-### Desktop state + independent video controls (0.14.17)
+### Desktop state + independent video controls
 
 The Desktop toolbar now has separate **Resolution**, **FPS**, and **Quality** selectors. Changing Quality never changes FPS or resolution; changing FPS never changes resolution; changing Resolution never changes the chosen FPS/bitrate. A full Desktop reconnect reuses the current resolution selection instead of silently resetting the remote workspace to the physical display.
 
@@ -638,16 +507,9 @@ Connect is control-first: TLS/authentication and input/control come up independe
 
 Older Ubuntu/Zorin `pystray` builds that still call Pillow's removed `Image.ANTIALIAS` are handled by a local compatibility shim, so a tray-icon failure does not produce the previous Pillow traceback.
 
-### Wake-on-Connect and full-screen controls (0.14.11)
+### Wake-on-Connect and full-screen controls
 
 For a saved paired Mac that is sleeping/offline, pressing **Connect** now sends Wake-on-LAN packets and actively probes the paired Mac until its Desktop service returns, then continues the normal connection. This does **not** change macOS login or lock-screen policy: if the Mac wakes to its login/lock screen, you continue to enter the password yourself through the remote Desktop as before.
 
 GTK full-screen state is synchronized with the real GTK4 window state. **Full Screen**, **Exit Full Screen**, **Esc**, and **Alt+Esc** are local controls and do not depend on the network reconnect state.
 
-## 0.14.16 Linux packaging hotfix
-
-Version 0.14.16 fixes the 0.14.15 Linux `.deb` packaging regression where `linux_client_gtk.py` imported `zmb_shutdown.py` but the release workflow did not install that module into `/usr/lib/zorinmacbridge`. The release workflow now stages the module, smoke-imports the GTK client from the exact package tree, and verifies the built `.deb` contains it.
-
-## 0.14.15 shutdown hardening
-
-Explicit **Close/Quit** is bounded: the GTK window is hidden immediately, GTK is allowed to destroy it normally, SSH/VTE/tray cleanup is best-effort and non-blocking, and a short hard-exit watchdog prevents a stuck native backend from leaving the client process alive. This watchdog is armed only for explicit application shutdown; it is not used for ordinary Desktop disconnect/reconnect.

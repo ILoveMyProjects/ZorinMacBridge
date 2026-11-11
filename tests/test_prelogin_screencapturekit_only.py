@@ -3,28 +3,30 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 swift = (ROOT / 'native/macos/ZMBStreamerLib.swift').read_text(encoding='utf-8')
 server = (ROOT / 'mac_server.py').read_text(encoding='utf-8')
+client = (ROOT / 'linux_client.py').read_text(encoding='utf-8')
 
-# Both Aqua and LoginWindow use supported ScreenCaptureKit. LoginWindow has a
-# bounded startup path so an unavailable managed capture cannot hang forever.
+# Aqua stays on the existing persistent SCStream. LoginWindow may fall through
+# supported Apple screenshot APIs only after SCStream fails to produce H.264.
 assert 'CGDisplayStream' not in swift
 assert 'SCStream(filter: filter, configuration: config, delegate: self)' in swift
-assert 'private func startPreloginScreenCaptureKit() throws' in swift
-assert 'waitForPreloginShareableContent(timeout: 6.0)' in swift
-assert 'startPreloginStreamBounded(newStream, timeout: 4.0)' in swift
-assert 'prelogin-backend=screencapturekit-persistent' in swift
+assert 'private func startPreloginCaptureMatrix() throws' in swift
+assert 'tryPreloginSCStream()' in swift
+assert 'SCScreenshotManager.captureSampleBuffer' in swift
+assert 'SCScreenshotManager.captureImage(in: rect)' in swift
+assert 'screencapturekit-persistent' in swift
 assert 'screencapture-cli' not in swift
-assert 'runPreloginSCStreamWithScreenshotFallback' not in swift
 
-# LoginWindow SCStream samples feed the existing VideoToolbox pipeline and Stage
-# D progress states, including the first .started sample for a static login page.
+# LoginWindow success is measured at the real H.264 pipe write.
 for stage in ('capture-frame', 'pixel-buffer', 'encode-submit', 'h264-written'):
     assert f'markPreloginStage("{stage}")' in swift
-assert 'status != .complete && status != .started' in swift
-assert 'encodeImageBuffer(activeCompression, imageBuffer: imageBuffer' in swift
+assert 'preloginAccessUnitWritten = true' in swift
+assert 'waitForPreloginAccessUnit(timeout:' in swift
 
-# Python keeps a bounded server-side first-access-unit timeout and diagnostics.
-assert 'VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS = 6.0' in server
-assert 'no first H.264 access unit within {startup_timeout:g}s; native={detail}' in server
-assert 'startup_timeout = VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS if frames == 0 else None' in server
+# Server gives the bounded matrix enough time, while client uses progress-aware
+# soft timeout plus an absolute hard timeout.
+assert 'VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS = 35.0' in server
+assert 'first_frame_hard_deadline = first_frame_started + 40.0' in client
+assert "event.kind in ('pipeline', 'capture-progress', 'capture-backend', 'capture-failure')" in client
+assert "Pre-login video made no capture progress for 10 seconds" in client
 
-print('Aqua + managed LoginWindow ScreenCaptureKit regression tests: OK')
+print('Aqua + LoginWindow capture-matrix regression tests: OK')

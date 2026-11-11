@@ -384,6 +384,7 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     private let writerLock = NSLock()
     private var stream: SCStream?
     private var preloginEncodeSubmitted = false
+    private var preloginAccessUnitWritten = false
     private var preloginStageLogged = Set<String>()
     private var compression: VTCompressionSession?
     private var finished = false
@@ -425,6 +426,26 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func runBlocking() -> Int32 {
+        if prelogin {
+            // LoginWindow capture uses only bounded callback APIs internally.
+            // Run it directly on the dedicated native runner thread instead of
+            // depending on Swift Concurrency scheduling inside LoginWindow.
+            // This guarantees that the first diagnostic stage is emitted before
+            // any ScreenCaptureKit request and makes a stalled runner observable.
+            log("prelogin-stage=native-run-enter")
+            do {
+                try startPreloginCaptureMatrix()
+                if !withStateLock({ finished }) {
+                    done.wait()
+                }
+            } catch {
+                requestStop(code: 2, reason: "fatal=\(error.localizedDescription)")
+            }
+            try? output.close()
+            try? logOutput.close()
+            return resultCode
+        }
+
         let task = Task {
             do {
                 try await self.start()
@@ -447,9 +468,6 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         stateLock.lock()
         runTask = nil
         stateLock.unlock()
-        // requestStop() closes the data pipe before signalling completion.
-        // Never wait synchronously for a stale writer here: a blocked FileHandle
-        // write used to keep the Python video-session lock alive across reconnects.
         try? output.close()
         try? logOutput.close()
         return resultCode
@@ -473,35 +491,28 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
 
         activeTask?.cancel()
         if let reason { log(reason) }
-        if let activeStream {
-            activeStream.stopCapture(completionHandler: nil)
-        }
-        if let activeCompression {
-            // Remote desktop prefers bounded teardown over draining stale frames.
-            // CompleteFrames can block behind a stuck capture/write callback;
-            // invalidating immediately makes reconnect deterministic.
-            VTCompressionSessionInvalidate(activeCompression)
-        }
-        // Close the pipe immediately so any pending writer wakes with an error.
-        // The queued closure retains self while it unwinds, so this is safe.
-        try? output.close()
+
+        // Signal runBlocking immediately.  ScreenCaptureKit and VideoToolbox
+        // cleanup are best-effort and must never block zmb_streamer_stop(),
+        // otherwise a dead native teardown prevents the next video session.
         done.signal()
+        DispatchQueue.global(qos: .utility).async {
+            if let activeStream {
+                activeStream.stopCapture(completionHandler: nil)
+            }
+            if let activeCompression {
+                VTCompressionSessionInvalidate(activeCompression)
+            }
+        }
     }
 
     private func start() async throws {
-        // LoginWindow uses the same supported ScreenCaptureKit pipeline that
-        // the capability probe validates. The Persistent Content Capture
-        // entitlement is what authorizes continuous remote-desktop capture;
-        // do not fall back to the system screenshot CLI or a second backend.
+        // LoginWindow is allowed to try multiple supported Apple capture paths.
+        // A backend is selected only after a real H.264 access unit has been
+        // written to the pipe; API/start success alone is not evidence.  This
+        // matrix is pre-login-only and never changes the normal Aqua SCStream.
         if prelogin {
-            do {
-                try startPreloginScreenCaptureKit()
-            } catch {
-                let ns = error as NSError
-                let detail = "domain=\(ns.domain) code=\(ns.code) description=\(ns.localizedDescription)"
-                log("prelogin-failure=managed-screencapturekit-start-failed: \(detail)")
-                throw error
-            }
+            try startPreloginCaptureMatrix()
             return
         }
 
@@ -629,36 +640,68 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         markPreloginStage("stream-started")
     }
 
-    private func armPreloginFirstFrameWatchdog(seconds: Double = 5.0) {
-        sampleQueue.asyncAfter(deadline: .now() + seconds) { [weak self] in
-            guard let self else { return }
-            let shouldFail = self.withStateLock {
-                self.prelogin && !self.finished && !self.preloginEncodeSubmitted
-            }
-            if shouldFail {
-                self.log("prelogin-failure=first-frame-timeout: ScreenCaptureKit started but produced no encodable LoginWindow frame")
-                self.requestStop(code: 4, reason: "prelogin-first-frame-timeout")
-            }
+    private func resetPreloginCandidate(_ backend: String) {
+        withStateLock {
+            preloginEncodeSubmitted = false
+            preloginAccessUnitWritten = false
         }
+        log("prelogin-backend=\(backend)")
+        markPreloginStage("candidate-\(backend)")
     }
 
-    private func startPreloginScreenCaptureKit() throws {
-        log("prelogin-backend=screencapturekit-persistent")
-        let content = try waitForPreloginShareableContent(timeout: 6.0)
-        guard !content.displays.isEmpty else { throw PreloginCaptureError.noDisplay }
+    private func preloginAccessUnitReady() -> Bool {
+        withStateLock { preloginAccessUnitWritten }
+    }
 
+    private func waitForPreloginAccessUnit(timeout: TimeInterval) -> Bool {
+        let deadline = Date().timeIntervalSinceReferenceDate + max(0.25, timeout)
+        while Date().timeIntervalSinceReferenceDate < deadline {
+            if withStateLock({ finished }) { return false }
+            if preloginAccessUnitReady() { return true }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return preloginAccessUnitReady()
+    }
+
+    private func stopPreloginCandidate() {
+        let activeStream: SCStream? = withStateLock {
+            let value = stream
+            stream = nil
+            return value
+        }
+        if let activeStream {
+            let semaphore = DispatchSemaphore(value: 0)
+            activeStream.stopCapture { _ in semaphore.signal() }
+            _ = semaphore.wait(timeout: .now() + 1.0)
+        }
+        let activeCompression: VTCompressionSession? = withStateLock {
+            let value = compression
+            compression = nil
+            return value
+        }
+        if let activeCompression {
+            VTCompressionSessionInvalidate(activeCompression)
+        }
+        // Drain writes already queued by the rejected candidate without ever
+        // waiting unboundedly on a stale pipe.  This prevents a late access unit
+        // from being mistaken for success of the next matrix candidate.
+        let drain = DispatchSemaphore(value: 0)
+        writeQueue.async { drain.signal() }
+        _ = drain.wait(timeout: .now() + 0.50)
+        Thread.sleep(forTimeInterval: 0.10)
+    }
+
+    private func makePreloginFilteredContext(contentTimeout: TimeInterval = 4.0) throws -> (SCContentFilter, SCStreamConfiguration, Int, Int) {
+        let content = try waitForPreloginShareableContent(timeout: contentTimeout)
+        guard !content.displays.isEmpty else { throw PreloginCaptureError.noDisplay }
         let mainDisplayID = CGMainDisplayID()
         guard let display = content.displays.first(where: { $0.displayID == mainDisplayID }) ?? content.displays.first else {
             throw PreloginCaptureError.noDisplay
         }
         markPreloginStage("display-selected")
-
         let scale = min(1.0, Double(maxWidth) / Double(max(display.width, 1)))
         let width = max(2, Int((Double(display.width) * scale).rounded(.down)) & ~1)
         let height = max(2, Int((Double(display.height) * scale).rounded(.down)) & ~1)
-        try createEncoder(width: Int32(width), height: Int32(height))
-        markPreloginStage("encoder-ready")
-
         let config = SCStreamConfiguration()
         config.width = width
         config.height = height
@@ -668,18 +711,228 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         config.capturesAudio = false
         let filter = SCContentFilter(display: display, excludingWindows: [])
-
         log(
             "prelogin-display-selected id=\(display.displayID) source=\(display.width)x\(display.height) " +
-            "target=\(width)x\(height) persistent-content-capture=required"
+            "target=\(width)x\(height)"
         )
+        return (filter, config, width, height)
+    }
 
-        let newStream = SCStream(filter: filter, configuration: config, delegate: self)
-        try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
-        guard installStreamUnlessFinished(newStream) else { return }
-        try startPreloginStreamBounded(newStream, timeout: 4.0)
-        log("prelogin-stream-started width=\(width) height=\(height) fps=\(fps) bitrate=\(bitrate)")
-        armPreloginFirstFrameWatchdog()
+    private func tryPreloginSCStream() -> Bool {
+        resetPreloginCandidate("screencapturekit-persistent")
+        do {
+            let (filter, config, width, height) = try makePreloginFilteredContext(contentTimeout: 4.0)
+            try createEncoder(width: Int32(width), height: Int32(height))
+            markPreloginStage("encoder-ready")
+            let newStream = SCStream(filter: filter, configuration: config, delegate: self)
+            try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
+            guard installStreamUnlessFinished(newStream) else { return false }
+            try startPreloginStreamBounded(newStream, timeout: 3.0)
+            log("prelogin-stream-started width=\(width) height=\(height) fps=\(fps) bitrate=\(bitrate)")
+            if waitForPreloginAccessUnit(timeout: 4.0) {
+                log("prelogin-backend-selected=screencapturekit-persistent")
+                return true
+            }
+            log("prelogin-failure=backend=screencapturekit-persistent reason=no-h264-access-unit")
+        } catch {
+            let ns = error as NSError
+            log("prelogin-failure=backend=screencapturekit-persistent domain=\(ns.domain) code=\(ns.code) description=\(ns.localizedDescription)")
+        }
+        stopPreloginCandidate()
+        return false
+    }
+
+    private func captureSampleBufferBounded(filter: SCContentFilter, config: SCStreamConfiguration, timeout: TimeInterval) throws -> CMSampleBuffer {
+        markPreloginStage("screenshot-sample-request")
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = PreloginCaptureResultBox<CMSampleBuffer>()
+        SCScreenshotManager.captureSampleBuffer(contentFilter: filter, configuration: config) { sample, error in
+            box.finish(value: sample, error: error)
+            semaphore.signal()
+        }
+        guard semaphore.wait(timeout: .now() + timeout) == .success else {
+            throw PreloginCaptureError.timeout("SCScreenshotManager.captureSampleBuffer")
+        }
+        let (sample, error) = box.snapshot()
+        if let error { throw error }
+        guard let sample else { throw PreloginCaptureError.noDisplay }
+        markPreloginStage("screenshot-sample-ready")
+        return sample
+    }
+
+    private func captureImageRectBounded(_ rect: CGRect, timeout: TimeInterval) throws -> CGImage {
+        markPreloginStage("screenshot-image-request")
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = PreloginCaptureResultBox<CGImage>()
+        SCScreenshotManager.captureImage(in: rect) { image, error in
+            box.finish(value: image, error: error)
+            semaphore.signal()
+        }
+        guard semaphore.wait(timeout: .now() + timeout) == .success else {
+            throw PreloginCaptureError.timeout("SCScreenshotManager.captureImage(in:)")
+        }
+        let (image, error) = box.snapshot()
+        if let error { throw error }
+        guard let image else { throw PreloginCaptureError.noDisplay }
+        markPreloginStage("screenshot-image-ready")
+        return image
+    }
+
+    private func pixelBuffer(from image: CGImage, width: Int, height: Int) throws -> CVPixelBuffer {
+        var buffer: CVPixelBuffer?
+        let attrs = [
+            kCVPixelBufferCGImageCompatibilityKey: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+        ] as CFDictionary
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            max(2, width & ~1),
+            max(2, height & ~1),
+            kCVPixelFormatType_32BGRA,
+            attrs,
+            &buffer
+        )
+        guard status == kCVReturnSuccess, let buffer else {
+            throw NSError(domain: "ZorinMacBridge", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "CVPixelBufferCreate failed: \(status)"])
+        }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else {
+            throw NSError(domain: "ZorinMacBridge", code: 52, userInfo: [NSLocalizedDescriptionKey: "CVPixelBuffer has no base address"])
+        }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+        guard let context = CGContext(
+            data: base,
+            width: CVPixelBufferGetWidth(buffer),
+            height: CVPixelBufferGetHeight(buffer),
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+        ) else {
+            throw NSError(domain: "ZorinMacBridge", code: 53, userInfo: [NSLocalizedDescriptionKey: "Could not create screenshot bitmap context"])
+        }
+        context.interpolationQuality = .medium
+        context.draw(image, in: CGRect(x: 0, y: 0, width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer)))
+        return buffer
+    }
+
+    private func encodePreloginBuffer(_ imageBuffer: CVImageBuffer, frameIndex: Int64) -> Bool {
+        guard let activeCompression = withStateLock({ compression }), !withStateLock({ finished }) else { return false }
+        markPreloginStage("capture-frame")
+        markPreloginStage("pixel-buffer")
+        let pts = CMTime(value: frameIndex, timescale: CMTimeScale(fps))
+        let duration = CMTime(value: 1, timescale: CMTimeScale(fps))
+        if encodeImageBuffer(activeCompression, imageBuffer: imageBuffer, pts: pts, duration: duration) {
+            withStateLock { preloginEncodeSubmitted = true }
+            markPreloginStage("encode-submit")
+            return true
+        }
+        return false
+    }
+
+    private func runPreloginSampleBufferBackend() -> Bool {
+        resetPreloginCandidate("screenshot-sample-buffer")
+        do {
+            let (filter, config, width, height) = try makePreloginFilteredContext(contentTimeout: 3.0)
+            try createEncoder(width: Int32(width), height: Int32(height))
+            markPreloginStage("encoder-ready-screenshot-sample")
+            let first = try captureSampleBufferBounded(filter: filter, config: config, timeout: 3.0)
+            guard let firstBuffer = CMSampleBufferGetImageBuffer(first), encodePreloginBuffer(firstBuffer, frameIndex: 0) else {
+                throw NSError(domain: "ZorinMacBridge", code: 54, userInfo: [NSLocalizedDescriptionKey: "screenshot sample did not contain an encodable image"])
+            }
+            guard waitForPreloginAccessUnit(timeout: 2.0) else {
+                log("prelogin-failure=backend=screenshot-sample-buffer reason=no-h264-access-unit")
+                stopPreloginCandidate()
+                return false
+            }
+            log("prelogin-backend-selected=screenshot-sample-buffer")
+            var frameIndex: Int64 = 1
+            var consecutiveFailures = 0
+            while !withStateLock({ finished }) {
+                do {
+                    let sample = try captureSampleBufferBounded(filter: filter, config: config, timeout: 2.0)
+                    if let buffer = CMSampleBufferGetImageBuffer(sample) {
+                        _ = encodePreloginBuffer(buffer, frameIndex: frameIndex)
+                        frameIndex += 1
+                        consecutiveFailures = 0
+                    }
+                } catch {
+                    consecutiveFailures += 1
+                    if consecutiveFailures >= 3 {
+                        let ns = error as NSError
+                        requestStop(code: 4, reason: "prelogin-screenshot-sample-runtime-failed domain=\(ns.domain) code=\(ns.code) description=\(ns.localizedDescription)")
+                        break
+                    }
+                }
+                Thread.sleep(forTimeInterval: max(1.0 / Double(max(fps, 1)), 0.03))
+            }
+            return true
+        } catch {
+            let ns = error as NSError
+            log("prelogin-failure=backend=screenshot-sample-buffer domain=\(ns.domain) code=\(ns.code) description=\(ns.localizedDescription)")
+            stopPreloginCandidate()
+            return false
+        }
+    }
+
+    private func runPreloginImageBackend() -> Bool {
+        resetPreloginCandidate("screenshot-image-rect")
+        do {
+            let display = CGMainDisplayID()
+            let bounds = CGDisplayBounds(display)
+            guard bounds.width > 1, bounds.height > 1 else { throw PreloginCaptureError.noDisplay }
+            let firstImage = try captureImageRectBounded(bounds, timeout: 3.0)
+            let scale = min(1.0, Double(maxWidth) / Double(max(firstImage.width, 1)))
+            let width = max(2, Int((Double(firstImage.width) * scale).rounded(.down)) & ~1)
+            let height = max(2, Int((Double(firstImage.height) * scale).rounded(.down)) & ~1)
+            try createEncoder(width: Int32(width), height: Int32(height))
+            markPreloginStage("encoder-ready-screenshot-image")
+            let firstBuffer = try pixelBuffer(from: firstImage, width: width, height: height)
+            guard encodePreloginBuffer(firstBuffer, frameIndex: 0), waitForPreloginAccessUnit(timeout: 2.0) else {
+                log("prelogin-failure=backend=screenshot-image-rect reason=no-h264-access-unit")
+                stopPreloginCandidate()
+                return false
+            }
+            log("prelogin-backend-selected=screenshot-image-rect")
+            var frameIndex: Int64 = 1
+            var consecutiveFailures = 0
+            while !withStateLock({ finished }) {
+                do {
+                    let image = try captureImageRectBounded(bounds, timeout: 2.0)
+                    let buffer = try pixelBuffer(from: image, width: width, height: height)
+                    _ = encodePreloginBuffer(buffer, frameIndex: frameIndex)
+                    frameIndex += 1
+                    consecutiveFailures = 0
+                } catch {
+                    consecutiveFailures += 1
+                    if consecutiveFailures >= 3 {
+                        let ns = error as NSError
+                        requestStop(code: 4, reason: "prelogin-screenshot-image-runtime-failed domain=\(ns.domain) code=\(ns.code) description=\(ns.localizedDescription)")
+                        break
+                    }
+                }
+                Thread.sleep(forTimeInterval: max(1.0 / Double(max(fps, 1)), 0.03))
+            }
+            return true
+        } catch {
+            let ns = error as NSError
+            log("prelogin-failure=backend=screenshot-image-rect domain=\(ns.domain) code=\(ns.code) description=\(ns.localizedDescription)")
+            stopPreloginCandidate()
+            return false
+        }
+    }
+
+    private func startPreloginCaptureMatrix() throws {
+        log("prelogin-stage=capture-matrix-start")
+        if tryPreloginSCStream() { return }
+        if runPreloginSampleBufferBackend() { return }
+        if runPreloginImageBackend() { return }
+        throw NSError(
+            domain: "ZorinMacBridge",
+            code: 55,
+            userInfo: [NSLocalizedDescriptionKey: "all supported LoginWindow capture backends failed to produce H.264"]
+        )
     }
 
     private func installStreamUnlessFinished(_ newStream: SCStream) -> Bool {
@@ -902,6 +1155,9 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
                 let lengthData = Data(bytes: &length, count: MemoryLayout<UInt32>.size)
                 try self.output.write(contentsOf: lengthData)
                 try self.output.write(contentsOf: annexB)
+                if self.prelogin {
+                    self.withStateLock { self.preloginAccessUnitWritten = true }
+                }
                 self.markPreloginStage("h264-written")
             } catch {
                 self.requestStop(code: 4, reason: "pipe-write-error=\(error.localizedDescription)")
@@ -978,6 +1234,11 @@ public func zmb_display_list_json() -> UnsafeMutablePointer<CChar>? {
 @_cdecl("zmb_string_free")
 public func zmb_string_free(_ pointer: UnsafeMutablePointer<CChar>?) {
     pointer?.deallocate()
+}
+
+@_cdecl("zmb_streamer_build_version")
+public func zmb_streamer_build_version() -> UnsafeMutablePointer<CChar>? {
+    return ownedCString(ZMB_NATIVE_BUILD_VERSION)
 }
 
 @_cdecl("zmb_streamer_create")

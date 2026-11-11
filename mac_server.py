@@ -25,9 +25,13 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
+from resources import resource_path
+from zmb_macos_virtual_hid import DriverKitVirtualHIDClient, chunk_relative
+
 from zmb_session_lifecycle import (
     PRELOGIN_CONTROL_REPLACEMENT_GRACE_SECONDS, PreloginControlLease,
-    PreloginSessionCoordinator, make_capture_backend_state, make_capture_failure_state, make_handoff_state, make_input_probe_state, make_pipeline_state,
+    PreloginSessionCoordinator, PIPELINE_STAGES, make_capture_backend_state, make_capture_failure_state, make_capture_progress_state, make_handoff_state, make_input_probe_state, make_pipeline_state,
+    make_input_event_state,
 )
 
 from protocol import (
@@ -42,6 +46,14 @@ APP_DIR = Path.home() / '.zorin-mac-bridge'
 CERT_PATH = APP_DIR / 'server-cert.pem'
 KEY_PATH = APP_DIR / 'server-key.pem'
 DEFAULT_SHARE = Path.home() / 'ZorinMac-Share'
+
+
+def runtime_version() -> str:
+    try:
+        value = resource_path('VERSION').read_text(encoding='utf-8').strip()
+        return value or '0.0.0'
+    except Exception:
+        return '0.0.0'
 
 
 def configure_runtime_home(home: Path | str) -> None:
@@ -65,8 +77,9 @@ MAX_CLIPBOARD = 2 * 1024 * 1024
 _VIDEO_SESSION_LOCK = threading.Lock()
 _VIDEO_SESSION_STATE_LOCK = threading.Lock()
 _ACTIVE_VIDEO_SOCKET: ssl.SSLSocket | None = None
+_ACTIVE_VIDEO_CANCEL: threading.Event | None = None
 VIDEO_REPLACEMENT_GRACE_SECONDS = 4.0
-VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS = 6.0
+VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS = 35.0
 _PRELOGIN_SESSION_COORDINATOR = PreloginSessionCoordinator()
 
 
@@ -79,24 +92,29 @@ def request_prelogin_handoff(user: str, *, log=print) -> PreloginControlLease | 
     return lease
 
 
-def _set_active_video_socket(sock: ssl.SSLSocket | None) -> None:
-    global _ACTIVE_VIDEO_SOCKET
+def _set_active_video_socket(sock: ssl.SSLSocket | None, cancel_event: threading.Event | None = None) -> None:
+    global _ACTIVE_VIDEO_SOCKET, _ACTIVE_VIDEO_CANCEL
     with _VIDEO_SESSION_STATE_LOCK:
         _ACTIVE_VIDEO_SOCKET = sock
+        _ACTIVE_VIDEO_CANCEL = cancel_event
 
 
 def _clear_active_video_socket(sock: ssl.SSLSocket) -> None:
-    global _ACTIVE_VIDEO_SOCKET
+    global _ACTIVE_VIDEO_SOCKET, _ACTIVE_VIDEO_CANCEL
     with _VIDEO_SESSION_STATE_LOCK:
         if _ACTIVE_VIDEO_SOCKET is sock:
             _ACTIVE_VIDEO_SOCKET = None
+            _ACTIVE_VIDEO_CANCEL = None
 
 
 def _interrupt_active_video_session(*, log=print) -> bool:
     with _VIDEO_SESSION_STATE_LOCK:
         active = _ACTIVE_VIDEO_SOCKET
+        cancel_event = _ACTIVE_VIDEO_CANCEL
+    if cancel_event is not None:
+        cancel_event.set()
     if active is None:
-        return False
+        return cancel_event is not None
     try:
         # TCP shutdown is intentional here.  It wakes the old video thread out of
         # select()/recv immediately; that thread still owns close() and native cleanup.
@@ -107,7 +125,7 @@ def _interrupt_active_video_session(*, log=print) -> bool:
     return True
 
 
-def _acquire_video_session(sock: ssl.SSLSocket, *, log=print) -> None:
+def _acquire_video_session(sock: ssl.SSLSocket, *, log=print) -> threading.Event:
     if not _VIDEO_SESSION_LOCK.acquire(blocking=False):
         log('[video] previous video session still active; interrupting stale owner before replacement')
         _interrupt_active_video_session(log=log)
@@ -116,7 +134,9 @@ def _acquire_video_session(sock: ssl.SSLSocket, *, log=print) -> None:
                 f'previous video session did not stop within {VIDEO_REPLACEMENT_GRACE_SECONDS:g}s '
                 'after forced socket shutdown'
             )
-    _set_active_video_socket(sock)
+    cancel_event = threading.Event()
+    _set_active_video_socket(sock, cancel_event)
+    return cancel_event
 
 
 def _release_video_session(sock: ssl.SSLSocket) -> None:
@@ -520,14 +540,15 @@ class MacInput:
 
 
 class LoginWindowInput(MacInput):
-    """LoginWindow input selected by observed delivery, not API success.
+    """Bounded LoginWindow input activation with runtime backend failover.
 
-    Every native candidate is tested independently in the real LoginWindow
-    session. A harmless Shift transition must be visible in combined-session
-    flags, and pointer delivery is verified by a small move+restore. CoreHID,
-    IOHIDUserDevice, IOHIDSystem and Quartz are all checked without silent
-    fallback. Failure of every backend remains non-fatal to Desktop/video so
-    diagnostics stay visible instead of entering a reconnect loop.
+    The critical control-session startup path must never depend on observing
+    WindowServer state through CoreGraphics.  On macOS LoginWindow those
+    observation calls can block even while capture/video is healthy.  Instead
+    we open one native backend at a time, report OPEN_READY immediately, and
+    treat the first real user event as the delivery attempt.  A native dispatch
+    error closes that backend, opens the next candidate, and retries the same
+    event without tearing down Desktop/video.
     """
 
     HID_USAGES = {
@@ -568,13 +589,19 @@ class LoginWindowInput(MacInput):
         '\t': 'Tab', '\n': 'Return', '\r': 'Return',
     }
 
+    # CoreHID remains first for a provisioned build.  For the current ad-hoc
+    # LoginWindow path prefer root IOHIDSystem before IOHIDUserDevice: it posts
+    # directly into the system event path and does not rely on a virtual-device
+    # service being accepted by LoginWindow.
     BACKEND_ORDER = (
+        ('driverkit', -1),
         ('corehid', 0),
-        ('userdevice', 1),
         ('iohidsystem', 2),
+        ('userdevice', 1),
         ('quartz', 3),
     )
     BACKEND_LABELS = {
+        'driverkit': 'DriverKit virtual HID keyboard + mouse',
         'corehid': 'CoreHID HIDVirtualDevice',
         'userdevice': 'IOHIDUserDevice virtual HID',
         'iohidsystem': 'IOHIDSystem/IOHIDPostEvent',
@@ -584,9 +611,10 @@ class LoginWindowInput(MacInput):
 
     def __init__(self) -> None:
         # Keep the already-working LoginWindow capture/wake path untouched.
-        # This object is only responsible for discovering a proven input path.
         super().__init__()
         self.native = NativeStreamerLibrary()
+        self.virtual_hid = DriverKitVirtualHIDClient()
+        self._driverkit_keys: set[int] = set()
         self.backend = 'unavailable'
         self.legacy_backend: int | None = None
         self.corehid_open_rc: int | None = None
@@ -594,7 +622,24 @@ class LoginWindowInput(MacInput):
         self.input_probe_results: list[dict[str, object]] = []
         self.last_nx = 0.5
         self.last_ny = 0.5
-        self._probe_and_select_backend()
+        self._state_callback = None
+        self._event_callback = None
+        self._channel_override = {'keyboard': '', 'pointer': ''}
+        self._async_dispatch_results: queue.SimpleQueue[tuple] = queue.SimpleQueue()
+        self._quartz_inflight = {'keyboard': None, 'pointer': None}
+        self._quartz_disabled: set[str] = set()
+        self._quartz_token = 0
+        self._released = False
+        self._activate_from_index(0)
+
+    def set_state_callback(self, callback, *, replay: bool = True) -> None:
+        self._state_callback = callback
+        if replay and callback is not None:
+            for row in self.input_probe_states():
+                callback(row)
+
+    def set_event_callback(self, callback) -> None:
+        self._event_callback = callback
 
     @staticmethod
     def _rc_text(rc: int | None) -> str:
@@ -603,149 +648,313 @@ class LoginWindowInput(MacInput):
         value = int(rc)
         return f'{value} (0x{value & 0xffffffff:08x})'
 
-    def _close_probe_backend(self, backend: str) -> None:
+    def _emit_row(self, row: dict[str, object]) -> None:
+        callback = self._state_callback
+        if callback is not None:
+            callback(dict(row))
+
+    def _emit_event(self, *, channel: str, action: str, backend: str, rc: int, result: str, detail: str = '') -> None:
+        callback = self._event_callback
+        if callback is not None:
+            callback({
+                'channel': str(channel),
+                'action': str(action),
+                'backend': str(backend),
+                'rc': int(rc),
+                'result': str(result),
+                'detail': str(detail),
+            })
+
+    def _row_for(self, backend: str) -> dict[str, object] | None:
+        return next((row for row in self.input_probe_results if row.get('backend') == backend), None)
+
+    def _close_all_backends(self) -> None:
         try:
-            if backend == 'corehid':
-                self.native.lib.zmb_corehid_input_close()
-            else:
-                self.native.lib.zmb_login_input_close()
+            self.virtual_hid.release_all()
         except Exception:
             pass
+        try:
+            self.virtual_hid.close()
+        except Exception:
+            pass
+        self._driverkit_keys.clear()
+        try:
+            self.native.lib.zmb_corehid_input_close()
+        except Exception:
+            pass
+        try:
+            self.native.lib.zmb_login_input_close()
+        except Exception:
+            pass
+        self.backend = 'unavailable'
+        self.legacy_backend = None
 
-    def _open_probe_backend(self, backend: str, backend_id: int) -> int:
+    def _open_backend(self, backend: str, backend_id: int) -> int:
+        if backend == 'driverkit':
+            return int(self.virtual_hid.open(wait_seconds=2.5))
         if backend == 'corehid':
             return int(self.native.lib.zmb_corehid_input_open())
         return int(self.native.lib.zmb_login_input_open_backend(int(backend_id)))
 
-    def _probe_key_report(self, backend: str, down: bool) -> int:
-        if backend == 'corehid':
-            return int(self.native.lib.zmb_corehid_input_key(0xE1, 1 if down else 0))
-        if backend == 'userdevice':
-            return int(self.native.lib.zmb_login_input_hid_key(0xE1, 1 if down else 0))
-        flags = self.MOD_FLAGS['Shift_L'] if down else 0
-        return int(self.native.lib.zmb_login_input_key(
-            self.KEYCODES['Shift_L'], 1 if down else 0, ctypes.c_uint32(flags), 1
-        ))
-
-    def _probe_pointer_report(self, backend: str, x: float, y: float) -> int:
-        bounds = self._bounds()
-        width = max(1.0, float(bounds.size.width))
-        height = max(1.0, float(bounds.size.height))
-        if backend in ('corehid', 'userdevice'):
-            nx = (float(x) - float(bounds.origin.x)) / width
-            ny = (float(y) - float(bounds.origin.y)) / height
-            ax, ay = self._axis(nx), self._axis(ny)
-            if backend == 'corehid':
-                return int(self.native.lib.zmb_corehid_input_pointer(ax, ay, 0, 0))
-            return int(self.native.lib.zmb_login_input_hid_pointer(ax, ay, 0, 0))
-        return int(self.native.lib.zmb_login_input_pointer(
-            ctypes.c_uint32(self.MOUSE_MOVED), int(round(x)), int(round(y)), 0, ctypes.c_uint32(0)
-        ))
-
-    def _probe_keyboard_delivery(self, backend: str) -> tuple[str, str]:
-        shift_mask = int(self.MOD_FLAGS['Shift_L'])
-        if self._combined_session_flags() & shift_mask:
-            return 'INCONCLUSIVE', 'Shift already active before probe'
-        down_rc = self._probe_key_report(backend, True)
-        time.sleep(0.15)
-        down_seen = bool(self._combined_session_flags() & shift_mask)
-        up_rc = self._probe_key_report(backend, False)
-        time.sleep(0.15)
-        up_seen = not bool(self._combined_session_flags() & shift_mask)
-        ok = down_rc == 0 and up_rc == 0 and down_seen and up_seen
-        detail = (
-            f'down_rc={self._rc_text(down_rc)},down_seen={int(down_seen)},'
-            f'up_rc={self._rc_text(up_rc)},up_seen={int(up_seen)}'
-        )
-        return ('PASS' if ok else 'FAIL'), detail
-
-    def _probe_pointer_delivery(self, backend: str) -> tuple[str, str]:
-        before = self._cursor_location()
-        if before is None:
-            return 'INCONCLUSIVE', 'cursor location unavailable'
-        bounds = self._bounds()
-        if float(bounds.size.width) <= 40 or float(bounds.size.height) <= 40:
-            return 'INCONCLUSIVE', 'display bounds unavailable'
-        local_x = float(before.x) - float(bounds.origin.x)
-        if local_x < float(bounds.size.width) - 24:
-            target_x = float(before.x) + 16.0
-        else:
-            target_x = float(before.x) - 16.0
-        target_y = float(before.y)
-        move_rc = self._probe_pointer_report(backend, target_x, target_y)
-        time.sleep(0.18)
-        after = self._cursor_location() or before
-        moved = ((float(after.x) - float(before.x)) ** 2 + (float(after.y) - float(before.y)) ** 2) ** 0.5 >= 2.0
-        restore_rc = self._probe_pointer_report(backend, float(before.x), float(before.y))
-        time.sleep(0.12)
-        ok = move_rc == 0 and restore_rc == 0 and moved
-        detail = (
-            f'move_rc={self._rc_text(move_rc)},moved={int(moved)},'
-            f'restore_rc={self._rc_text(restore_rc)}'
-        )
-        return ('PASS' if ok else 'FAIL'), detail
-
-    def _probe_and_select_backend(self) -> None:
-        results: list[dict[str, object]] = []
-        for backend, backend_id in self.BACKEND_ORDER:
-            # Never allow one successful API call to hide another backend's
-            # failure. Each candidate is opened, exercised and closed alone.
-            self._close_probe_backend('corehid')
-            self._close_probe_backend('userdevice')
-            open_rc = self._open_probe_backend(backend, backend_id)
-            row: dict[str, object] = {
-                'backend': backend,
-                'label': self.BACKEND_LABELS[backend],
-                'open_rc': open_rc,
-                'keyboard': 'FAIL_OPEN' if open_rc != 0 else 'NOT_RUN',
-                'pointer': 'FAIL_OPEN' if open_rc != 0 else 'NOT_RUN',
-                'keyboard_detail': '',
-                'pointer_detail': '',
-                'selected': False,
-            }
+    def _activate_from_index(self, start_index: int) -> bool:
+        self._close_all_backends()
+        self._channel_override = {'keyboard': '', 'pointer': ''}
+        for backend, backend_id in self.BACKEND_ORDER[max(0, int(start_index)):]:
+            open_rc = self._open_backend(backend, backend_id)
+            row = self._row_for(backend)
+            if row is None:
+                row = {
+                    'backend': backend,
+                    'label': self.BACKEND_LABELS[backend],
+                    'open_rc': open_rc,
+                    'keyboard': 'UNVERIFIED',
+                    'pointer': 'UNVERIFIED',
+                    'result': 'FAIL_OPEN' if open_rc != 0 else 'OPEN_READY',
+                    'reason': '',
+                    'selected': False,
+                }
+                self.input_probe_results.append(row)
+            else:
+                row.update({
+                    'open_rc': open_rc,
+                    'keyboard': 'UNVERIFIED',
+                    'pointer': 'UNVERIFIED',
+                    'result': 'FAIL_OPEN' if open_rc != 0 else 'OPEN_READY',
+                    'reason': '',
+                    'selected': False,
+                })
             if backend == 'corehid':
                 self.corehid_open_rc = open_rc
-            if open_rc == 0:
-                row['keyboard'], row['keyboard_detail'] = self._probe_keyboard_delivery(backend)
-                row['pointer'], row['pointer_detail'] = self._probe_pointer_delivery(backend)
-            self._close_probe_backend(backend)
-            results.append(row)
+            if open_rc != 0:
+                if backend == 'driverkit':
+                    row['reason'] = self.virtual_hid.last_error or 'DriverKit virtual HID backend not ready'
+                else:
+                    row['reason'] = 'native backend open failed'
+                self._emit_row(row)
+                continue
+            self.backend = backend
+            row['selected'] = True
+            row['reason'] = 'backend opened; delivery will be verified by real user input'
+            if backend != 'corehid':
+                self.legacy_backend = int(backend_id)
+                self.legacy_open_rc = open_rc
+            self._emit_row(row)
+            return True
 
-        # Prefer a backend that proves BOTH keyboard and pointer delivery.
-        # If none proves pointer delivery, keyboard-only proof is still useful
-        # for the actual password entry path and is reported explicitly.
-        selected = next(
-            (row for row in results if row['keyboard'] == 'PASS' and row['pointer'] == 'PASS'),
-            None,
+        unavailable = {
+            'backend': 'unavailable',
+            'label': self.BACKEND_LABELS['unavailable'],
+            'open_rc': None,
+            'keyboard': 'UNAVAILABLE',
+            'pointer': 'UNAVAILABLE',
+            'result': 'UNAVAILABLE',
+            'reason': 'no LoginWindow input backend could be opened',
+            'selected': False,
+        }
+        old = self._row_for('unavailable')
+        if old is None:
+            self.input_probe_results.append(unavailable)
+        else:
+            old.update(unavailable)
+            unavailable = old
+        self._emit_row(unavailable)
+        return False
+
+    def _backend_index(self, backend: str) -> int:
+        for index, (name, _backend_id) in enumerate(self.BACKEND_ORDER):
+            if name == backend:
+                return index
+        return len(self.BACKEND_ORDER)
+
+    QUARTZ_ASYNC_TIMEOUT_SECONDS = 0.75
+
+    def _mark_runtime_result(
+        self, backend: str, channel: str, *, rc: int, ok: bool, operation: str,
+        preserve_selected_on_failure: bool = False,
+    ) -> None:
+        row = self._row_for(backend)
+        if row is None:
+            return
+        if channel in ('keyboard', 'pointer'):
+            row[channel] = 'DISPATCH_OK' if ok else 'DISPATCH_FAIL'
+        row['result'] = 'ACTIVE' if ok else 'DISPATCH_FAIL'
+        row['reason'] = (
+            f'{operation} dispatch accepted by native backend'
+            if ok else f'{operation} failed: rc={self._rc_text(rc)}; trying next backend'
         )
-        if selected is None:
-            selected = next((row for row in results if row['keyboard'] == 'PASS'), None)
+        if not ok and not preserve_selected_on_failure:
+            row['selected'] = False
+        # Emit first real delivery-attempt result and every failure/failover.
+        marker = f'_reported_{channel}_ok'
+        if not ok or not row.get(marker):
+            row[marker] = bool(ok)
+            self._emit_row(row)
 
-        if selected is not None:
-            name = str(selected['backend'])
-            backend_id = dict(self.BACKEND_ORDER)[name]
-            final_rc = self._open_probe_backend(name, backend_id)
-            selected['final_open_rc'] = final_rc
-            if final_rc == 0:
-                self.backend = name
-                selected['selected'] = True
-                if name != 'corehid':
-                    self.legacy_backend = int(backend_id)
-                    self.legacy_open_rc = final_rc
+    def _queue_quartz_dispatch(self, channel: str, action: str, send_quartz_direct) -> bool:
+        """Run Quartz outside the control thread with a bounded diagnostic timeout.
+
+        CGEventPost has no delivery acknowledgement and has physically stalled the
+        LoginWindow control path on macOS.  Never execute it inline.  At most one
+        Quartz call per channel may be in flight; if that call does not return in
+        time, the channel is disabled for Quartz while the control/TLS/video session
+        stays alive.
+        """
+        if send_quartz_direct is None or self._released:
+            return False
+        if channel in self._quartz_disabled:
+            self._emit_event(
+                channel=channel, action=action, backend='quartz-async', rc=-1,
+                result='DISPATCH_UNAVAILABLE',
+                detail='Quartz fallback disabled after an earlier timeout/failure; control thread remains live',
+            )
+            return False
+        if self._quartz_inflight.get(channel) is not None:
+            # Mouse movement is coalesced by the Linux client.  Do not create an
+            # unbounded thread backlog while one native Quartz call is unresolved.
+            return True
+
+        self._quartz_token += 1
+        token = self._quartz_token
+        done = threading.Event()
+        self._quartz_inflight[channel] = token
+        self._channel_override[channel] = 'quartz-async'
+        self._emit_event(
+            channel=channel, action=action, backend='quartz-async', rc=0,
+            result='DISPATCH_PENDING',
+            detail='Quartz fallback isolated from control thread; awaiting bounded native return',
+        )
+
+        def worker() -> None:
+            try:
+                rc = int(send_quartz_direct())
+                error = ''
+            except Exception as exc:
+                rc = -32768
+                error = f'{type(exc).__name__}: {exc}'
+            finally:
+                done.set()
+            self._async_dispatch_results.put(('result', token, channel, action, rc, error))
+
+        def watchdog() -> None:
+            if not done.wait(self.QUARTZ_ASYNC_TIMEOUT_SECONDS):
+                self._async_dispatch_results.put(('timeout', token, channel, action, -1, ''))
+
+        threading.Thread(target=worker, name=f'zmb-quartz-{channel}', daemon=True).start()
+        threading.Thread(target=watchdog, name=f'zmb-quartz-watchdog-{channel}', daemon=True).start()
+        return True
+
+    def drain_async_events(self) -> None:
+        """Publish worker results from the control-session thread only."""
+        while True:
+            try:
+                kind, token, channel, action, rc, error = self._async_dispatch_results.get_nowait()
+            except queue.Empty:
+                return
+            if self._quartz_inflight.get(channel) != token:
+                # Late result from a native call that already timed out.
+                continue
+            if kind == 'timeout':
+                self._quartz_inflight[channel] = None
+                self._quartz_disabled.add(channel)
+                self._channel_override[channel] = 'quartz-disabled'
+                self._emit_event(
+                    channel=channel, action=action, backend='quartz-async', rc=rc,
+                    result='DISPATCH_TIMEOUT',
+                    detail=(
+                        f'Quartz native call did not return within {self.QUARTZ_ASYNC_TIMEOUT_SECONDS:.2f}s; '
+                        'fallback disabled for this channel, control thread remains live'
+                    ),
+                )
+                continue
+
+            self._quartz_inflight[channel] = None
+            if rc == 0:
+                self._channel_override[channel] = 'quartz-async'
+                self._emit_event(
+                    channel=channel, action=action, backend='quartz-async', rc=rc,
+                    result='DISPATCH_ACCEPTED_UNVERIFIED',
+                    detail='CGEventPost returned success; LoginWindow delivery is not independently verified',
+                )
             else:
-                selected['selected'] = False
-                selected['selection_error'] = f'final reopen failed: {self._rc_text(final_rc)}'
-        self.input_probe_results = results
+                self._quartz_disabled.add(channel)
+                self._channel_override[channel] = 'quartz-disabled'
+                self._emit_event(
+                    channel=channel, action=action, backend='quartz-async', rc=rc,
+                    result='DISPATCH_FAIL',
+                    detail='Quartz fallback returned failure' + (f': {error}' if error else ''),
+                )
+
+    def _dispatch_with_failover(
+        self, operation: str, channel: str, send_current, *, action: str,
+        send_quartz_direct=None, channel_local_quartz: bool = False,
+    ) -> None:
+        failures: list[str] = []
+        override = self._channel_override.get(channel, '')
+        if override in ('quartz-async', 'quartz-disabled') and send_quartz_direct is not None:
+            if override == 'quartz-disabled':
+                self._emit_event(
+                    channel=channel, action=action, backend='quartz-async', rc=-1,
+                    result='DISPATCH_UNAVAILABLE',
+                    detail='Quartz fallback disabled for this channel; control thread remains live',
+                )
+                return
+            self._queue_quartz_dispatch(channel, action, send_quartz_direct)
+            return
+
+        while self.backend != 'unavailable':
+            active = self.backend
+
+            # Quartz is diagnostic-only at LoginWindow.  Never call CGEventPost
+            # synchronously from the control thread because a native stall would
+            # stop every following keyboard/mouse packet.
+            if active == 'quartz' and send_quartz_direct is not None:
+                self._queue_quartz_dispatch(channel, action, send_quartz_direct)
+                return
+
+            try:
+                rc = int(send_current())
+            except Exception as exc:
+                rc = -32768
+                failures.append(f'{active}:{type(exc).__name__}:{exc}')
+            else:
+                if rc == 0:
+                    self._mark_runtime_result(active, channel, rc=rc, ok=True, operation=operation)
+                    self._emit_event(
+                        channel=channel, action=action, backend=active, rc=rc,
+                        result='DISPATCH_OK',
+                    )
+                    return
+                failures.append(f'{active}:rc={self._rc_text(rc)}')
+
+            preserve_selected = bool(active == 'iohidsystem' and channel_local_quartz)
+            self._mark_runtime_result(
+                active, channel, rc=rc, ok=False, operation=operation,
+                preserve_selected_on_failure=preserve_selected,
+            )
+
+            # The physical 0.15.39 test proved that IOHIDSystem pointer dispatch
+            # can fail with kIOReturnNotPrivileged while the keyboard route still
+            # needs to be tried.  Keep the global IOHIDSystem backend intact and
+            # isolate only the failing pointer/scroll channel behind async Quartz.
+            if active == 'iohidsystem' and channel_local_quartz and send_quartz_direct is not None:
+                self._emit_event(
+                    channel=channel, action=action, backend=active, rc=rc,
+                    result='DISPATCH_FAIL', detail='trying isolated per-channel Quartz fallback',
+                )
+                self._queue_quartz_dispatch(channel, action, send_quartz_direct)
+                return
+
+            next_index = self._backend_index(active) + 1
+            if not self._activate_from_index(next_index):
+                break
+        detail = '; '.join(failures) or 'no backend available'
+        raise RuntimeError(f'{operation} unavailable after LoginWindow backend failover: {detail}')
 
     def backend_summary(self) -> str:
         label = self.BACKEND_LABELS.get(self.backend, self.backend)
-        selected = next((row for row in self.input_probe_results if row.get('selected')), None)
-        if selected is None:
-            return 'unavailable — no backend proved LoginWindow keyboard delivery'
-        return (
-            f'{label}; keyboard={selected.get("keyboard")}; '
-            f'pointer={selected.get("pointer")}; delivery-probed'
-        )
+        if self.backend == 'unavailable':
+            return 'unavailable — no LoginWindow input backend opened'
+        return f'{label}; OPEN_READY; real-event dispatch verification active'
 
     def input_probe_states(self) -> list[dict[str, object]]:
         return [dict(row) for row in self.input_probe_results]
@@ -753,16 +962,10 @@ class LoginWindowInput(MacInput):
     def _ensure_backend(self) -> None:
         if self.backend == 'unavailable':
             matrix = '; '.join(
-                f'{row.get("backend")}:open={self._rc_text(row.get("open_rc"))},'
-                f'kbd={row.get("keyboard")},ptr={row.get("pointer")}'
+                f'{row.get("backend")}:open={self._rc_text(row.get("open_rc"))},result={row.get("result")}'
                 for row in self.input_probe_results
             )
-            raise RuntimeError(f'LoginWindow input unavailable after delivery matrix: {matrix}')
-
-    @staticmethod
-    def _check(rc: int, operation: str) -> None:
-        if int(rc) != 0:
-            raise RuntimeError(f'{operation} failed (rc={int(rc)})')
+            raise RuntimeError(f'LoginWindow input unavailable after backend activation: {matrix}')
 
     @staticmethod
     def _axis(value: float) -> int:
@@ -786,26 +989,49 @@ class LoginWindowInput(MacInput):
         y = int(round(float(bounds.origin.y) + self.last_ny * max(0.0, height - 1.0)))
         return x, y
 
-    def _pointer_report(self, *, wheel: int = 0) -> None:
-        self._ensure_backend()
+    def _send_pointer_current(
+        self, *, wheel: int = 0, explicit_event: tuple[int, int] | None = None,
+        relative_delta: tuple[int, int] | None = None,
+    ) -> int:
+        if self.backend == 'driverkit':
+            dx, dy = relative_delta or (0, 0)
+            if dx or dy:
+                for step_x, step_y in chunk_relative(dx, dy):
+                    rc = int(self.virtual_hid.post_pointing(
+                        self._button_mask(), step_x, step_y, int(wheel), 0
+                    ))
+                    if rc != 0:
+                        return rc
+                    wheel = 0
+                return 0
+            return int(self.virtual_hid.post_pointing(
+                self._button_mask(), 0, 0, int(wheel), 0
+            ))
         if self.backend == 'corehid':
-            rc = self.native.lib.zmb_corehid_input_pointer(
+            return int(self.native.lib.zmb_corehid_input_pointer(
                 self._axis(self.last_nx), self._axis(self.last_ny), self._button_mask(), int(wheel)
-            )
-            self._check(rc, 'login-window CoreHID pointer report')
-            return
+            ))
         if self.backend == 'userdevice':
-            rc = self.native.lib.zmb_login_input_hid_pointer(
+            return int(self.native.lib.zmb_login_input_hid_pointer(
                 self._axis(self.last_nx), self._axis(self.last_ny), self._button_mask(), int(wheel)
-            )
-            self._check(rc, 'login-window IOHIDUserDevice pointer report')
-            return
+            ))
         if wheel:
-            rc = self.native.lib.zmb_login_input_scroll(0, int(wheel), ctypes.c_uint32(self._flags()))
-            self._check(rc, 'login-window legacy scroll report')
-            return
+            return int(self.native.lib.zmb_login_input_scroll(0, int(wheel), ctypes.c_uint32(self._flags())))
+        if self.backend == 'iohidsystem':
+            if explicit_event is not None:
+                _etype, button = explicit_event
+                down = _etype in (self.LEFT_DOWN, self.RIGHT_DOWN, self.OTHER_DOWN)
+                return int(self.native.lib.zmb_login_input_button(
+                    int(button), 1 if down else 0, ctypes.c_uint32(self._flags())
+                ))
+            dx, dy = relative_delta or (0, 0)
+            return int(self.native.lib.zmb_login_input_pointer_relative(
+                int(dx), int(dy), ctypes.c_uint8(self._button_mask()), ctypes.c_uint32(self._flags())
+            ))
         x, y = self._legacy_xy()
-        if 1 in self.held_buttons:
+        if explicit_event is not None:
+            etype, button = explicit_event
+        elif 1 in self.held_buttons:
             etype, button = self.LEFT_DRAGGED, 0
         elif 3 in self.held_buttons:
             etype, button = self.RIGHT_DRAGGED, 1
@@ -813,15 +1039,53 @@ class LoginWindowInput(MacInput):
             etype, button = self.OTHER_DRAGGED, 2
         else:
             etype, button = self.MOUSE_MOVED, 0
-        rc = self.native.lib.zmb_login_input_pointer(
-            ctypes.c_uint32(etype), x, y, button, ctypes.c_uint32(self._flags())
+        return int(self.native.lib.zmb_login_input_pointer(
+            ctypes.c_uint32(etype), x, y, int(button), ctypes.c_uint32(self._flags())
+        ))
+
+    def _send_quartz_pointer_direct(self, *, wheel: int = 0, explicit_event: tuple[int, int] | None = None) -> int:
+        if wheel:
+            return int(self.native.lib.zmb_login_input_quartz_scroll(
+                0, int(wheel), ctypes.c_uint32(self._flags())
+            ))
+        x, y = self._legacy_xy()
+        if explicit_event is not None:
+            etype, button = explicit_event
+        elif 1 in self.held_buttons:
+            etype, button = self.LEFT_DRAGGED, 0
+        elif 3 in self.held_buttons:
+            etype, button = self.RIGHT_DRAGGED, 1
+        elif 2 in self.held_buttons:
+            etype, button = self.OTHER_DRAGGED, 2
+        else:
+            etype, button = self.MOUSE_MOVED, 0
+        return int(self.native.lib.zmb_login_input_quartz_pointer(
+            ctypes.c_uint32(etype), x, y, int(button), ctypes.c_uint32(self._flags())
+        ))
+
+    def _pointer_report(
+        self, *, wheel: int = 0, explicit_event: tuple[int, int] | None = None,
+        relative_delta: tuple[int, int] | None = None, action: str = 'move',
+    ) -> None:
+        self._ensure_backend()
+        self._dispatch_with_failover(
+            'login-window pointer report', 'pointer',
+            lambda: self._send_pointer_current(
+                wheel=wheel, explicit_event=explicit_event, relative_delta=relative_delta,
+            ),
+            action=action,
+            send_quartz_direct=lambda: self._send_quartz_pointer_direct(
+                wheel=wheel, explicit_event=explicit_event,
+            ),
+            channel_local_quartz=True,
         )
-        self._check(rc, 'login-window legacy pointer report')
 
     def move(self, nx: float, ny: float) -> None:
+        old_x, old_y = self._legacy_xy()
         self.last_nx = min(1.0, max(0.0, float(nx)))
         self.last_ny = min(1.0, max(0.0, float(ny)))
-        self._pointer_report()
+        new_x, new_y = self._legacy_xy()
+        self._pointer_report(relative_delta=(new_x - old_x, new_y - old_y), action='move')
 
     def button(self, button_num: int, down: bool, nx: float, ny: float) -> None:
         if int(button_num) not in (1, 2, 3):
@@ -829,41 +1093,96 @@ class LoginWindowInput(MacInput):
         self.last_nx = min(1.0, max(0.0, float(nx)))
         self.last_ny = min(1.0, max(0.0, float(ny)))
         button_num = int(button_num)
-        if self.backend in ('iohidsystem', 'quartz'):
-            self._ensure_backend()
-            if button_num == 1:
-                etype, button = (self.LEFT_DOWN if down else self.LEFT_UP), 0
-            elif button_num == 3:
-                etype, button = (self.RIGHT_DOWN if down else self.RIGHT_UP), 1
-            else:
-                etype, button = (self.OTHER_DOWN if down else self.OTHER_UP), 2
-            if down:
-                self.held_buttons.add(button_num)
-            else:
-                self.held_buttons.discard(button_num)
-            x, y = self._legacy_xy()
-            rc = self.native.lib.zmb_login_input_pointer(
-                ctypes.c_uint32(etype), x, y, button, ctypes.c_uint32(self._flags())
-            )
-            self._check(rc, 'login-window legacy button report')
-            return
         if down:
             self.held_buttons.add(button_num)
         else:
             self.held_buttons.discard(button_num)
-        self._pointer_report()
+        if button_num == 1:
+            etype, button = (self.LEFT_DOWN if down else self.LEFT_UP), 0
+        elif button_num == 3:
+            etype, button = (self.RIGHT_DOWN if down else self.RIGHT_UP), 1
+        else:
+            etype, button = (self.OTHER_DOWN if down else self.OTHER_UP), 2
+        self._pointer_report(
+            explicit_event=(etype, button),
+            action='button-down' if down else 'button-up',
+        )
 
     def scroll(self, dx: int, dy: int) -> None:
         self._ensure_backend()
+        # Preserve horizontal scroll for native legacy backends; HID reports use
+        # the existing signed vertical wheel byte.
         if self.backend in ('iohidsystem', 'quartz'):
-            rc = self.native.lib.zmb_login_input_scroll(int(dx), int(dy), ctypes.c_uint32(self._flags()))
-            self._check(rc, 'login-window legacy scroll report')
+            self._dispatch_with_failover(
+                'login-window scroll report', 'pointer',
+                lambda: int(self.native.lib.zmb_login_input_scroll(
+                    int(dx), int(dy), ctypes.c_uint32(self._flags())
+                )) if self.backend in ('iohidsystem', 'quartz') else self._send_pointer_current(wheel=int(dy)),
+                action='scroll',
+                send_quartz_direct=lambda: int(self.native.lib.zmb_login_input_quartz_scroll(
+                    int(dx), int(dy), ctypes.c_uint32(self._flags())
+                )),
+                channel_local_quartz=True,
+            )
             return
         remaining = int(dy)
         while remaining:
             step = max(-127, min(127, remaining))
-            self._pointer_report(wheel=step)
+            self._pointer_report(wheel=step, action='scroll')
             remaining -= step
+
+    def _send_key_current(self, keysym: str, down: bool) -> int:
+        is_mod = keysym in self.MOD_FLAGS
+        if self.backend == 'driverkit':
+            usage = self.HID_USAGES.get(keysym)
+            if usage is None and len(keysym) == 1:
+                usage = self.HID_USAGES.get(keysym.lower())
+            if usage is None:
+                return 0
+            if 0xE0 <= int(usage) <= 0xE7:
+                modifier_bits = 0
+                for name in self.held_modifiers:
+                    mod_usage = self.HID_USAGES.get(name)
+                    if mod_usage is not None and 0xE0 <= mod_usage <= 0xE7:
+                        modifier_bits |= 1 << (mod_usage - 0xE0)
+            else:
+                if down:
+                    self._driverkit_keys.add(int(usage))
+                else:
+                    self._driverkit_keys.discard(int(usage))
+                modifier_bits = 0
+                for name in self.held_modifiers:
+                    mod_usage = self.HID_USAGES.get(name)
+                    if mod_usage is not None and 0xE0 <= mod_usage <= 0xE7:
+                        modifier_bits |= 1 << (mod_usage - 0xE0)
+            return int(self.virtual_hid.post_keyboard(modifier_bits, self._driverkit_keys))
+        if self.backend in ('corehid', 'userdevice'):
+            usage = self.HID_USAGES.get(keysym)
+            if usage is None and len(keysym) == 1:
+                usage = self.HID_USAGES.get(keysym.lower())
+            if usage is None:
+                return 0
+            if self.backend == 'corehid':
+                return int(self.native.lib.zmb_corehid_input_key(int(usage), 1 if down else 0))
+            return int(self.native.lib.zmb_login_input_hid_key(int(usage), 1 if down else 0))
+        code = self.KEYCODES.get(keysym)
+        if code is None and len(keysym) == 1:
+            code = self.KEYCODES.get(keysym.lower())
+        if code is None:
+            return 0
+        return int(self.native.lib.zmb_login_input_key(
+            int(code), 1 if down else 0, ctypes.c_uint32(self._flags()), 1 if is_mod else 0
+        ))
+
+    def _send_quartz_key_direct(self, keysym: str, down: bool) -> int:
+        code = self.KEYCODES.get(keysym)
+        if code is None and len(keysym) == 1:
+            code = self.KEYCODES.get(keysym.lower())
+        if code is None:
+            return 0
+        return int(self.native.lib.zmb_login_input_quartz_key(
+            int(code), 1 if down else 0, ctypes.c_uint32(self._flags())
+        ))
 
     def key(self, keysym: str, down: bool) -> None:
         self._ensure_backend()
@@ -872,28 +1191,12 @@ class LoginWindowInput(MacInput):
             self.held_modifiers.add(keysym)
         elif is_mod and not down:
             self.held_modifiers.discard(keysym)
-        if self.backend in ('corehid', 'userdevice'):
-            usage = self.HID_USAGES.get(keysym)
-            if usage is None and len(keysym) == 1:
-                usage = self.HID_USAGES.get(keysym.lower())
-            if usage is None:
-                return
-            if self.backend == 'corehid':
-                rc = self.native.lib.zmb_corehid_input_key(int(usage), 1 if down else 0)
-                self._check(rc, 'login-window CoreHID keyboard report')
-            else:
-                rc = self.native.lib.zmb_login_input_hid_key(int(usage), 1 if down else 0)
-                self._check(rc, 'login-window IOHIDUserDevice keyboard report')
-            return
-        code = self.KEYCODES.get(keysym)
-        if code is None and len(keysym) == 1:
-            code = self.KEYCODES.get(keysym.lower())
-        if code is None:
-            return
-        rc = self.native.lib.zmb_login_input_key(
-            int(code), 1 if down else 0, ctypes.c_uint32(self._flags()), 1 if is_mod else 0
+        self._dispatch_with_failover(
+            'login-window keyboard report', 'keyboard',
+            lambda: self._send_key_current(keysym, down),
+            action='key-down' if down else 'key-up',
+            send_quartz_direct=lambda: self._send_quartz_key_direct(keysym, down),
         )
-        self._check(rc, 'login-window legacy keyboard report')
 
     def text(self, text: str) -> None:
         for char in text:
@@ -918,6 +1221,18 @@ class LoginWindowInput(MacInput):
                     self.key('Shift_L', False)
 
     def release_all(self) -> None:
+        if self.backend == 'driverkit':
+            try:
+                self.virtual_hid.release_all()
+            except Exception:
+                pass
+            self._driverkit_keys.clear()
+            self.held_modifiers.clear()
+            self.held_buttons.clear()
+            self._released = True
+            self._close_all_backends()
+            return
+        self._released = True
         for key in list(self.held_modifiers):
             try:
                 self.key(key, False)
@@ -930,13 +1245,7 @@ class LoginWindowInput(MacInput):
                 self._pointer_report()
             except Exception:
                 pass
-        try:
-            if self.backend == 'corehid':
-                self.native.lib.zmb_corehid_input_close()
-            elif self.backend in ('userdevice', 'iohidsystem', 'quartz'):
-                self.native.lib.zmb_login_input_close()
-        except Exception:
-            pass
+        self._close_all_backends()
 
 
 class MacClipboard:
@@ -1039,6 +1348,8 @@ class NativeStreamerLibrary:
         self.lib.zmb_display_list_json.restype = ctypes.c_void_p
         self.lib.zmb_string_free.argtypes = [ctypes.c_void_p]
         self.lib.zmb_string_free.restype = None
+        self.lib.zmb_streamer_build_version.argtypes = []
+        self.lib.zmb_streamer_build_version.restype = ctypes.c_void_p
         # LoginWindow production input is an Apple-managed CoreHID virtual
         # keyboard/pointer compiled into the same signed native payload.
         self.lib.zmb_corehid_input_open.argtypes = []
@@ -1067,8 +1378,18 @@ class NativeStreamerLibrary:
         self.lib.zmb_login_input_key.restype = ctypes.c_int32
         self.lib.zmb_login_input_pointer.argtypes = [ctypes.c_uint32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, ctypes.c_uint32]
         self.lib.zmb_login_input_pointer.restype = ctypes.c_int32
+        self.lib.zmb_login_input_pointer_relative.argtypes = [ctypes.c_int32, ctypes.c_int32, ctypes.c_uint8, ctypes.c_uint32]
+        self.lib.zmb_login_input_pointer_relative.restype = ctypes.c_int32
+        self.lib.zmb_login_input_button.argtypes = [ctypes.c_int32, ctypes.c_int32, ctypes.c_uint32]
+        self.lib.zmb_login_input_button.restype = ctypes.c_int32
         self.lib.zmb_login_input_scroll.argtypes = [ctypes.c_int32, ctypes.c_int32, ctypes.c_uint32]
         self.lib.zmb_login_input_scroll.restype = ctypes.c_int32
+        self.lib.zmb_login_input_quartz_key.argtypes = [ctypes.c_uint16, ctypes.c_int32, ctypes.c_uint32]
+        self.lib.zmb_login_input_quartz_key.restype = ctypes.c_int32
+        self.lib.zmb_login_input_quartz_pointer.argtypes = [ctypes.c_uint32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, ctypes.c_uint32]
+        self.lib.zmb_login_input_quartz_pointer.restype = ctypes.c_int32
+        self.lib.zmb_login_input_quartz_scroll.argtypes = [ctypes.c_int32, ctypes.c_int32, ctypes.c_uint32]
+        self.lib.zmb_login_input_quartz_scroll.restype = ctypes.c_int32
 
     def _owned_string(self, fn) -> str:
         pointer = fn()
@@ -1078,6 +1399,10 @@ class NativeStreamerLibrary:
             return ctypes.string_at(pointer).decode('utf-8', 'replace')
         finally:
             self.lib.zmb_string_free(pointer)
+
+    def build_version(self) -> str:
+        value = self._owned_string(self.lib.zmb_streamer_build_version)
+        return value or 'unknown'
 
     def ensure_virtual_display(self, width: int, height: int) -> int:
         display_id = int(self.lib.zmb_virtual_display_ensure(int(width), int(height)))
@@ -1134,7 +1459,31 @@ def available_displays(*, log=print) -> list[dict]:
         return []
 
 
-def _read_exact_file(stream, size: int, *, timeout: float | None = 15.0, disconnect_sock: ssl.SSLSocket | None = None, idle_callback=None) -> bytes:
+def _prepare_video_capture_display(native: NativeStreamerLibrary, display_id: int, target_width: int, target_height: int, *, prelogin: bool, log=print) -> int:
+    """Select the native capture display without touching Aqua-only virtual state from LoginWindow.
+
+    The pre-login helper is a separate LoginWindow process after reboot. It does
+    not own the Aqua virtual-display singleton and must never call the Swift
+    release path, which dispatches synchronously to the app main queue.
+    """
+    capture_display_id = max(0, int(display_id))
+    virtual_mode = int(target_width) > 0 and int(target_height) > 0
+    if virtual_mode:
+        if prelogin:
+            raise RuntimeError('virtual display mode is unavailable at macOS LoginWindow')
+        capture_display_id = native.ensure_virtual_display(int(target_width), int(target_height))
+        log(f'[video] virtual remote desktop ready: {target_width}x{target_height} display_id={capture_display_id}')
+    elif prelogin:
+        # Critical: do not call zmb_virtual_display_release() from LoginWindow.
+        # Virtual display ownership exists only in the Aqua server process.
+        log(f'[video] LoginWindow physical display selected: display_id={capture_display_id or "auto"}')
+    else:
+        native.release_virtual_display()
+        log(f'[video] physical display mode selected: display_id={capture_display_id or "auto"}')
+    return capture_display_id
+
+
+def _read_exact_file(stream, size: int, *, timeout: float | None = 15.0, disconnect_sock: ssl.SSLSocket | None = None, cancel_event: threading.Event | None = None, idle_callback=None) -> bytes:
     """Read native pipe bytes while also noticing a closed video client.
 
     Reconfiguration closes the old TLS video socket before opening the next one.
@@ -1147,6 +1496,8 @@ def _read_exact_file(stream, size: int, *, timeout: float | None = 15.0, disconn
     deadline = None if timeout is None else time.monotonic() + max(0.5, float(timeout))
     fd = stream.fileno()
     while len(out) < size:
+        if cancel_event is not None and cancel_event.is_set():
+            raise ConnectionError('video session cancelled for replacement')
         if idle_callback is not None:
             idle_callback()
         if deadline is None:
@@ -1160,6 +1511,8 @@ def _read_exact_file(stream, size: int, *, timeout: float | None = 15.0, disconn
         if disconnect_sock is not None:
             watchers.append(disconnect_sock)
         readable, _, _ = select.select(watchers, [], [], wait_for)
+        if cancel_event is not None and cancel_event.is_set():
+            raise ConnectionError('video session cancelled for replacement')
         if not readable:
             continue
         if disconnect_sock is not None and disconnect_sock in readable:
@@ -1187,43 +1540,69 @@ def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, prelogin_lea
     log('[control] connected')
     if prelogin:
         log('[control] initializing LoginWindow native input')
+        last_pointer_move_log_at = 0.0
+
+        def emit_input_state(row: dict[str, object]) -> None:
+            backend = str(row.get('backend') or '')
+            keyboard = str(row.get('keyboard') or '')
+            pointer = str(row.get('pointer') or '')
+            open_rc = LoginWindowInput._rc_text(row.get('open_rc'))
+            selected = bool(row.get('selected'))
+            result = str(row.get('result') or '')
+            reason = str(row.get('reason') or '')
+            log(
+                '[prelogin/input] '
+                f'backend={backend} open={open_rc} result={result} '
+                f'keyboard={keyboard} pointer={pointer} selected={int(selected)}'
+            )
+            try:
+                sock.sendall(pack_json(SESSION_STATE, make_input_probe_state(
+                    backend, result=result, keyboard=keyboard, pointer=pointer,
+                    open_rc=open_rc, selected=selected, reason=reason,
+                )))
+            except OSError as exc:
+                raise ConnectionError('client disconnected while receiving pre-login input state') from exc
+
+        def emit_input_event(event: dict[str, object]) -> None:
+            nonlocal last_pointer_move_log_at
+            channel = str(event.get('channel') or '')
+            action = str(event.get('action') or '')
+            backend = str(event.get('backend') or '')
+            result = str(event.get('result') or '')
+            rc = LoginWindowInput._rc_text(event.get('rc'))
+            detail = str(event.get('detail') or '')
+            if channel == 'pointer' and action == 'move' and result in ('DISPATCH_OK', 'DISPATCH_ACCEPTED_UNVERIFIED'):
+                now = time.monotonic()
+                if now - last_pointer_move_log_at < 0.5:
+                    return
+                last_pointer_move_log_at = now
+            log(
+                '[prelogin/input-event] '
+                f'channel={channel} action={action} backend={backend} result={result} rc={rc}'
+                + (f' detail={detail}' if detail else '')
+            )
+            try:
+                sock.sendall(pack_json(SESSION_STATE, make_input_event_state(
+                    channel, action, backend, result=result, rc=rc, detail=detail,
+                )))
+            except OSError as exc:
+                raise ConnectionError('client disconnected while receiving pre-login input event state') from exc
+
         inp = LoginWindowInput()
+        set_state_callback = getattr(inp, 'set_state_callback', None)
+        if callable(set_state_callback):
+            set_state_callback(emit_input_state, replay=True)
+        else:
+            probe_states = getattr(inp, 'input_probe_states', None)
+            if callable(probe_states):
+                for row in probe_states():
+                    emit_input_state(row)
+        set_event_callback = getattr(inp, 'set_event_callback', None)
+        if callable(set_event_callback):
+            set_event_callback(emit_input_event)
         backend_summary = getattr(inp, 'backend_summary', None)
         backend_name = backend_summary() if callable(backend_summary) else type(inp).__name__
         log(f'[control] LoginWindow input backend: {backend_name}')
-        probe_states = getattr(inp, 'input_probe_states', None)
-        if callable(probe_states):
-            for row in probe_states():
-                keyboard = str(row.get('keyboard') or '')
-                pointer = str(row.get('pointer') or '')
-                open_rc = LoginWindowInput._rc_text(row.get('open_rc'))
-                selected = bool(row.get('selected'))
-                if keyboard == 'PASS' and pointer == 'PASS':
-                    result = 'PASS'
-                elif keyboard == 'PASS':
-                    result = 'KEYBOARD_ONLY'
-                elif str(row.get('keyboard')) == 'FAIL_OPEN':
-                    result = 'FAIL_OPEN'
-                else:
-                    result = 'FAIL'
-                reason = '; '.join(filter(None, [
-                    str(row.get('keyboard_detail') or ''),
-                    str(row.get('pointer_detail') or ''),
-                    str(row.get('selection_error') or ''),
-                ]))
-                log(
-                    '[prelogin/input-probe] '
-                    f'backend={row.get("backend")} open={open_rc} '
-                    f'keyboard={keyboard} pointer={pointer} selected={int(selected)}'
-                )
-                try:
-                    sock.sendall(pack_json(SESSION_STATE, make_input_probe_state(
-                        str(row.get('backend') or ''),
-                        result=result, keyboard=keyboard, pointer=pointer,
-                        open_rc=open_rc, selected=selected, reason=reason,
-                    )))
-                except OSError:
-                    raise ConnectionError('client disconnected while receiving pre-login input matrix')
         clipboard = None
     else:
         log('[control] initializing CoreGraphics input')
@@ -1234,6 +1613,9 @@ def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, prelogin_lea
     sock.settimeout(0.25)
     try:
         while True:
+            drain_async = getattr(inp, 'drain_async_events', None)
+            if callable(drain_async):
+                drain_async()
             if prelogin_lease is not None and prelogin_lease.handoff_event.is_set():
                 payload = make_handoff_state(
                     user=prelogin_lease.handoff_user, generation=prelogin_lease.generation,
@@ -1291,7 +1673,7 @@ def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, prelogin_lea
         log('[control] disconnected')
 
 
-def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int, display_id: int = 0, target_width: int = 0, target_height: int = 0, *, prelogin: bool = False, log=print, release_ownership=None) -> None:
+def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int, display_id: int = 0, target_width: int = 0, target_height: int = 0, *, prelogin: bool = False, log=print, release_ownership=None, cancel_event: threading.Event | None = None) -> None:
     """Stream H.264 from ScreenCaptureKit running inside the main app process.
 
     The native Swift code is a dylib loaded with ctypes, not a child executable.
@@ -1314,6 +1696,11 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
             'then fully quit and reopen the app. The server will not request permission from a remote Connect.'
         )
     native = NativeStreamerLibrary()
+    native_version = native.build_version()
+    app_version = runtime_version()
+    if native_version != app_version:
+        raise RuntimeError(f'native streamer build version mismatch: app={app_version} dylib={native_version}')
+    log(f'[video/native] build version verified: {native_version}')
     if prelogin:
         # LoginWindow always exposes the physical macOS login screen.  A user's
         # saved 2K/4K preference is intentionally deferred until Aqua takes over.
@@ -1323,15 +1710,9 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
         max_width = min(max(640, int(max_width)), 1920)
         fps = min(max(1.0, float(fps)), 30.0)
         bitrate = min(max(1_000_000, int(bitrate)), 8_000_000)
-    capture_display_id = max(0, int(display_id))
-    virtual_mode = int(target_width) > 0 and int(target_height) > 0
-    if virtual_mode:
-        capture_display_id = native.ensure_virtual_display(int(target_width), int(target_height))
-        log(f'[video] virtual remote desktop ready: {target_width}x{target_height} display_id={capture_display_id}')
-    else:
-        # Auto/native mode returns to the physical Mac display arrangement.
-        native.release_virtual_display()
-        log(f'[video] physical display mode selected: display_id={capture_display_id or "auto"}')
+    capture_display_id = _prepare_video_capture_display(
+        native, display_id, target_width, target_height, prelogin=prelogin, log=log,
+    )
     set_active_input_display(capture_display_id)
 
     data_r, data_w = os.pipe()
@@ -1381,7 +1762,11 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
                         if len(native_messages) > 20:
                             del native_messages[:-20]
                         if prelogin and line.startswith('prelogin-stage='):
-                            session_events.put(make_pipeline_state(line.split('=', 1)[1]))
+                            stage = line.split('=', 1)[1]
+                            if stage in PIPELINE_STAGES:
+                                session_events.put(make_pipeline_state(stage))
+                            else:
+                                session_events.put(make_capture_progress_state(stage))
                         elif prelogin and line.startswith('prelogin-backend='):
                             session_events.put(make_capture_backend_state(line.split('=', 1)[1]))
                         elif prelogin and line.startswith('prelogin-failure='):
@@ -1403,8 +1788,12 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
     runner = threading.Thread(target=run_native, name='zmb-native-video', daemon=True)
     logger = threading.Thread(target=log_worker, name='zmb-native-video-log', daemon=True)
     log('[video] starting in-process ScreenCaptureKit + VideoToolbox H.264 stream')
-    runner.start()
+    if prelogin:
+        sock.sendall(pack_json(SESSION_STATE, make_capture_progress_state('native-runner-starting')))
     logger.start()
+    runner.start()
+    if prelogin:
+        sock.sendall(pack_json(SESSION_STATE, make_capture_progress_state('native-runner-started')))
 
     sock.settimeout(10.0)
     frames = 0
@@ -1416,7 +1805,7 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
             while True:
                 startup_timeout = VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS if frames == 0 else None
                 try:
-                    header = _read_exact_file(stream, 4, timeout=startup_timeout, disconnect_sock=sock, idle_callback=flush_pipeline_events)
+                    header = _read_exact_file(stream, 4, timeout=startup_timeout, disconnect_sock=sock, cancel_event=cancel_event, idle_callback=flush_pipeline_events)
                 except EOFError:
                     runner.join(timeout=0.25)
                     code = result.get('code', -999)
@@ -1434,7 +1823,7 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
                 if not (1 <= size <= 16 * 1024 * 1024):
                     raise RuntimeError(f'invalid native H.264 access-unit size: {size}')
                 try:
-                    payload = _read_exact_file(stream, size, timeout=startup_timeout, disconnect_sock=sock, idle_callback=flush_pipeline_events)
+                    payload = _read_exact_file(stream, size, timeout=startup_timeout, disconnect_sock=sock, cancel_event=cancel_event, idle_callback=flush_pipeline_events)
                 except TimeoutError as exc:
                     if frames == 0:
                         detail = ' | '.join(native_messages[-6:]) or 'no native capture diagnostics'
@@ -1461,30 +1850,38 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
                     stat_frames = 0
                     stat_bytes = 0
     finally:
-        try:
-            native.lib.zmb_streamer_stop(handle)
-        except Exception:
-            pass
-        # The native streamer is now logically stopped.  Do not keep the global
-        # video-session ownership while Swift drains/cancels its background work:
-        # a slow FileHandle/VideoToolbox cleanup must not block the next client.
+        # Release the Python video-owner lock before asking Swift to tear down.
+        # zmb_streamer_stop must never be able to hold the next TLS video session
+        # hostage if ScreenCaptureKit/VideoToolbox cleanup is slow.
         if release_ownership is not None:
             try:
                 release_ownership()
             except Exception as exc:
                 log(f'[video] ownership release warning: {type(exc).__name__}: {exc}')
-        runner.join(timeout=3.0)
         try:
-            native.lib.zmb_streamer_destroy(handle)
-        except Exception:
-            pass
-        # These descriptors are owned by Swift FileHandle and normally close
-        # when runBlocking returns. Close defensively if they are still open.
-        for fd in (native_data_w, native_log_w):
+            native.lib.zmb_streamer_stop(handle)
+        except Exception as exc:
+            log(f'[video] native stop warning: {type(exc).__name__}: {exc}')
+        runner.join(timeout=6.0)
+
+        def destroy_after_runner() -> None:
             try:
-                os.close(fd)
-            except OSError:
-                pass
+                if runner.is_alive():
+                    runner.join()
+                native.lib.zmb_streamer_destroy(handle)
+            except Exception as exc:
+                log(f'[video] late native destroy warning: {type(exc).__name__}: {exc}')
+            for fd in (native_data_w, native_log_w):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+        if runner.is_alive():
+            log('[video] native runner still unwinding after 6s; deferring destroy without blocking replacement')
+            threading.Thread(target=destroy_after_runner, name='zmb-native-video-destroy', daemon=True).start()
+        else:
+            destroy_after_runner()
         logger.join(timeout=1.0)
         log('[video] disconnected')
 
@@ -1767,7 +2164,7 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
                 sock.sendall(pack_packet(AUTH_FAIL, str(exc).encode('utf-8', 'replace')))
                 log(f'[prelogin/session] video token rejected for {peer_ip}: {exc}')
                 return
-        auth_ok = {'role': role, 'server': 'ZorinMac-Bridge', 'prelogin': bool(prelogin)}
+        auth_ok = {'role': role, 'server': 'ZorinMac-Bridge', 'prelogin': bool(prelogin), 'runtime_version': runtime_version()}
         if role == 'desktop':
             if prelogin:
                 if prelogin_control_lease is None:
@@ -1811,7 +2208,7 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
                 f'[video] client profile={quality!r} max_width={max_width} '
                 f'target={target_width}x{target_height} fps={fps:g} bitrate={bitrate} display_id={display_id}'
             )
-            _acquire_video_session(sock, log=log)
+            video_cancel_event = _acquire_video_session(sock, log=log)
             video_ownership_released = False
             if prelogin:
                 # Close the AUTH -> native-lock race. If the control owner vanished
@@ -1831,7 +2228,7 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
             try:
                 video_session(
                     sock, fps, max_width, bitrate, display_id, target_width, target_height,
-                    prelogin=prelogin, log=log, release_ownership=release_video_ownership,
+                    prelogin=prelogin, log=log, release_ownership=release_video_ownership, cancel_event=video_cancel_event,
                 )
             finally:
                 release_video_ownership()

@@ -67,9 +67,8 @@ if [ ! -d "$SOURCE" ]; then
   exit 1
 fi
 
-# Aqua-only releases may use the free ad-hoc transport path. Full reboot-to-
-# LoginWindow remote login requires the Developer ID + provisioning path with
-# both Apple-managed pre-login capabilities.
+# The app transport may use the stable local identity. LoginWindow keyboard
+# and mouse are provided separately by the bundled driver-backed virtual HID.
 codesign --verify --deep --strict --verbose=2 "$SOURCE"
 ACTUAL_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$SOURCE/Contents/Info.plist" 2>/dev/null || true)"
 if [ "$ACTUAL_BUNDLE_ID" != "$BUNDLE_ID" ]; then
@@ -113,8 +112,8 @@ if [ "$SIGNING_MODE" = "developer-id" ]; then
   echo "Developer ID signature + provisioning profile with managed pre-login capabilities were preserved."
   echo "Pre-login still requires a physical LoginWindow capability probe before it can become VERIFIED."
 else
-  echo "A free per-Mac stable ad-hoc code identity was applied. Normal Aqua Desktop remains supported."
-  echo "Reboot-to-LoginWindow remote login is NOT available in this signing mode."
+  echo "A stable per-Mac local code identity was applied. Normal Aqua Desktop remains supported."
+  echo "LoginWindow input is configured by unattended setup through the bundled virtual HID driver."
 fi
 echo "The app was NOT started automatically."
 

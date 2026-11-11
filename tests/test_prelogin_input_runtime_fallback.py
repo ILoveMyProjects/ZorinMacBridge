@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from pathlib import Path
 import sys
+import threading
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -9,9 +11,11 @@ import mac_server
 
 
 class FakeLib:
-    def __init__(self, *, corehid_rc=-11, opens=None):
+    def __init__(self, *, corehid_rc=-11, opens=None, key_rc=None, pointer_rc=None):
         self.corehid_rc = int(corehid_rc)
-        self.opens = {1: -101, 2: -102, 3: 0, **(opens or {})}
+        self.opens = {1: -101, 2: -102, 3: -103, **(opens or {})}
+        self.key_rc = {1: 0, 2: 0, 3: 0, **(key_rc or {})}
+        self.pointer_rc = {1: 0, 2: 0, 3: 0, **(pointer_rc or {})}
         self.active_backend = 0
         self.calls = []
 
@@ -30,10 +34,6 @@ class FakeLib:
         self.calls.append(('corehid_pointer', int(x), int(y), int(buttons), int(wheel)))
         return 0
 
-    def zmb_login_input_open(self):
-        self.calls.append(('legacy_open_auto',))
-        return 0
-
     def zmb_login_input_open_backend(self, backend):
         backend = int(backend)
         rc = int(self.opens.get(backend, -199))
@@ -41,38 +41,82 @@ class FakeLib:
         self.active_backend = backend if rc == 0 else 0
         return rc
 
-    def zmb_login_input_backend(self):
-        self.calls.append(('legacy_backend',))
-        return self.active_backend
-
     def zmb_login_input_close(self):
         self.calls.append(('legacy_close',))
         self.active_backend = 0
 
     def zmb_login_input_hid_key(self, usage, down):
-        self.calls.append(('userdevice_key', int(usage), int(down)))
-        return 0
+        rc = int(self.key_rc.get(1, 0))
+        self.calls.append(('userdevice_key', int(usage), int(down), rc))
+        return rc
 
     def zmb_login_input_hid_pointer(self, x, y, buttons, wheel):
-        self.calls.append(('userdevice_pointer', int(x), int(y), int(buttons), int(wheel)))
-        return 0
+        rc = int(self.pointer_rc.get(1, 0))
+        self.calls.append(('userdevice_pointer', int(x), int(y), int(buttons), int(wheel), rc))
+        return rc
 
     def zmb_login_input_key(self, code, down, flags, modifier):
         flags = int(getattr(flags, 'value', flags))
-        self.calls.append(('legacy_key', self.active_backend, int(code), int(down), flags, int(modifier)))
-        return 0
+        rc = int(self.key_rc.get(self.active_backend, 0))
+        self.calls.append(('legacy_key', self.active_backend, int(code), int(down), flags, int(modifier), rc))
+        return rc
 
     def zmb_login_input_pointer(self, event_type, x, y, button, flags):
         flags = int(getattr(flags, 'value', flags))
         event_type = int(getattr(event_type, 'value', event_type))
-        self.calls.append(('legacy_pointer', self.active_backend, event_type, int(x), int(y), int(button), flags))
-        return 0
+        rc = int(self.pointer_rc.get(self.active_backend, 0))
+        self.calls.append(('legacy_pointer', self.active_backend, event_type, int(x), int(y), int(button), flags, rc))
+        return rc
+
+    def zmb_login_input_pointer_relative(self, dx, dy, buttons, flags):
+        flags = int(getattr(flags, 'value', flags))
+        buttons = int(getattr(buttons, 'value', buttons))
+        rc = int(self.pointer_rc.get(self.active_backend, 0))
+        self.calls.append(('legacy_pointer_relative', self.active_backend, int(dx), int(dy), buttons, flags, rc))
+        return rc
+
+    def zmb_login_input_button(self, button, down, flags):
+        flags = int(getattr(flags, 'value', flags))
+        rc = int(self.pointer_rc.get(self.active_backend, 0))
+        self.calls.append(('legacy_button', self.active_backend, int(button), int(down), flags, rc))
+        return rc
 
     def zmb_login_input_scroll(self, dx, dy, flags):
         flags = int(getattr(flags, 'value', flags))
-        self.calls.append(('legacy_scroll', self.active_backend, int(dx), int(dy), flags))
-        return 0
+        rc = int(self.pointer_rc.get(self.active_backend, 0))
+        self.calls.append(('legacy_scroll', self.active_backend, int(dx), int(dy), flags, rc))
+        return rc
 
+    def zmb_login_input_quartz_key(self, code, down, flags):
+        flags = int(getattr(flags, 'value', flags))
+        rc = int(self.key_rc.get(3, 0))
+        self.calls.append(('quartz_key_direct', int(code), int(down), flags, rc))
+        return rc
+
+    def zmb_login_input_quartz_pointer(self, event_type, x, y, button, flags):
+        flags = int(getattr(flags, 'value', flags))
+        event_type = int(getattr(event_type, 'value', event_type))
+        rc = int(self.pointer_rc.get(3, 0))
+        self.calls.append(('quartz_pointer_direct', event_type, int(x), int(y), int(button), flags, rc))
+        return rc
+
+    def zmb_login_input_quartz_scroll(self, dx, dy, flags):
+        flags = int(getattr(flags, 'value', flags))
+        rc = int(self.pointer_rc.get(3, 0))
+        self.calls.append(('quartz_scroll_direct', int(dx), int(dy), flags, rc))
+        return rc
+
+
+
+
+class FakeVirtualHID:
+    def __init__(self, open_rc=-211):
+        self.open_rc=int(open_rc); self.last_error='test virtual HID unavailable' if open_rc else ''; self.calls=[]; self.ready=open_rc==0
+    def open(self, *, wait_seconds=2.5): self.calls.append(('open',float(wait_seconds))); self.ready=self.open_rc==0; return self.open_rc
+    def close(self): self.calls.append(('close',)); self.ready=False
+    def release_all(self): self.calls.append(('release_all',))
+    def post_keyboard(self, modifiers, usages): self.calls.append(('keyboard',int(modifiers),tuple(sorted(usages)))); return 0 if self.ready else -213
+    def post_pointing(self, buttons, dx=0, dy=0, wheel_y=0, wheel_x=0): self.calls.append(('pointing',int(buttons),int(dx),int(dy),int(wheel_y),int(wheel_x))); return 0 if self.ready else -213
 
 class FakeNative:
     def __init__(self, lib):
@@ -84,88 +128,178 @@ def fake_mac_input_init(self):
     self.held_modifiers = set()
 
 
-def run_case(lib, outcomes):
+def fake_bounds(self):
+    return mac_server.CGRect(mac_server.CGPoint(0, 0), mac_server.CGSize(1680, 1050))
+
+
+def make_input(lib, states, *, vhid_rc=-211):
     mac_server.NativeStreamerLibrary = lambda: FakeNative(lib)
-    mac_server.LoginWindowInput._probe_keyboard_delivery = lambda self, backend: (
-        outcomes.get(backend, ('FAIL', 'FAIL'))[0], f'{backend}-keyboard-test'
-    )
-    mac_server.LoginWindowInput._probe_pointer_delivery = lambda self, backend: (
-        outcomes.get(backend, ('FAIL', 'FAIL'))[1], f'{backend}-pointer-test'
-    )
-    return mac_server.LoginWindowInput()
+    fake_vhid = FakeVirtualHID(vhid_rc)
+    mac_server.DriverKitVirtualHIDClient = lambda: fake_vhid
+    inp = mac_server.LoginWindowInput()
+    inp._test_virtual_hid = fake_vhid
+    inp.set_state_callback(states.append, replay=True)
+    return inp
 
 
 def run():
     original_init = mac_server.MacInput.__init__
+    original_bounds = mac_server.MacInput._bounds
     original_native = mac_server.NativeStreamerLibrary
-    original_keyboard_probe = mac_server.LoginWindowInput._probe_keyboard_delivery
-    original_pointer_probe = mac_server.LoginWindowInput._probe_pointer_delivery
+    original_virtual_hid = mac_server.DriverKitVirtualHIDClient
+    original_flags = mac_server.MacInput._combined_session_flags
+    original_cursor = mac_server.MacInput._cursor_location
     try:
         mac_server.MacInput.__init__ = fake_mac_input_init
+        mac_server.MacInput._bounds = fake_bounds
+        # These calls were the old critical-startup delivery proof. They must
+        # never run while constructing LoginWindowInput anymore.
+        mac_server.MacInput._combined_session_flags = lambda self: (_ for _ in ()).throw(AssertionError('flags probe called'))
+        mac_server.MacInput._cursor_location = lambda self: (_ for _ in ()).throw(AssertionError('cursor probe called'))
 
-        # Exact real-Mac failure from 0.15.29+: CoreHID returns -11. The matrix
-        # must prove IOHIDUserDevice delivery before selecting it.
-        lib = FakeLib(corehid_rc=-11, opens={1: 0, 2: 0, 3: 0})
-        inp = run_case(lib, {
-            'userdevice': ('PASS', 'PASS'),
-            'iohidsystem': ('FAIL', 'FAIL'),
-            'quartz': ('FAIL', 'FAIL'),
-        })
-        assert inp.backend == 'userdevice'
+        # Preferred path: driver-backed virtual keyboard/mouse is selected
+        # before every synthetic LoginWindow route.
+        states0=[]
+        lib0=FakeLib(corehid_rc=-11, opens={2:0,1:0,3:0})
+        inp0=make_input(lib0,states0,vhid_rc=0)
+        assert inp0.backend=='driverkit'
+        assert not any(c[0] in ('corehid_open','legacy_open_backend') for c in lib0.calls)
+        inp0.key('Shift_L',True); inp0.key('a',True); inp0.move(.55,.45)
+        assert ('keyboard',2,()) in inp0._test_virtual_hid.calls
+        assert ('keyboard',2,(4,)) in inp0._test_virtual_hid.calls
+        assert any(c[0]=='pointing' and (c[2] or c[3]) for c in inp0._test_virtual_hid.calls)
+        assert any(r['backend']=='driverkit' and r['result']=='ACTIVE' for r in states0)
+        inp0.release_all()
+
+        # Real historical CoreHID failure (-11) must fall directly to root
+        # IOHIDSystem before IOHIDUserDevice and become usable immediately.
+        states = []
+        lib = FakeLib(corehid_rc=-11, opens={2: 0, 1: 0, 3: 0})
+        inp = make_input(lib, states)
+        assert inp.backend == 'iohidsystem'
         assert inp.corehid_open_rc == -11
-        assert inp.legacy_backend == 1
-        assert 'delivery-probed' in inp.backend_summary()
-        assert any(r['backend'] == 'corehid' and r['keyboard'] == 'FAIL_OPEN' for r in inp.input_probe_results)
-        assert any(r['backend'] == 'userdevice' and r['selected'] for r in inp.input_probe_results)
+        assert inp.legacy_backend == 2
+        assert [c for c in lib.calls if c[0] in ('corehid_open', 'legacy_open_backend')] == [
+            ('corehid_open',), ('legacy_open_backend', 2, 0)
+        ]
+        assert states[-1]['backend'] == 'iohidsystem'
+        assert states[-1]['result'] == 'OPEN_READY'
+        assert states[-1]['selected'] is True
         inp.key('a', True)
-        inp.key('a', False)
-        assert ('userdevice_key', 0x04, 1) in lib.calls
-        assert ('userdevice_key', 0x04, 0) in lib.calls
+        assert any(c[:4] == ('legacy_key', 2, 0, 1) for c in lib.calls)
+        assert any(s['backend'] == 'iohidsystem' and s['result'] == 'ACTIVE' and s['keyboard'] == 'DISPATCH_OK' for s in states)
         inp.release_all()
 
-        # A backend that opens but fails delivery MUST NOT hide the next option.
-        lib2 = FakeLib(corehid_rc=-11, opens={1: 0, 2: 0, 3: 0})
-        inp2 = run_case(lib2, {
-            'userdevice': ('FAIL', 'FAIL'),
-            'iohidsystem': ('PASS', 'PASS'),
-            'quartz': ('PASS', 'PASS'),
-        })
+        # A real dispatch error must not kill Desktop/video. Close the failed
+        # backend, open the next candidate and retry the SAME key once.
+        states2 = []
+        lib2 = FakeLib(corehid_rc=-11, opens={2: 0, 1: 0, 3: 0}, key_rc={2: -700, 1: 0})
+        inp2 = make_input(lib2, states2)
         assert inp2.backend == 'iohidsystem'
-        assert inp2.legacy_backend == 2
         inp2.key('a', True)
-        assert any(call[:4] == ('legacy_key', 2, 0, 1) for call in lib2.calls)
+        assert inp2.backend == 'userdevice'
+        assert any(c[:4] == ('legacy_key', 2, 0, 1) and c[-1] == -700 for c in lib2.calls)
+        assert ('legacy_open_backend', 1, 0) in lib2.calls
+        assert any(c[:3] == ('userdevice_key', 0x04, 1) and c[-1] == 0 for c in lib2.calls)
+        assert any(s['backend'] == 'iohidsystem' and s['result'] == 'DISPATCH_FAIL' for s in states2)
+        assert any(s['backend'] == 'userdevice' and s['result'] == 'OPEN_READY' and s['selected'] for s in states2)
+        inp2.release_all()
 
-        # Quartz is only selected if all earlier native paths fail their actual
-        # delivery proof, not merely because their open() failed/succeeded.
-        lib3 = FakeLib(corehid_rc=-11, opens={1: 0, 2: 0, 3: 0})
-        inp3 = run_case(lib3, {
-            'userdevice': ('FAIL', 'FAIL'),
-            'iohidsystem': ('FAIL', 'FAIL'),
-            'quartz': ('PASS', 'PASS'),
-        })
-        assert inp3.backend == 'quartz'
-        assert inp3.legacy_backend == 3
-        assert 'kCGSessionEventTap' in inp3.backend_summary()
+        # IOHIDSystem pointer movement now uses relative cursor movement, which
+        # avoids the absolute kIOHIDSetCursorPosition privilege path seen on the
+        # physical macOS 27 LoginWindow test.
+        states3 = []
+        lib3 = FakeLib(corehid_rc=-11, opens={2: 0, 1: 0, 3: 0}, pointer_rc={2: 0, 1: 0, 3: 0})
+        inp3 = make_input(lib3, states3)
+        inp3.move(0.25, 0.75)
+        assert inp3.backend == 'iohidsystem'
+        assert any(c[0] == 'legacy_pointer_relative' and c[1] == 2 and c[-1] == 0 for c in lib3.calls)
+        inp3.release_all()
 
-        # If no backend proves keyboard delivery, constructor remains non-fatal
-        # so LoginWindow video/control can stay alive and the matrix is visible.
-        lib4 = FakeLib(corehid_rc=-11, opens={1: -1, 2: -2, 3: 0})
-        inp4 = run_case(lib4, {'quartz': ('FAIL', 'PASS')})
+        # If IOHIDSystem pointer dispatch still fails, only POINTER falls back
+        # to Quartz, and Quartz must run OUTSIDE the control thread.  A successful
+        # CGEventPost return is diagnostic-only because LoginWindow delivery is
+        # not independently observable.
+        states3b = []
+        events3b = []
+        lib3b = FakeLib(corehid_rc=-11, opens={2: 0, 1: 0, 3: 0}, pointer_rc={2: -701, 3: 0})
+        inp3b = make_input(lib3b, states3b)
+        inp3b.set_event_callback(events3b.append)
+        inp3b.move(0.25, 0.75)
+        assert inp3b.backend == 'iohidsystem'
+        assert inp3b._channel_override['pointer'] == 'quartz-async'
+        assert inp3b._channel_override['keyboard'] == ''
+        assert any(c[0] == 'legacy_pointer_relative' and c[-1] == -701 for c in lib3b.calls)
+        deadline = time.monotonic() + 1.0
+        while not any(c[0] == 'quartz_pointer_direct' for c in lib3b.calls) and time.monotonic() < deadline:
+            time.sleep(0.005)
+        inp3b.drain_async_events()
+        assert any(c[0] == 'quartz_pointer_direct' and c[-1] == 0 for c in lib3b.calls)
+        assert any(e['channel'] == 'pointer' and e['backend'] == 'quartz-async' and e['result'] == 'DISPATCH_ACCEPTED_UNVERIFIED' for e in events3b)
+        inp3b.key('a', True)
+        assert any(c[:4] == ('legacy_key', 2, 0, 1) and c[-1] == 0 for c in lib3b.calls)
+        inp3b.release_all()
+
+        # Regression for the physical 0.15.39 failure: a Quartz pointer call may
+        # never return.  The move call must still return immediately, the next
+        # keyboard packet must stay on IOHIDSystem, and a bounded timeout must be
+        # reported without killing the control path.
+        states3c = []
+        events3c = []
+        lib3c = FakeLib(corehid_rc=-11, opens={2: 0, 1: 0, 3: 0}, pointer_rc={2: -536870207, 3: 0})
+        gate = threading.Event()
+        original_quartz_pointer = lib3c.zmb_login_input_quartz_pointer
+
+        def hanging_quartz_pointer(*args):
+            lib3c.calls.append(('quartz_pointer_hang_enter',))
+            gate.wait(2.0)
+            return original_quartz_pointer(*args)
+
+        lib3c.zmb_login_input_quartz_pointer = hanging_quartz_pointer
+        inp3c = make_input(lib3c, states3c)
+        inp3c.QUARTZ_ASYNC_TIMEOUT_SECONDS = 0.05
+        inp3c.set_event_callback(events3c.append)
+        started = time.monotonic()
+        inp3c.move(0.25, 0.75)
+        assert time.monotonic() - started < 0.04, 'pointer fallback blocked the control thread'
+        assert any(c[0] == 'quartz_pointer_hang_enter' for c in lib3c.calls)
+
+        # This is the key acceptance: keyboard is processed while Quartz pointer
+        # remains hung in a daemon worker.
+        inp3c.key('a', True)
+        assert any(c[:4] == ('legacy_key', 2, 0, 1) and c[-1] == 0 for c in lib3c.calls)
+        assert any(e['channel'] == 'keyboard' and e['backend'] == 'iohidsystem' and e['result'] == 'DISPATCH_OK' for e in events3c)
+
+        time.sleep(0.08)
+        inp3c.drain_async_events()
+        assert any(e['channel'] == 'pointer' and e['backend'] == 'quartz-async' and e['result'] == 'DISPATCH_TIMEOUT' for e in events3c)
+        assert inp3c._channel_override['pointer'] == 'quartz-disabled'
+        gate.set()
+        inp3c.release_all()
+
+        # If every exact backend fails to open, construction remains non-fatal
+        # so the proven LoginWindow video stays visible in view-only mode.
+        states4 = []
+        lib4 = FakeLib(corehid_rc=-11, opens={2: -2, 1: -1, 3: -3})
+        inp4 = make_input(lib4, states4)
         assert inp4.backend == 'unavailable'
-        assert len(inp4.input_probe_results) == 4
+        assert states4[-1]['backend'] == 'unavailable'
+        assert states4[-1]['result'] == 'UNAVAILABLE'
         try:
             inp4.key('a', True)
         except RuntimeError as exc:
-            assert 'delivery matrix' in str(exc)
+            assert 'backend activation' in str(exc)
         else:
             raise AssertionError('unavailable input event must report an error')
     finally:
         mac_server.MacInput.__init__ = original_init
+        mac_server.MacInput._bounds = original_bounds
         mac_server.NativeStreamerLibrary = original_native
-        mac_server.LoginWindowInput._probe_keyboard_delivery = original_keyboard_probe
-        mac_server.LoginWindowInput._probe_pointer_delivery = original_pointer_probe
+        mac_server.DriverKitVirtualHIDClient = original_virtual_hid
+        mac_server.MacInput._combined_session_flags = original_flags
+        mac_server.MacInput._cursor_location = original_cursor
 
 
 if __name__ == '__main__':
     run()
-    print('pre-login runtime input delivery-matrix tests: OK')
+    print('pre-login runtime input activation/failover tests: OK')

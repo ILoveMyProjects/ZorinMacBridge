@@ -24,6 +24,10 @@ PRELOGIN_PLIST = Path('/Library/LaunchAgents') / f'{PRELOGIN_LABEL}.plist'
 APP_PATH = Path('/Applications/ZorinMacBridge Server.app')
 APP_BIN = APP_PATH / 'Contents/MacOS/ZorinMacBridge Server'
 CAPABILITY_STATUS = Path('/Library/Application Support/ZorinMacBridge/Admin/prelogin-capability-status')
+VIRTUAL_HID_LABEL = 'com.ilovemyprojects.zorinmacbridge.virtualhid'
+VIRTUAL_HID_MANAGER = Path('/Applications/.Karabiner-VirtualHIDDevice-Manager.app/Contents/MacOS/Karabiner-VirtualHIDDevice-Manager')
+VIRTUAL_HID_DAEMON = Path('/Library/Application Support/org.pqrs/Karabiner-DriverKit-VirtualHIDDevice/Applications/Karabiner-VirtualHIDDevice-Daemon.app/Contents/MacOS/Karabiner-VirtualHIDDevice-Daemon')
+VIRTUAL_HID_EXTENSION_ID = 'org.pqrs.Karabiner-DriverKit-VirtualHIDDevice'
 
 
 def current_short_user() -> str:
@@ -184,6 +188,7 @@ def _prelogin_probe_state() -> dict[str, str | bool]:
         'prelogin_probe_present': bool(proof),
         'prelogin_probe_current': current,
         'prelogin_probe_ready': ready,
+        'prelogin_capture_proof_ready': bool(current and proof.get('capture_result') == 'PASS'),
         'prelogin_probe_overall': proof.get('overall', 'never'),
         'prelogin_probe_capture': proof.get('capture_result', 'unknown'),
         'prelogin_probe_input_result': input_result,
@@ -200,6 +205,13 @@ def admin_component_state() -> dict[str, str | bool]:
     files_ok = all(path.is_file() for path in (ADMIN_PLIST, UPDATE_PLIST, ADMIN_HELPER, ADMIN_GATEWAY, ADMIN_DAEMON))
     launch = _run(['/bin/launchctl', 'print', f'system/{ADMIN_LABEL}'], timeout=5)
     updater = _run(['/bin/launchctl', 'print', f'system/{UPDATE_LABEL}'], timeout=5)
+    virtual_hid_launch = _run(['/bin/launchctl', 'print', f'system/{VIRTUAL_HID_LABEL}'], timeout=5)
+    pqrs_virtual_hid_launch = _run(['/bin/launchctl', 'print', 'system/org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon'], timeout=5)
+    sysext = _run(['/usr/bin/systemextensionsctl', 'list'], timeout=8)
+    sysext_text = (sysext.stdout or '') + '\n' + (sysext.stderr or '')
+    virtual_hid_installed = VIRTUAL_HID_MANAGER.is_file() and VIRTUAL_HID_DAEMON.is_file()
+    virtual_hid_daemon_loaded = virtual_hid_launch.returncode == 0 or pqrs_virtual_hid_launch.returncode == 0
+    virtual_hid_extension_ready = bool(VIRTUAL_HID_EXTENSION_ID in sysext_text and 'activated enabled' in sysext_text.lower())
     # systemsetup itself requires administrator privileges even for queries on current macOS.
     # Try it first, then fall back to a localhost SSH reachability probe so the GUI status
     # does not prompt for an administrator password merely to refresh the page.
@@ -224,6 +236,10 @@ def admin_component_state() -> dict[str, str | bool]:
         'ssh_host_key_ready': bool(ssh_host_fingerprints()),
         'prelogin_agent_exists': PRELOGIN_PLIST.is_file(),
         'prelogin_agent_contract_ready': _prelogin_agent_contract_ready(),
+        'virtual_hid_installed': virtual_hid_installed,
+        'virtual_hid_daemon_loaded': virtual_hid_daemon_loaded,
+        'virtual_hid_extension_ready': virtual_hid_extension_ready,
+        'virtual_hid_input_ready': bool(virtual_hid_installed and virtual_hid_daemon_loaded and virtual_hid_extension_ready),
         'release_signing_mode': signing_mode,
         # verify_release_app() only returns developer-id when the embedded
         # all-Macs provisioning profile and both managed pre-login entitlements

@@ -12,6 +12,7 @@ from zmb_session_lifecycle import (
     make_capture_backend_state,
     make_capture_failure_state,
     make_handoff_state,
+    make_input_event_state,
     make_input_probe_state,
     make_pipeline_state,
     parse_session_state,
@@ -96,6 +97,18 @@ def test_session_state_round_trip():
     assert input_probe.open_rc == '0 (0x00000000)'
     assert input_probe.selected is True
     assert input_probe.reason == 'observed'
+
+    input_event = parse_session_state(make_input_event_state(
+        'keyboard', 'key-down', 'iohidsystem', result='DISPATCH_OK',
+        rc='0 (0x00000000)', detail='safe diagnostic',
+    ))
+    assert input_event.kind == 'input-event'
+    assert input_event.channel == 'keyboard'
+    assert input_event.action == 'key-down'
+    assert input_event.backend == 'iohidsystem'
+    assert input_event.result == 'DISPATCH_OK'
+    assert input_event.rc == '0 (0x00000000)'
+    assert input_event.detail == 'safe diagnostic'
 
     future = make_pipeline_state('future-native-stage')
     assert future == {'state': 'pipeline', 'stage': 'future-native-stage'}

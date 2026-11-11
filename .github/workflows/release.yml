@@ -46,7 +46,7 @@ jobs:
           scripts/verify-macos-native-gate.sh
 
   linux-amd64:
-    needs: [release-source-check]
+    needs: [release-source-check, macos-native-gate]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -66,6 +66,7 @@ jobs:
           /usr/bin/python3 -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); gi.require_version('Vte','3.91'); from gi.repository import Gtk, Adw, Vte; import av; av.CodecContext.create('h264','r'); import keyring; print('GTK4/libadwaita/VTE + H.264 runtime OK')"
           bash -n install-linux.sh
           bash -n native/macos/admin/install-admin.sh
+          bash -n native/macos/admin/install-virtual-hid.sh
           bash -n native/macos/admin/uninstall-admin.sh
           bash -n native/macos/admin/zmb-admin
           bash -n native/macos/admin/zmb-admin-ssh
@@ -242,6 +243,19 @@ jobs:
             echo 'Managed Developer ID signing unavailable or invalid; falling back to the working Aqua/ad-hoc macOS artifact.'
             echo 'MACOS_RELEASE_SIGNING_MODE=adhoc' >> "$GITHUB_ENV"
           fi
+      - name: Fetch pinned macOS virtual HID package
+        run: |
+          set -euo pipefail
+          VIRTUAL_HID_VERSION='8.8.0'
+          VIRTUAL_HID_PKG="Karabiner-DriverKit-VirtualHIDDevice-${VIRTUAL_HID_VERSION}.pkg"
+          VIRTUAL_HID_SHA256='2b6e323bf690fde05b24ca2648536916a274d01496e3826dc8b050b63f8b9842'
+          VIRTUAL_HID_URL="https://github.com/pqrs-org/Karabiner-DriverKit-VirtualHIDDevice/releases/download/v${VIRTUAL_HID_VERSION}/${VIRTUAL_HID_PKG}"
+          mkdir -p build/virtualhid
+          curl --proto '=https' --tlsv1.2 -fL --retry 3 --connect-timeout 10 "$VIRTUAL_HID_URL" -o "build/virtualhid/$VIRTUAL_HID_PKG"
+          echo "$VIRTUAL_HID_SHA256  build/virtualhid/$VIRTUAL_HID_PKG" | shasum -a 256 -c -
+          pkgutil --check-signature "build/virtualhid/$VIRTUAL_HID_PKG"
+          test "$(stat -f '%z' "build/virtualhid/$VIRTUAL_HID_PKG")" -gt 1000000
+
       - name: Build macOS Apple Silicon server
         run: |
           scripts/verify-macos-native-gate.sh
@@ -273,6 +287,8 @@ jobs:
             --add-data 'LICENSE:.' \
             --add-data 'NOTICE:.' \
             --add-data 'native/macos/admin:native/macos/admin' \
+            --add-data 'build/virtualhid:native/macos/virtualhid' \
+            --add-data 'THIRD_PARTY_NOTICES.md:.' \
             --add-binary 'build/libzmb_streamer.dylib:.' \
             --add-binary 'build/libzmb_capability_probe.dylib:.' \
             --collect-all cryptography \
@@ -282,6 +298,7 @@ jobs:
             --hidden-import pystray._darwin \
             --hidden-import mac_terminal_setup \
             --hidden-import mac_release_signing \
+            --hidden-import zmb_macos_virtual_hid \
             mac_server_gui.py
 
           /usr/libexec/PlistBuddy -c "Add :NSScreenCaptureUsageDescription string ZorinMacBridge streams this Mac display only to an authenticated LAN client." 'dist/ZorinMacBridge Server.app/Contents/Info.plist' || true

@@ -208,6 +208,21 @@ if [ "$CONSOLE_OWNER" = "loginwindow" ] || [ "$CONSOLE_OWNER" = "root" ]; then
     || true
 fi
 
+# Install/activate the signed DriverKit virtual keyboard + mouse and keep its
+# daemon alive across reboot so LoginWindow can receive real HID reports.
+VIRTUAL_HID_SETUP=ready
+set +e
+/bin/bash "$HERE/install-virtual-hid.sh"
+VIRTUAL_HID_RC=$?
+set -e
+if [ "$VIRTUAL_HID_RC" -eq 75 ]; then
+  VIRTUAL_HID_SETUP=pending-activation
+  echo 'REQUIRED: approve ZorinMacBridge Virtual HID in System Settings > General > Login Items & Extensions > Driver Extensions, then reboot once.' >&2
+elif [ "$VIRTUAL_HID_RC" -ne 0 ]; then
+  VIRTUAL_HID_SETUP=failed
+  echo "WARNING: Virtual HID setup failed with rc=$VIRTUAL_HID_RC; pre-login keyboard/mouse will remain unavailable until repaired." >&2
+fi
+
 bootstrap_system_job   "$ADMIN_LABEL"   "$HERE/com.ilovemyprojects.zorinmacbridge.admin.plist"   "/Library/LaunchDaemons/${ADMIN_LABEL}.plist"
 /bin/launchctl kickstart -k "system/${ADMIN_LABEL}" >/dev/null 2>&1 || true
 
@@ -277,12 +292,7 @@ printf 'TARGET_USER=%s\n' "$TARGET_USER"
 printf 'TARGET_UID=%s\n' "$TARGET_UID"
 printf 'P0_OK=1\n'
 printf 'REMOTE_LOGIN=%s\n' "$REMOTE_LOGIN_STATE"
-if [ -x "$APP_BIN" ] && "$APP_BIN" --verify-release-app "$APP_PATH" >/dev/null 2>&1; then
-  printf 'PRELOGIN_MANAGED_CAPABILITIES=ready\n'
-else
-  printf 'PRELOGIN_MANAGED_CAPABILITIES=blocked\n'
-  echo 'PRELOGIN NOTE: normal Aqua remains available, but reboot-to-LoginWindow remote login requires the Developer ID provisioned build with Persistent Content Capture + CoreHID Virtual Device capabilities.' >&2
-fi
+printf 'PRELOGIN_VIRTUAL_HID=%s\n' "$VIRTUAL_HID_SETUP"
 /usr/local/sbin/zmb-admin status || true
 
 echo 'SSH_FINGERPRINTS_BEGIN'
