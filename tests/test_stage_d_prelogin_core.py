@@ -76,51 +76,6 @@ def test_aqua_bind_retry_is_bounded():
     assert len(calls) == 3
 
 
-def test_aqua_handoff_detects_gui_domain_when_console_owner_is_stale():
-    import mac_server_gui
-
-    original_console = mac_server_gui._console_session_user
-    original_gui = mac_server_gui._gui_session_available
-    original_getpwnam = mac_server_gui.pwd.getpwnam
-    try:
-        mac_server_gui._console_session_user = lambda: 'root'
-        mac_server_gui._gui_session_available = lambda user: user == 'dev'
-
-        class Pw:
-            pw_uid = 501
-
-        mac_server_gui.pwd.getpwnam = lambda _user: Pw()
-        user, source = mac_server_gui._detect_aqua_session_user('dev', probe_gui_domain=True)
-        assert user == 'dev'
-        assert source == 'launchctl gui/501'
-
-        # The bounded monitor should be able to skip the heavier launchctl probe
-        # between intervals without fabricating an Aqua session.
-        user2, source2 = mac_server_gui._detect_aqua_session_user('dev', probe_gui_domain=False)
-        assert user2 == ''
-        assert source2 == ''
-    finally:
-        mac_server_gui._console_session_user = original_console
-        mac_server_gui._gui_session_available = original_gui
-        mac_server_gui.pwd.getpwnam = original_getpwnam
-
-
-def test_aqua_handoff_prefers_real_console_owner():
-    import mac_server_gui
-
-    original_console = mac_server_gui._console_session_user
-    original_gui = mac_server_gui._gui_session_available
-    try:
-        mac_server_gui._console_session_user = lambda: 'dev'
-        mac_server_gui._gui_session_available = lambda _user: False
-        user, source = mac_server_gui._detect_aqua_session_user('dev', probe_gui_domain=True)
-        assert user == 'dev'
-        assert source == '/dev/console'
-    finally:
-        mac_server_gui._console_session_user = original_console
-        mac_server_gui._gui_session_available = original_gui
-
-
 def test_runtime_uses_shared_lifecycle_module():
     import mac_server
     import zmb_session_lifecycle as lifecycle
@@ -145,8 +100,6 @@ def test_native_stage_d_contracts():
 def main():
     test_control_handoff_packet_is_explicit()
     test_aqua_bind_retry_is_bounded()
-    test_aqua_handoff_detects_gui_domain_when_console_owner_is_stale()
-    test_aqua_handoff_prefers_real_console_owner()
     test_runtime_uses_shared_lifecycle_module()
     test_native_stage_d_contracts()
     print('Stage D pre-login core lifecycle regression checks passed')

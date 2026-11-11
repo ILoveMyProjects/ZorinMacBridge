@@ -20,8 +20,8 @@ assert 'zmb_login_input_open_backend' in C
 assert 'zmb_login_input_hid_key' in C
 assert 'zmb_login_input_hid_pointer' in C
 assert "('userdevice', 1)" in SERVER
-assert '_activate_from_index' in SERVER
-assert '_dispatch_with_failover' in SERVER
+assert '_probe_keyboard_delivery' in SERVER
+assert '_probe_pointer_delivery' in SERVER
 assert "IOHIDUserDevice virtual HID" in SERVER
 assert '_zmb_login_input_backend' in GATE
 assert '_zmb_login_input_open_backend' in GATE

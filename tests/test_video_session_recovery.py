@@ -57,26 +57,22 @@ finally:
             pass
 
 server = (ROOT / 'mac_server.py').read_text(encoding='utf-8')
-# Ownership must be released before any native teardown call. A stuck Swift
-# stop/cleanup path must not prevent the replacement TLS video session.
-finalizer = server.index('# Release the Python video-owner lock before asking Swift to tear down.')
-release_idx = server.index('release_ownership()', finalizer)
-stop_idx = server.index('native.lib.zmb_streamer_stop(handle)', finalizer)
-join_idx = server.index('runner.join(timeout=6.0)', stop_idx)
-assert release_idx < stop_idx < join_idx
-assert 'prelogin=prelogin, log=log, release_ownership=release_video_ownership, cancel_event=video_cancel_event' in server
-assert '_ACTIVE_VIDEO_CANCEL' in server
+# Ownership must be released immediately after zmb_streamer_stop(), before the
+# potentially slow runner.join()/destroy path. This is the real 0.15.6 failure:
+# cleanup held the global lock even though capture was already logically stopped.
+stop_idx = server.index('native.lib.zmb_streamer_stop(handle)')
+release_idx = server.index('release_ownership()', stop_idx)
+join_idx = server.index('runner.join(timeout=3.0)', stop_idx)
+assert stop_idx < release_idx < join_idx
+assert 'prelogin=prelogin, log=log, release_ownership=release_video_ownership' in server
 
 swift = (ROOT / 'native/macos/ZMBStreamerLib.swift').read_text(encoding='utf-8')
 assert 'private var runTask: Task<Void, Never>?' in swift
 assert 'activeTask?.cancel()' in swift
 assert 'task.cancel()' in swift
-# Teardown must not drain frames or synchronously wait for ScreenCaptureKit /
-# VideoToolbox cleanup. requestStop signals runBlocking first and cleans up async.
+# Teardown must not drain frames or synchronously wait for a blocked pipe writer.
 assert 'VTCompressionSessionCompleteFrames(activeCompression' not in swift
 assert 'writeQueue.sync {}' not in swift
-request_stop = swift.index('func requestStop(')
-assert swift.index('done.signal()', request_stop) < swift.index('DispatchQueue.global(qos: .utility).async', request_stop)
 assert 'try? output.close()' in swift
 
 print('video session recovery regression tests: OK')

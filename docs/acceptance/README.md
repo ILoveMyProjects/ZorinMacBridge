@@ -4,8 +4,6 @@ These files are real-device or release-gate checklists kept out of the repositor
 
 They are intentionally retained by feature/release generation so regressions can be retested without reconstructing the original scenarios.
 
-- `0.15.40_PRELOGIN_INPUT_CONTROL_ISOLATION.md` — physical `0xe00002c1` pointer failure must not block later keyboard/control traffic; Quartz fallback is bounded and diagnostic-only.
-- `0.15.39_PRELOGIN_INPUT_HANDOFF.md` — real LoginWindow keyboard/mouse dispatch and automatic Aqua handoff proof.
 - `0.15.10_PRELOGIN_CAPABILITY_PROBE_ACCEPTANCE.md` — Stage B physical LoginWindow capability proof.
 - `0.15.11_STAGE_C_SIGNING_PROVISIONING_ACCEPTANCE.md` — Stage C Developer ID/profile release gate.
 - `0.15.12_STAGE_D_PRELOGIN_CORE_ACCEPTANCE.md` — Stage D single-owner LoginWindow lifecycle and Aqua handoff.

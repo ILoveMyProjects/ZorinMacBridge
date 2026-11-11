@@ -22,7 +22,7 @@ assert 'native/macos/ZMBCoreHIDInput.swift' in BUILD
 assert 'native/macos/ZMBLoginInput.c' in BUILD
 assert 'build/ZMBLoginInput.o' in BUILD
 
-# LoginWindowInput performs bounded exact-open selection and runtime dispatch failover.
+# LoginWindowInput independently probes every native backend and selects only observed delivery.
 start = SERVER.index('class LoginWindowInput(MacInput):')
 end = SERVER.index('\n\nclass MacClipboard:', start)
 login_input = SERVER[start:end]
@@ -36,11 +36,9 @@ assert "('corehid', 0)" in login_input
 assert "('userdevice', 1)" in login_input
 assert "('iohidsystem', 2)" in login_input
 assert "('quartz', 3)" in login_input
-assert '_activate_from_index' in login_input
-assert '_dispatch_with_failover' in login_input
-assert 'OPEN_READY' in login_input
-assert 'CGEventSourceFlagsState' not in login_input
-assert 'CGEventGetLocation' not in login_input
+assert '_probe_keyboard_delivery' in login_input
+assert '_probe_pointer_delivery' in login_input
+assert 'Failure of every backend remains non-fatal' in login_input
 assert 'HID_USAGES' in login_input
 
 # Capability probe calls the same production CoreHID ABI and requires both a

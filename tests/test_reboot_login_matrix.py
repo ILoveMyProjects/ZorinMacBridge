@@ -11,20 +11,21 @@ PROBE = (ROOT / 'native/macos/capability-probe/ZMBCapabilityProbe.swift').read_t
 ADMIN = (ROOT / 'native/macos/admin/zmb-admin').read_text()
 GATE = (ROOT / 'scripts/verify-macos-native-gate.sh').read_text()
 SOURCE_GATE = (ROOT / 'scripts/verify-release-source.sh').read_text()
-# Input matrix remains independent from the pre-login capture matrix and wake path.
-assert 'screencapturekit-persistent' in (ROOT / 'native/macos/ZMBStreamerLib.swift').read_text()
+# Preserve the already-working LoginWindow capture/wake path: this release only
+# changes input proof/selection and diagnostics.
+assert 'prelogin-backend=screencapturekit-persistent' in (ROOT / 'native/macos/ZMBStreamerLib.swift').read_text()
 assert 'ScreenCaptureKit reported no display; requesting one-shot display wake through paired P0.' in GTK
 
-# Runtime uses bounded exact backend activation and real-event failover.
+# Runtime checks all four native input mechanisms independently.
 for marker in (
     "('corehid', 0)",
-    "('iohidsystem', 2)",
     "('userdevice', 1)",
+    "('iohidsystem', 2)",
     "('quartz', 3)",
-    '_activate_from_index',
-    '_dispatch_with_failover',
+    '_probe_keyboard_delivery',
+    '_probe_pointer_delivery',
     'zmb_login_input_open_backend',
-    'OPEN_READY',
+    'delivery-probed',
 ):
     assert marker in SERVER, marker
 
@@ -35,7 +36,8 @@ assert 'zmb_open_backend_locked' in C
 assert 'if (backend == ZMB_LOGIN_INPUT_QUARTZ)' in C
 assert '_zmb_login_input_open_backend' in GATE
 
-# Activation/runtime results travel over the existing SESSION_STATE channel.
+# Results travel over the existing SESSION_STATE channel and are visible on the
+# Zorin client after one reboot/connect attempt.
 assert "'state': 'input-probe'" in LIFECYCLE
 assert "event.kind == 'input-probe'" in CLIENT
 assert 'Pre-login input check:' in CLIENT

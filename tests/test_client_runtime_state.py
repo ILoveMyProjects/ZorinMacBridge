@@ -20,7 +20,6 @@ def test_shared_runtime_defaults():
     assert obj.connected is False
     assert obj.prelogin_session is False
     assert obj.prelogin_video_ready is False
-    assert obj.prelogin_input_ready is False
     assert obj._desktop_session_token == ''
     assert obj._desktop_session_generation == 0
     assert obj.fullscreen_active is False

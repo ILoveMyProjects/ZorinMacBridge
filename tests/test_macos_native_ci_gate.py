@@ -25,8 +25,6 @@ assert '''macos-arm64:
 # One canonical compiler path, arm64 only, min deployment target 26.0.
 assert 'MACOSX_DEPLOYMENT_TARGET=26.0' in build
 assert '-target arm64-apple-macos26.0' in build
-assert 'ZMBNativeBuildVersion.swift' in build
-assert 'NATIVE_BUILD_VERSION=' in build
 assert '-target arm64-apple-macos26.0' in build
 assert 'MACOSX_DEPLOYMENT_TARGET=13.0' not in build
 assert 'LSMinimumSystemVersion 26.0' in release
@@ -37,7 +35,6 @@ for required in (
     "expected 26.0",
     "otool -L build/libzmb_streamer.dylib",
     "nm -gU build/libzmb_streamer.dylib",
-    '_zmb_streamer_build_version',
     '_zmb_streamer_create',
     '_zmb_streamer_run',
     '_zmb_streamer_stop',

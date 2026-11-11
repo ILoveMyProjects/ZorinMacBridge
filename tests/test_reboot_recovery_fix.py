@@ -16,11 +16,11 @@ assert "self.selected_paired_only = False" in gtk
 assert "clearing saved/offline state" in gtk
 
 swift = (ROOT / "native/macos/ZMBStreamerLib.swift").read_text(encoding="utf-8")
-assert "private func startPreloginCaptureMatrix() throws" in swift
-assert "screencapturekit-persistent" in swift
+assert "private func startPreloginScreenCaptureKit() throws" in swift
+assert "prelogin-backend=screencapturekit-persistent" in swift
 assert "startPreloginStreamBounded" in swift
-assert "SCScreenshotManager.captureSampleBuffer" in swift
-assert "SCScreenshotManager.captureImage(in: rect)" in swift
+assert "prelogin-failure=first-frame-timeout:" in swift
+assert "prelogin-failure=managed-screencapturekit-start-failed:" in swift
 assert "screencapture-cli" not in swift
 
 server = (ROOT / "mac_server.py").read_text(encoding="utf-8")
@@ -28,7 +28,7 @@ client = (ROOT / "linux_client.py").read_text(encoding="utf-8")
 assert "make_capture_failure_state" in server
 assert "line.startswith('prelogin-failure=')" in server
 assert "event.kind == 'capture-failure'" in client
-assert "Pre-login video made no capture progress for 10 seconds" in client
+assert "Pre-login video produced no first frame within 10 seconds" in client
 
 event = parse_session_state(make_capture_failure_state("managed-screencapturekit-start-failed: missing entitlement"))
 assert event.kind == "capture-failure"

@@ -244,25 +244,6 @@ static int32_t zmb_quartz_scroll(int32_t dx, int32_t dy, uint32_t flags) {
     return (int32_t)kIOReturnSuccess;
 }
 
-/*
- * Direct Quartz entry points used as a per-channel last resort.  They do not
- * mutate the active legacy backend, which lets the LoginWindow runtime keep a
- * working IOHIDSystem keyboard route even if only pointer injection needs to
- * fall back to Quartz (or vice versa).
- */
-int32_t zmb_login_input_quartz_key(uint16_t key_code, int32_t down, uint32_t flags) {
-    return zmb_quartz_key(key_code, down, flags);
-}
-
-int32_t zmb_login_input_quartz_pointer(uint32_t type, int32_t x, int32_t y,
-                                       int32_t button, uint32_t flags) {
-    return zmb_quartz_pointer(type, x, y, button, flags);
-}
-
-int32_t zmb_login_input_quartz_scroll(int32_t dx, int32_t dy, uint32_t flags) {
-    return zmb_quartz_scroll(dx, dy, flags);
-}
-
 static int32_t zmb_post(UInt32 type, IOGPoint location, NXEventData *data,
                         IOOptionBits flags, IOOptionBits options) {
     pthread_mutex_lock(&g_zmb_hid_lock);
@@ -527,75 +508,6 @@ int32_t zmb_login_input_pointer(uint32_t type, int32_t x, int32_t y,
     }
     IOGPoint location = {(SInt32)x, (SInt32)y};
     return zmb_post(type, location, &data, (IOOptionBits)flags, kIOHIDSetCursorPosition);
-}
-
-/*
- * Relative IOHIDSystem pointer path.  On current macOS, opening the HID system
- * connection can succeed while absolute cursor placement is rejected with
- * kIOReturnNotPrivileged.  Relative motion is a separate IOHIDPostEvent mode
- * and does not request kIOHIDSetCursorPosition.
- */
-int32_t zmb_login_input_pointer_relative(int32_t dx, int32_t dy,
-                                         uint8_t buttons, uint32_t flags) {
-    int32_t backend = zmb_login_input_backend();
-    if (backend != ZMB_LOGIN_INPUT_IOHID_SYSTEM) {
-        return (int32_t)kIOReturnNotOpen;
-    }
-
-    NXEventData data;
-    memset(&data, 0, sizeof(data));
-    data.mouseMove.dx = dx;
-    data.mouseMove.dy = dy;
-
-    UInt32 type = NX_MOUSEMOVED;
-    if (buttons != 0) {
-        uint8_t probe = buttons;
-        int32_t button = 0;
-        if (buttons & 0x01u) {
-            type = NX_LMOUSEDRAGGED;
-        } else if (buttons & 0x02u) {
-            type = NX_RMOUSEDRAGGED;
-            button = 1;
-        } else {
-            type = NX_OMOUSEDRAGGED;
-            while ((probe & 1u) == 0u && button < 7) {
-                ++button;
-                probe >>= 1u;
-            }
-        }
-        data.mouse.pressure = 255;
-        data.mouse.buttonNumber = (short)button;
-    }
-
-    IOGPoint location = {0, 0};
-    return zmb_post(
-        type,
-        location,
-        &data,
-        (IOOptionBits)flags,
-        kIOHIDSetRelativeCursorPosition
-    );
-}
-
-/* Standard mouse buttons do not need an absolute cursor-position request. */
-int32_t zmb_login_input_button(int32_t button, int32_t down, uint32_t flags) {
-    int32_t backend = zmb_login_input_backend();
-    if (backend != ZMB_LOGIN_INPUT_IOHID_SYSTEM) {
-        return (int32_t)kIOReturnNotOpen;
-    }
-
-    NXEventData data;
-    memset(&data, 0, sizeof(data));
-    data.mouse.buttonNumber = (short)button;
-    if (down) data.mouse.pressure = 255;
-
-    UInt32 type;
-    if (button == 0) type = down ? NX_LMOUSEDOWN : NX_LMOUSEUP;
-    else if (button == 1) type = down ? NX_RMOUSEDOWN : NX_RMOUSEUP;
-    else type = down ? NX_OMOUSEDOWN : NX_OMOUSEUP;
-
-    IOGPoint location = {0, 0};
-    return zmb_post(type, location, &data, (IOOptionBits)flags, 0);
 }
 
 int32_t zmb_login_input_scroll(int32_t dx, int32_t dy, uint32_t flags) {

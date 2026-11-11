@@ -76,20 +76,6 @@ The LoginWindow input path remains IOHIDSystem-first. macOS can still deny synth
 
 # ZorinMacBridge
 
-> **0.15.40 LoginWindow input control isolation:** the physical 0.15.39 `0xe00002c1` pointer failure can no longer strand the control channel inside Quartz. Quartz fallback runs off-thread with a bounded timeout, pointer failure cannot block the IOHIDSystem keyboard route, failure/timeout logs are never rate-limited, and `OPEN_READY` is shown as input **armed** rather than falsely claiming delivery. The physically verified LoginWindow video/P0 path is unchanged.
-
-> **0.15.39 LoginWindow input + handoff:** the physically observed IOHIDSystem pointer failure (`0xe00002c1`, not privileged) no longer demotes the keyboard route. IOHIDSystem pointer movement uses relative `IOHIDPostEvent`, pointer fallback is channel-local, and Linux/Mac logs now show privacy-safe pre-login keyboard/mouse TX and native dispatch results. LoginWindow→Aqua handoff also detects a live `launchctl gui/<uid>` domain when `/dev/console` still reports LoginWindow. The verified P0 and LoginWindow video path are unchanged.
-
-> **0.15.38 LoginWindow input readiness:** after the physically verified 0.15.37 reboot path reaches a real LoginWindow H.264 frame, control startup no longer blocks on CoreGraphics delivery observation. The server selects the first exact native backend that opens (CoreHID → IOHIDSystem → IOHIDUserDevice → Quartz), reports `OPEN_READY`, and retries the same real key/pointer event on the next backend if native dispatch fails. The Linux client now treats video readiness and input readiness as separate gates and does not claim remote input is enabled until both are ready. P0, LoginWindow video, Aqua capture, and sleep/wake recovery are unchanged.
-
-> **0.15.37 native lifecycle:** LoginWindow no longer calls the Aqua virtual-display release path before capture (that path synchronously dispatches to the main queue and could block the pre-login helper before the first native progress event). Capture now enters the matrix directly on the native runner thread, exposes every diagnostic progress stage to the Zorin client, uses an explicit replacement cancel-event, and verifies that the loaded `libzmb_streamer.dylib` was built from the same release as the app. Native teardown can no longer hold the Python video-owner lock while a replacement session is waiting.
-
-> **0.15.36 runtime consistency:** pre-login diagnostics are accepted only when the Linux client and Mac server report the same release version. P0 discovery also exposes the installed Mac version.
-
-> **0.15.36 boot pre-login supervisor:** the system P0 LaunchDaemon now actively starts/repairs the LoginWindow helper and verifies its Desktop listener after cold reboot; it no longer waits for an Aqua session or a manual `recover-prelogin` request.
-
-> **0.15.36 pre-login capture recovery:** LoginWindow capture now tries persistent SCStream, ScreenCaptureKit sample-buffer screenshots, then ScreenCaptureKit image screenshots; only a real H.264 pipe write counts as backend success. Aqua/sleep-wake capture remains on the existing path.
-
 ## 0.15.5 pre-login capture + activation fix
 
 0.15.5 combines the 0.15.4 LoginWindow screenshot-capture path with the missing pre-login update activation step. After `update-now` at LoginWindow, the old pre-login PID must exit and a new process from the updated `/Applications` bundle must reopen the Desktop port before the update can report success. The screenshot-capture fix from 0.15.4 remains unchanged. After a successful Mac update, the System page also triggers a fresh Bonjour scan so the UI reflects the newly running version instead of retaining a stale pre-update label.

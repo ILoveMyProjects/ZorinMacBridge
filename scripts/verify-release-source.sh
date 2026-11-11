@@ -86,25 +86,17 @@ grep -Fq "'prelogin_release_identity_ready'" mac_requirements.py || {
   exit 1
 }
 
-# Production LoginWindow keeps ScreenCaptureKit SCStream/CoreHID as primary.
-# Capture may fall through supported ScreenCaptureKit screenshot APIs only after
-# the prior candidate fails to write a real H.264 access unit. The production
-# reboot LoginWindow input matrix uses bounded exact-open readiness plus runtime
-# dispatch failover; physical delivery proof stays in the capability probe.
-grep -Fq 'screencapturekit-persistent' native/macos/ZMBStreamerLib.swift || {
-  echo 'ERROR: production pre-login video lost its primary ScreenCaptureKit backend.' >&2
+# Production LoginWindow keeps managed ScreenCaptureKit/CoreHID as primary,
+# but CoreHID creation failure must not kill the control session.  The bundled
+# native IOHIDSystem/kCGSessionEventTap bridge is the in-process fallback.
+grep -Fq 'prelogin-backend=screencapturekit-persistent' native/macos/ZMBStreamerLib.swift || {
+  echo 'ERROR: production pre-login video is not using managed ScreenCaptureKit.' >&2
   exit 1
 }
 grep -Fq 'startPreloginStreamBounded' native/macos/ZMBStreamerLib.swift || {
   echo 'ERROR: pre-login SCStream startup lost its bounded startup contract.' >&2
   exit 1
 }
-for marker in 'startPreloginCaptureMatrix()' 'SCScreenshotManager.captureSampleBuffer' 'SCScreenshotManager.captureImage(in: rect)' 'preloginAccessUnitWritten = true'; do
-  grep -Fq "$marker" native/macos/ZMBStreamerLib.swift || {
-    echo "ERROR: pre-login capture matrix marker missing: $marker" >&2
-    exit 1
-  }
-done
 if grep -Fq 'screencapture-cli' native/macos/ZMBStreamerLib.swift || grep -Fq '/usr/sbin/screencapture' native/macos/ZMBStreamerLib.swift; then
   echo 'ERROR: obsolete LoginWindow system-screenshot backend returned to production.' >&2
   exit 1
@@ -133,84 +125,16 @@ grep -Fq 'zmb_login_input_open_backend' mac_server.py || {
   echo 'ERROR: reboot LoginWindow input matrix cannot open exact native backends.' >&2
   exit 1
 }
-grep -Fq '_activate_from_index' mac_server.py || {
-  echo 'ERROR: reboot LoginWindow input matrix lost bounded exact-open activation.' >&2
+grep -Fq '_probe_keyboard_delivery' mac_server.py || {
+  echo 'ERROR: reboot LoginWindow input matrix lost keyboard delivery proof.' >&2
   exit 1
 }
-grep -Fq '_dispatch_with_failover' mac_server.py || {
-  echo 'ERROR: reboot LoginWindow input matrix lost real-event runtime failover.' >&2
+grep -Fq '_probe_pointer_delivery' mac_server.py || {
+  echo 'ERROR: reboot LoginWindow input matrix lost pointer delivery proof.' >&2
   exit 1
 }
-grep -Fq "event.result == 'OPEN_READY'" linux_client.py || {
-  echo 'ERROR: Linux client no longer arms pre-login input after exact backend open.' >&2
-  exit 1
-}
-grep -Fq "event.result == 'ACTIVE'" linux_client.py || {
-  echo 'ERROR: Linux client no longer distinguishes verified native dispatch from OPEN_READY.' >&2
-  exit 1
-}
-python3 - <<'PY_GATE'
-from pathlib import Path
-s = Path('mac_server.py').read_text(encoding='utf-8')
-start = s.index('class LoginWindowInput(MacInput):')
-end = s.index('\n\nclass MacClipboard:', start)
-login = s[start:end]
-for forbidden in ('_combined_session_flags()', '_cursor_location()'):
-    if forbidden in login:
-        raise SystemExit(f'ERROR: blocking CoreGraphics delivery observation returned to LoginWindow control startup: {forbidden}')
-PY_GATE
 grep -Fq 'Pre-login input check:' linux_client.py || {
-  echo 'ERROR: Linux client no longer exposes reboot input readiness/failover results.' >&2
-  exit 1
-}
-python3 - <<'PY_INPUT_EVENT_GATE'
-from pathlib import Path
-client = Path('linux_client.py').read_text(encoding='utf-8')
-gtk = Path('linux_client_gtk.py').read_text(encoding='utf-8')
-for required in (
-    "event.kind == 'input-event'",
-    "prefix = 'keyboard' if event.channel == 'keyboard' else 'mouse'",
-    'action={event.action}',
-    'backend={event.backend}',
-    'result={event.result or \"unknown\"}',
-    'rc={event.rc or \"unknown\"}',
-):
-    if required not in client:
-        raise SystemExit(f'ERROR: Linux client lost LoginWindow input-event diagnostic contract: {required}')
-for required in ('Pre-login keyboard TX:', 'Pre-login mouse TX:', 'category={category}'):
-    if required not in gtk:
-        raise SystemExit(f'ERROR: GTK client lost privacy-safe pre-login TX diagnostics: {required}')
-PY_INPUT_EVENT_GATE
-grep -Fq 'zmb_login_input_pointer_relative' native/macos/ZMBLoginInput.c || {
-  echo 'ERROR: LoginWindow IOHIDSystem pointer lost relative-motion fallback.' >&2
-  exit 1
-}
-grep -Fq 'kIOHIDSetRelativeCursorPosition' native/macos/ZMBLoginInput.c || {
-  echo 'ERROR: LoginWindow IOHIDSystem pointer no longer avoids absolute cursor privilege path.' >&2
-  exit 1
-}
-grep -Fq "self._channel_override = {'keyboard': '', 'pointer': ''}" mac_server.py || {
-  echo 'ERROR: LoginWindow input no longer isolates keyboard/pointer runtime fallback.' >&2
-  exit 1
-}
-grep -Fq 'Quartz fallback isolated from control thread' mac_server.py || {
-  echo 'ERROR: LoginWindow Quartz fallback returned to synchronous control-thread dispatch.' >&2
-  exit 1
-}
-grep -Fq 'DISPATCH_TIMEOUT' mac_server.py || {
-  echo 'ERROR: LoginWindow Quartz fallback lost its bounded timeout evidence.' >&2
-  exit 1
-}
-grep -Fq 'prelogin_input_armed' linux_client.py || {
-  echo 'ERROR: Linux client again conflates OPEN_READY with verified input activity.' >&2
-  exit 1
-}
-grep -Fq '_detect_aqua_session_user' mac_server_gui.py || {
-  echo 'ERROR: LoginWindow handoff lost Aqua-session fallback detection.' >&2
-  exit 1
-}
-grep -Fq "'/bin/launchctl', 'print', f'gui/{uid}'" mac_server_gui.py || {
-  echo 'ERROR: LoginWindow handoff no longer verifies the target Aqua launchd domain.' >&2
+  echo 'ERROR: Linux client no longer exposes reboot input matrix results.' >&2
   exit 1
 }
 if grep -Fq '#include <IOKit/hid/IOHIDUserDevice.h>' native/macos/ZMBLoginInput.c; then
@@ -274,41 +198,6 @@ grep -Fq 'Refusing to replace a pre-login-capable Developer ID installation with
   exit 1
 }
 
-# 0.15.36: cold-boot LoginWindow must be supervised by system P0, not by a
-# client-triggered recover-prelogin request.
-grep -Fq 'autoheal_prelogin()' native/macos/admin/zmb-admin || {
-  echo 'ERROR: P0 no longer has autonomous LoginWindow autoheal.' >&2; exit 1;
-}
-grep -Fq 'PRELOGIN_AUTOHEAL_RECOVERED' native/macos/admin/zmb-admin || {
-  echo 'ERROR: P0 LoginWindow recovery no longer verifies restored readiness.' >&2; exit 1;
-}
-grep -Fq '/bin/sleep 5' native/macos/admin/zmb-system-daemon || {
-  echo 'ERROR: P0 boot supervision cadence regressed.' >&2; exit 1;
-}
-
-# 0.15.37: LoginWindow native lifecycle must be observable and replacement-safe.
-grep -Fq 'prelogin-stage=native-run-enter' native/macos/ZMBStreamerLib.swift || {
-  echo 'ERROR: pre-login native runner no longer emits its entry stage.' >&2; exit 1;
-}
-grep -Fq 'try startPreloginCaptureMatrix()' native/macos/ZMBStreamerLib.swift || {
-  echo 'ERROR: pre-login capture matrix no longer runs directly on the native runner.' >&2; exit 1;
-}
-grep -Fq '_ACTIVE_VIDEO_CANCEL' mac_server.py || {
-  echo 'ERROR: video replacement cancel-event is missing.' >&2; exit 1;
-}
-grep -Fq "raise ConnectionError('video session cancelled for replacement')" mac_server.py || {
-  echo 'ERROR: native pipe reader no longer honors replacement cancellation.' >&2; exit 1;
-}
-grep -Fq "state': 'capture-progress'" zmb_session_lifecycle.py || {
-  echo 'ERROR: pre-login diagnostic capture-progress wire state is missing.' >&2; exit 1;
-}
-grep -Fq 'ZMBNativeBuildVersion.swift' scripts/build-macos-streamer.sh || {
-  echo 'ERROR: native streamer build version is not embedded at compile time.' >&2; exit 1;
-}
-grep -Fq 'zmb_streamer_build_version' mac_server.py || {
-  echo 'ERROR: live server no longer verifies native streamer build version.' >&2; exit 1;
-}
-
 echo "[release-source] resilient Aqua + LoginWindow native input fallback gate OK"
 
 # Marker used by readiness regression tests: pre-login READY requires Apple-managed Developer ID/provisioning.
@@ -344,17 +233,3 @@ for marker in \
     exit 1
   }
 done
-
-# 0.15.36: never allow client/server version skew to become invisible again.
-grep -Fq "'runtime_version': runtime_version()" mac_server.py || {
-  echo 'ERROR: AUTH_OK no longer exposes Mac runtime_version.' >&2; exit 1;
-}
-grep -Fq 'Pre-login runtime version skew:' linux_client.py || {
-  echo 'ERROR: Linux client no longer reports pre-login runtime version skew.' >&2; exit 1;
-}
-grep -Fq '"version=$version"' native/macos/admin/zmb-system-daemon || {
-  echo 'ERROR: P0 Bonjour no longer advertises the installed Mac app version.' >&2; exit 1;
-}
-grep -Fq 'needs: [release-source-check, macos-native-gate]' .github/workflows/release.yml || {
-  echo 'ERROR: Linux release artifact is no longer gated by the macOS native build.' >&2; exit 1;
-}

@@ -1621,8 +1621,6 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                     self.prelogin_session = bool(item[1])
                     if self.prelogin_session:
                         self.prelogin_video_ready = False
-                        self.prelogin_input_armed = False
-                        self.prelogin_input_ready = False
                     self._refresh_files_state()
                 elif kind == 'prelogin_pipeline':
                     stage = str(item[1] or '') if len(item) > 1 else ''
@@ -1651,51 +1649,10 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                 elif kind == 'prelogin_video_ready':
                     self.prelogin_video_ready = True
                     if self.connected and self.prelogin_session:
-                        if self.prelogin_input_ready:
-                            self.status_var.set('Connected — macOS login window · remote input active')
-                            if self.capture_input_var.get():
-                                self.picture.grab_focus()
-                        elif self.prelogin_input_armed:
-                            self.status_var.set('Connected — macOS login window · input armed, awaiting first dispatch')
-                            if self.capture_input_var.get():
-                                self.picture.grab_focus()
-                        else:
-                            self.status_var.set('Connected — macOS login window · waiting for input backend')
-                    if self.prelogin_input_ready:
-                        self._log('INFO', f'Pre-login video is visible ({item[1]}x{item[2]}); remote input active.')
-                    elif self.prelogin_input_armed:
-                        self._log('INFO', f'Pre-login video is visible ({item[1]}x{item[2]}); input armed, delivery unverified.')
-                    else:
-                        self._log('INFO', f'Pre-login video is visible ({item[1]}x{item[2]}); waiting for LoginWindow input backend.')
-                elif kind == 'prelogin_input_armed':
-                    self.prelogin_input_armed = True
-                    backend = str(item[1] or '') if len(item) > 1 else 'unknown'
-                    result = str(item[2] or '') if len(item) > 2 else 'OPEN_READY'
-                    if self.connected and self.prelogin_session and self.prelogin_video_ready:
-                        self.status_var.set('Connected — macOS login window · input armed, awaiting first dispatch')
+                        self.status_var.set('Connected — macOS login window')
                         if self.capture_input_var.get():
                             self.picture.grab_focus()
-                    self._log('INFO', f'Pre-login remote input armed: backend={backend}, state={result}; delivery not yet verified.')
-                elif kind == 'prelogin_input_ready':
-                    self.prelogin_input_armed = True
-                    self.prelogin_input_ready = True
-                    backend = str(item[1] or '') if len(item) > 1 else 'unknown'
-                    result = str(item[2] or '') if len(item) > 2 else 'OPEN_READY'
-                    if self.connected and self.prelogin_session and self.prelogin_video_ready:
-                        self.status_var.set('Connected — macOS login window · remote input active')
-                        if self.capture_input_var.get():
-                            self.picture.grab_focus()
-                    self._log('INFO', f'Pre-login remote input active: backend={backend}, state={result}.')
-                elif kind == 'prelogin_input_unavailable':
-                    self.prelogin_input_armed = False
-                    self.prelogin_input_ready = False
-                    reason = str(item[1] or '') if len(item) > 1 else 'no LoginWindow input backend available'
-                    if self.connected and self.prelogin_session:
-                        if self.prelogin_video_ready:
-                            self.status_var.set('Connected — macOS login window · view only (input unavailable)')
-                        else:
-                            self.status_var.set('Connected — macOS login window · input unavailable')
-                    self._log('ERROR', 'Pre-login remote input unavailable: ' + reason)
+                    self._log('INFO', f'Pre-login video is visible ({item[1]}x{item[2]}); remote input enabled.')
                 elif kind == 'connected':
                     self.connected = True
                     self._reconnect_attempt = 0
@@ -1878,9 +1835,8 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             return False
         # Never let pointer/keyboard traffic tear down a pre-login session before
         # the user has actually received the first loginwindow frame.
-        if self.prelogin_session:
-            if not self.prelogin_video_ready or not self.prelogin_input_armed:
-                return False
+        if self.prelogin_session and not self.prelogin_video_ready:
+            return False
         return True
 
     def _gtk_motion(self, _controller, x, y):
@@ -1890,11 +1846,6 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         if pos:
             pos = self._transform_stream_point(*pos)
             self._enqueue(pack_packet(MOUSE_MOVE, __import__('struct').pack('!ff', pos[0], pos[1])))
-            if self.prelogin_session:
-                now = time.monotonic()
-                if now - self._last_prelogin_mouse_tx_log_at >= 0.5:
-                    self._last_prelogin_mouse_tx_log_at = now
-                    self._log('INFO', f'Pre-login mouse TX: action=move x={pos[0]:.3f} y={pos[1]:.3f}.')
 
     def _gtk_pressed(self, gesture, n_press, x, y):
         button = int(gesture.get_current_button())
@@ -1907,8 +1858,6 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             self.mouse_buttons_down.add(button)
             pos = self._transform_stream_point(*pos)
             self._enqueue(pack_packet(MOUSE_BUTTON, __import__('struct').pack('!BBff', button, 1, pos[0], pos[1])))
-            if self.prelogin_session:
-                self._log('INFO', f'Pre-login mouse TX: action=button-down button={button} x={pos[0]:.3f} y={pos[1]:.3f}.')
         self.picture.grab_focus()
 
     def _gtk_released(self, gesture, _n_press, x, y):
@@ -1920,8 +1869,6 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             self.mouse_buttons_down.discard(button)
             pos = self._transform_stream_point(*pos)
             self._enqueue(pack_packet(MOUSE_BUTTON, __import__('struct').pack('!BBff', button, 0, pos[0], pos[1])))
-            if self.prelogin_session:
-                self._log('INFO', f'Pre-login mouse TX: action=button-up button={button} x={pos[0]:.3f} y={pos[1]:.3f}.')
 
     def _gtk_scroll(self, _controller, dx, dy):
         if self._remote_input_ready():
@@ -1929,8 +1876,6 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             sy = int(round(-dy * 3))
             if sx or sy:
                 self._enqueue(pack_packet(SCROLL, __import__('struct').pack('!ii', sx, sy)))
-                if self.prelogin_session:
-                    self._log('INFO', f'Pre-login mouse TX: action=scroll dx={sx} dy={sy}.')
         return True
 
     @staticmethod
@@ -1975,19 +1920,11 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             self._exit_fullscreen()
             return True
         if self._local_text_input_focused():
-            if self.connected and self.prelogin_session:
-                now = time.monotonic()
-                if now - self._last_prelogin_input_blocked_log_at >= 1.0:
-                    self._last_prelogin_input_blocked_log_at = now
-                    self._log('WARNING', 'Pre-login keyboard TX blocked: a local GTK text editor still has focus.')
             return False
         if not self._remote_input_ready():
             return False
 
         keysym = self._map_keysym(keysym)
-        if self.prelogin_session:
-            category = 'modifier' if keysym in MODIFIER_KEYS or keysym in {'Meta_L', 'Meta_R'} else ('printable' if len(keysym) == 1 else 'special')
-            self._log('INFO', f'Pre-login keyboard TX: action=key-down category={category}.')
         if keysym in MODIFIER_KEYS or keysym in {'Meta_L', 'Meta_R'}:
             if keysym not in self.modifiers_down:
                 self.modifiers_down.add(keysym)
@@ -2022,18 +1959,10 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
 
     def _gtk_key_released(self, _controller, keyval, _keycode, _state):
         if self._local_text_input_focused():
-            if self.connected and self.prelogin_session:
-                now = time.monotonic()
-                if now - self._last_prelogin_input_blocked_log_at >= 1.0:
-                    self._last_prelogin_input_blocked_log_at = now
-                    self._log('WARNING', 'Pre-login keyboard TX blocked: a local GTK text editor still has focus.')
             return False
         if not self._remote_input_ready():
             return False
         keysym = self._map_keysym(self._keysym_name(keyval))
-        if self.prelogin_session:
-            category = 'modifier' if keysym in MODIFIER_KEYS or keysym in {'Meta_L', 'Meta_R'} else ('printable' if len(keysym) == 1 else 'special')
-            self._log('INFO', f'Pre-login keyboard TX: action=key-up category={category}.')
         key_lower = keysym.lower() if len(keysym) == 1 else keysym
         command_was_down = self._command_down()
         if keysym in self.modifiers_down:

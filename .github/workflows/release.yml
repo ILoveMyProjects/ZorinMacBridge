@@ -46,7 +46,7 @@ jobs:
           scripts/verify-macos-native-gate.sh
 
   linux-amd64:
-    needs: [release-source-check, macos-native-gate]
+    needs: [release-source-check]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
