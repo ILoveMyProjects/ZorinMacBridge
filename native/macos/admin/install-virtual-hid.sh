@@ -3,6 +3,8 @@ set -euo pipefail
 [ "$(uname -s)" = Darwin ] || { echo 'macOS only' >&2; exit 1; }
 [ "$(/usr/bin/id -u)" -eq 0 ] || { echo 'Virtual HID setup must run as root.' >&2; exit 77; }
 HERE="$(cd "$(dirname "$0")" && pwd)"
+MODE="${1:-full}"
+case "$MODE" in full|--prepare|--finalize) ;; *) echo "Unknown Virtual HID setup mode: $MODE" >&2; exit 64 ;; esac
 VERSION='8.8.0'
 PKG_SHA256='2b6e323bf690fde05b24ca2648536916a274d01496e3826dc8b050b63f8b9842'
 PKG_NAME="Karabiner-DriverKit-VirtualHIDDevice-${VERSION}.pkg"
@@ -33,43 +35,85 @@ selftest_ready() {
   ZMB_VHID_SELFTEST_WAIT=10 "$APP_BIN" --self-test-virtual-hid >"$SELFTEST_LOG" 2>&1
 }
 
-if [ ! -x "$MANAGER" ] || [ ! -x "$DAEMON" ]; then
-  [ -f "$BUNDLED_PKG" ] || { echo "Bundled virtual HID package missing: $BUNDLED_PKG" >&2; exit 66; }
-  ACTUAL_SHA=$(/usr/bin/shasum -a 256 "$BUNDLED_PKG" | /usr/bin/awk '{print $1}')
-  [ "$ACTUAL_SHA" = "$PKG_SHA256" ] || { echo "Virtual HID package SHA-256 mismatch: $ACTUAL_SHA" >&2; exit 65; }
-  /usr/sbin/pkgutil --check-signature "$BUNDLED_PKG" >/dev/null || { echo 'Virtual HID package signature verification failed.' >&2; exit 65; }
-  /usr/sbin/installer -pkg "$BUNDLED_PKG" -target / >/dev/null
-fi
-[ -x "$MANAGER" ] || { echo 'Virtual HID manager was not installed.' >&2; exit 69; }
-[ -x "$DAEMON" ] || { echo 'Virtual HID daemon was not installed.' >&2; exit 69; }
+install_package() {
+  if [ ! -x "$MANAGER" ] || [ ! -x "$DAEMON" ]; then
+    [ -f "$BUNDLED_PKG" ] || { echo "Bundled virtual HID package missing: $BUNDLED_PKG" >&2; return 66; }
+    ACTUAL_SHA=$(/usr/bin/shasum -a 256 "$BUNDLED_PKG" | /usr/bin/awk '{print $1}')
+    [ "$ACTUAL_SHA" = "$PKG_SHA256" ] || { echo "Virtual HID package SHA-256 mismatch: $ACTUAL_SHA" >&2; return 65; }
+    /usr/sbin/pkgutil --check-signature "$BUNDLED_PKG" >/dev/null || { echo 'Virtual HID package signature verification failed.' >&2; return 65; }
+    /usr/sbin/installer -pkg "$BUNDLED_PKG" -target / >/dev/null
+  fi
+  [ -x "$MANAGER" ] || { echo 'Virtual HID manager was not installed.' >&2; return 69; }
+  [ -x "$DAEMON" ] || { echo 'Virtual HID daemon was not installed.' >&2; return 69; }
+}
 
-# A daemon socket alone is not readiness: the daemon can be alive while the
-# DriverKit extension is still awaiting approval or has not attached. Submit
-# activation, then verify the actual System Extension state.
-: >"$ACTIVATE_LOG"
-if ! extension_ready; then
-  "$MANAGER" activate >>"$ACTIVATE_LOG" 2>&1 || true
+install_daemon_job() {
+  /usr/bin/plutil -lint "$SOURCE_PLIST" >/dev/null
+  /bin/launchctl bootout "system/${LABEL}" >/dev/null 2>&1 || true
+  /usr/bin/install -o root -g wheel -m 0644 "$SOURCE_PLIST" "$PLIST"
+  /bin/launchctl enable "system/${LABEL}" >/dev/null 2>&1 || true
+  /bin/launchctl bootstrap system "$PLIST" >/dev/null 2>&1 || true
+  /bin/launchctl kickstart -k "system/${LABEL}" >/dev/null 2>&1 || true
+}
+
+# Legacy/manual full mode is bounded so DriverKit approval can never hold the
+# entire P0 installer open indefinitely. Setup Assistant uses --prepare and
+# submits activation separately from the logged-in Aqua session.
+run_manager_bounded() {
+  local action="$1" pid attempt
+  "$MANAGER" "$action" >>"$ACTIVATE_LOG" 2>&1 &
+  pid=$!
+  attempt=0
+  while /bin/kill -0 "$pid" >/dev/null 2>&1; do
+    if [ "$attempt" -ge 20 ]; then
+      /bin/kill "$pid" >/dev/null 2>&1 || true
+      /bin/sleep 0.2
+      /bin/kill -9 "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+      return 124
+    fi
+    /bin/sleep 0.25
+    attempt=$((attempt + 1))
+  done
+  wait "$pid" >/dev/null 2>&1 || true
+  return 0
+}
+
+install_package
+
+if [ "$MODE" = "--prepare" ]; then
+  if extension_ready; then
+    echo 'virtual_hid=prepared-extension-ready'
+    echo "virtual_hid_extension_state=$(extension_line)"
+    echo "virtual_hid_version=$VERSION"
+    exit 0
+  fi
+  echo 'virtual_hid=prepared-approval-required'
+  echo "virtual_hid_extension=${EXTENSION_ID}"
+  echo "virtual_hid_extension_state=$(extension_line)"
+  echo "virtual_hid_version=$VERSION"
+  exit 0
 fi
-if ! extension_ready; then
-  "$MANAGER" forceActivate >>"$ACTIVATE_LOG" 2>&1 || true
+
+if [ "$MODE" = "full" ]; then
+  : >"$ACTIVATE_LOG"
+  if ! extension_ready; then run_manager_bounded activate || true; fi
+  if ! extension_ready; then run_manager_bounded forceActivate || true; fi
 fi
+
 if ! extension_ready; then
   echo 'virtual_hid=approval-required'
   echo "virtual_hid_extension=${EXTENSION_ID}"
   echo "virtual_hid_extension_state=$(extension_line)"
   echo "virtual_hid_version=$VERSION"
-  echo 'REQUIRED: enable the already-installed ZorinMacBridge virtual HID Driver Extension once in System Settings > General > Login Items & Extensions > Driver Extensions, then reboot if macOS requests it.' >&2
+  echo 'REQUIRED: approve the ZorinMacBridge virtual HID Driver Extension in System Settings. Setup Assistant will keep checking automatically.' >&2
   /usr/bin/tail -n 20 "$ACTIVATE_LOG" >&2 2>/dev/null || true
   exit 75
 fi
 
-/usr/bin/plutil -lint "$SOURCE_PLIST" >/dev/null
-/bin/launchctl bootout "system/${LABEL}" >/dev/null 2>&1 || true
-/usr/bin/install -o root -g wheel -m 0644 "$SOURCE_PLIST" "$PLIST"
-/bin/launchctl enable "system/${LABEL}" >/dev/null 2>&1 || true
-/bin/launchctl bootstrap system "$PLIST" >/dev/null 2>&1 || true
-/bin/launchctl kickstart -k "system/${LABEL}" >/dev/null 2>&1 || true
+install_daemon_job
 
+/bin/launchctl kickstart -k "system/${LABEL}" >/dev/null 2>&1 || true
 socket_ready=0
 for _ in $(/usr/bin/seq 1 40); do
   if [ -S "$SOCKET" ]; then socket_ready=1; break; fi
@@ -82,9 +126,6 @@ if [ "$socket_ready" != 1 ]; then
   exit 76
 fi
 
-# Strong readiness gate: verify that the root client actually sees BOTH
-# virtual devices. Retry across the short DriverKit publication window seen
-# directly after activation/boot. One bounded daemon restart is allowed.
 for phase in 1 2; do
   if selftest_ready; then
     echo 'virtual_hid=ready'

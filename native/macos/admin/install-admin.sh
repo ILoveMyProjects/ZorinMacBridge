@@ -212,18 +212,16 @@ fi
 # daemon alive across reboot so LoginWindow can receive real HID reports.
 VIRTUAL_HID_SETUP=ready
 set +e
-/bin/bash "$HERE/install-virtual-hid.sh"
+VIRTUAL_HID_OUT="$(/bin/bash "$HERE/install-virtual-hid.sh" --prepare 2>&1)"
 VIRTUAL_HID_RC=$?
 set -e
-if [ "$VIRTUAL_HID_RC" -eq 75 ]; then
-  VIRTUAL_HID_SETUP=pending-activation
-  echo 'REQUIRED: enable the already-installed ZorinMacBridge Virtual HID Driver Extension once in System Settings > General > Login Items & Extensions > Driver Extensions, then reboot if macOS requests it.' >&2
-elif [ "$VIRTUAL_HID_RC" -eq 76 ]; then
-  VIRTUAL_HID_SETUP=devices-not-ready
-  echo 'WARNING: Virtual HID extension/daemon are present but keyboard/mouse devices are not ready; diagnostics were written to /var/tmp/zmb-vhid-selftest.log and /var/log/zorinmacbridge-virtualhid.err.' >&2
-elif [ "$VIRTUAL_HID_RC" -ne 0 ]; then
+[ -n "$VIRTUAL_HID_OUT" ] && printf '%s\n' "$VIRTUAL_HID_OUT"
+if [ "$VIRTUAL_HID_RC" -ne 0 ]; then
   VIRTUAL_HID_SETUP=failed
-  echo "WARNING: Virtual HID setup failed with rc=$VIRTUAL_HID_RC; pre-login keyboard/mouse will remain unavailable until repaired." >&2
+  echo "WARNING: Virtual HID package preparation failed with rc=$VIRTUAL_HID_RC; Setup Assistant will retry separately." >&2
+elif printf '%s' "$VIRTUAL_HID_OUT" | /usr/bin/grep -Fq 'virtual_hid=prepared-approval-required'; then
+  VIRTUAL_HID_SETUP=pending-activation
+  echo 'ACTION REQUIRED: the Virtual HID package is installed. Setup Assistant will request Driver Extension activation from the logged-in Aqua session and keep checking automatically.' >&2
 fi
 
 bootstrap_system_job   "$ADMIN_LABEL"   "$HERE/com.ilovemyprojects.zorinmacbridge.admin.plist"   "/Library/LaunchDaemons/${ADMIN_LABEL}.plist"
@@ -252,7 +250,29 @@ else
   SYSTEMSETUP_OUT="$(/usr/bin/mktemp /var/tmp/zmb-systemsetup.XXXXXX)"
   cleanup_systemsetup() { /bin/rm -f "$SYSTEMSETUP_OUT"; }
   trap cleanup_systemsetup EXIT
-  if /usr/sbin/systemsetup -setremotelogin on >"$SYSTEMSETUP_OUT" 2>&1; then
+  /usr/sbin/systemsetup -setremotelogin on >"$SYSTEMSETUP_OUT" 2>&1 &
+  SYSTEMSETUP_PID=$!
+  SYSTEMSETUP_DONE=0
+  SYSTEMSETUP_RC=124
+  for _ in $(/usr/bin/seq 1 30); do
+    if ! /bin/kill -0 "$SYSTEMSETUP_PID" >/dev/null 2>&1; then
+      set +e
+      wait "$SYSTEMSETUP_PID"
+      SYSTEMSETUP_RC=$?
+      set -e
+      SYSTEMSETUP_DONE=1
+      break
+    fi
+    /bin/sleep 0.5
+  done
+  if [ "$SYSTEMSETUP_DONE" != 1 ]; then
+    /bin/kill "$SYSTEMSETUP_PID" >/dev/null 2>&1 || true
+    /bin/sleep 0.2
+    /bin/kill -9 "$SYSTEMSETUP_PID" >/dev/null 2>&1 || true
+    wait "$SYSTEMSETUP_PID" >/dev/null 2>&1 || true
+    echo 'Remote Login automatic enable timed out after 15 seconds; continuing with manual action.' >>"$SYSTEMSETUP_OUT"
+  fi
+  if [ "$SYSTEMSETUP_RC" -eq 0 ] && /usr/bin/nc -G 1 -z 127.0.0.1 22 >/dev/null 2>&1; then
     REMOTE_LOGIN_STATE="on"
   else
     echo "REQUIRED: macOS did not allow Remote Login (SSH) to be enabled automatically." >&2

@@ -76,7 +76,7 @@ The macOS server supports **Apple Silicon (arm64) only**. The installer verifies
 
 The Setup Assistant keeps first-time configuration inside the Mac application: it guides you through the ZMB session password, Screen Recording, mouse/keyboard permission, unattended access/Remote Login, Virtual HID readiness and startup settings. Administrator approval is requested by macOS only when a system component needs it.
 
-Normal logged-in Aqua operation keeps the stable per-Mac local application identity used by existing installs. Reboot-to-LoginWindow input is handled independently by a bundled, signed driver-backed virtual HID keyboard and pointing device installed during **Enable / Repair**.
+Normal logged-in Aqua operation keeps the stable per-Mac local application identity used by existing installs. Reboot-to-LoginWindow input is handled independently by a bundled, signed driver-backed virtual HID keyboard and pointing device installed and repaired automatically by the macOS **Setup Assistant**.
 
 For LoginWindow, ScreenCaptureKit/VideoToolbox remains the video path. Keyboard and mouse events still arrive over the existing authenticated ZMB control connection, but the Mac now terminates them as real virtual HID reports through the root-only virtual-HID service. The DriverKit backend is selected before the older CoreHID/IOHIDSystem/IOHIDUserDevice/Quartz fallbacks. The first setup submits the driver-extension activation request; if macOS asks for one-time Driver Extensions approval, approve it and reboot once. Physical readiness is verified separately on real hardware.
 
@@ -198,7 +198,7 @@ The project deliberately does not use a network-interface MAC address as the per
 
 The remote desktop still runs in the logged-in macOS user session because ScreenCaptureKit and GUI input belong to that session. The P0 system layer remains technically separable from the desktop server, but v0.14.0 marks it **REQUIRED for the intended full unattended Zorin workflow** so a failed desktop service does not force you to reconnect a monitor.
 
-On the Mac, open **ZorinMacBridge Server → Unattended access / recovery → Enable / Repair** once. macOS asks for administrator authorization. The app then:
+On the Mac, run the **ZorinMacBridge Setup Assistant**. The system-services step runs automatically; macOS asks for administrator authorization when privileged files must be installed. The app then:
 
 - keeps the existing user LaunchAgent for the actual desktop streamer;
 - installs a small root LaunchDaemon for heartbeat/recovery only;
@@ -214,7 +214,7 @@ The system layer does not bypass macOS login, FileVault, Screen Recording, or Ac
 
 ### Remote Login and Full Disk Access on current macOS
 
-macOS may refuse `systemsetup -setremotelogin on` unless the invoking process has Full Disk Access. The P0 files can still be installed safely, and ZorinMacBridge does not present that state as finished: command-line setup reports `SETUP_COMPLETE=0`, and the Mac UI shows **REQUIRED: Remote Login (SSH)** in red until **System Settings → General → Sharing → Remote Login** is turned on. Pairing, System, Terminal, and Project actions are not considered ready while this requirement is missing. Rerunning P0 is not required after enabling the switch; **Enable / Repair** can also repair missing SSH host keys.
+macOS may refuse `systemsetup -setremotelogin on` unless the invoking process has Full Disk Access. The P0 files can still be installed safely, and ZorinMacBridge does not present that state as finished: command-line setup reports `SETUP_COMPLETE=0`, and the Mac UI shows **REQUIRED: Remote Login (SSH)** in red until **System Settings → General → Sharing → Remote Login** is turned on. Pairing, System, Terminal, and Project actions are not considered ready while this requirement is missing. Rerunning P0 is not required after enabling the switch; Setup Assistant detects the new state on refresh and the Recovery tab can still run a manual repair when needed.
 
 
 ## Xcode and Simulator control
@@ -390,7 +390,7 @@ You can also re-run the one-command installers.
 
 ## Stable macOS permissions across updates
 
-There is no extra signing setup to run on Zorin/Linux for the virtual-HID input path. The macOS release bundles the pinned signed virtual-HID package; **Enable / Repair** installs it and keeps its root daemon loaded across reboot. A system update can retain that already-installed extension, while ZMB updates continue to refresh the client protocol and LaunchDaemon configuration. See [`SIGNING.md`](SIGNING.md) for release-signing details unrelated to the virtual-HID client protocol.
+There is no extra signing setup to run on Zorin/Linux for the virtual-HID input path. The macOS release bundles the pinned signed virtual-HID package; Setup Assistant installs it automatically, requests Driver Extension activation from the logged-in Aqua session, and keeps its root daemon loaded across reboot. A system update can retain that already-installed extension, while ZMB updates continue to refresh the client protocol and LaunchDaemon configuration. See [`SIGNING.md`](SIGNING.md) for release-signing details unrelated to the virtual-HID client protocol.
 
 ## Security model
 

@@ -22,6 +22,8 @@ assert "('System services', self._system_services)" in gui
 assert "('Startup', self._startup)" in gui
 assert "('Finish', self._finish)" in gui
 assert 'self.gui.enable_unattended_access' in gui
+assert 'self.gui.auto_repair_setup_services' in gui
+assert 'self.gui._setup_assistant_can_finish()' in gui
 assert 'self.gui.request_screen_recording_access' in gui
 assert 'self.gui.request_input_access' in gui
 assert "if '--setup-assistant' in sys.argv" in gui

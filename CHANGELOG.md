@@ -1,3 +1,13 @@
+# 0.15.47 — Automatic P0 / Virtual HID Setup Recovery
+
+- Fixes the long-standing first-install failure where Setup Assistant ran the entire privileged P0 installer behind one 120-second AppleScript timeout and reported `P0 installation failed` while DriverKit activation or Remote Login setup was still waiting on macOS.
+- Splits Virtual HID preparation from interactive Driver Extension activation: the privileged P0 installer only installs/verifies the pinned package and root daemon, while Setup Assistant submits `activate`/`forceActivate` from the logged-in Aqua session and polls System Extension state automatically.
+- Adds a 15-second watchdog around `systemsetup -setremotelogin on`; P0 installation continues with a clear manual Remote Login action instead of hanging the whole administrator command.
+- Automatically opens the Driver Extensions settings page when one-time approval is required, keeps checking in the background, and automatically finalizes/restarts the Virtual HID daemon and repeats the real keyboard/mouse self-test after approval.
+- Uses `zmb-admin status` root self-test data for `virtual_hid_input_ready` when available, so Setup Assistant does not mistake an enabled extension plus a running daemon for proven keyboard/mouse readiness.
+- Prevents Setup Assistant from closing while required Aqua setup or installable pre-login components remain incomplete. A current reboot/LoginWindow capture proof remains a separate physical verification and is not fabricated by setup.
+- Leaves ScreenCaptureKit/H.264, TLS, wake, pairing, network protocol, LoginWindow input report dispatch and Linux client behavior unchanged.
+
 # 0.15.46 — macOS GUI & Setup Assistant
 
 - Reorganized the macOS server into six tabs: Overview, Connection, Setup, Recovery, Logs and Maintenance.

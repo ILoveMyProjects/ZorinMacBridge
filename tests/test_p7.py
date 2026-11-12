@@ -92,7 +92,8 @@ def main() -> None:
     assert "'ssh_host_key_ready': bool(ssh_host_fingerprints())" in admin
     assert "'prelogin_agent_contract_ready': _prelogin_agent_contract_ready()" in admin
     assert "'release_signing_mode': signing_mode" in admin
-    assert "'virtual_hid_input_ready': bool(virtual_hid_installed and virtual_hid_daemon_loaded and virtual_hid_extension_ready)" in admin
+    assert "'virtual_hid_input_ready': virtual_hid_input_ready" in admin
+    assert "root_values['virtual_hid_input_ready'] == '1'" in admin
     assert "'prelogin_capture_proof_ready': bool(current and proof.get('capture_result') == 'PASS')" in admin
     assert "'prelogin_probe_ready': ready" in admin
     assert "if 'remote login: on' in remote_text" in admin

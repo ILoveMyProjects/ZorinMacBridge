@@ -7,6 +7,7 @@ import re
 import shlex
 import socket
 import subprocess
+import time
 from pathlib import Path
 
 from resources import resource_path
@@ -75,7 +76,61 @@ def install_unattended_access() -> str:
         f'/bin/bash {shlex.quote(str(script))} {shlex.quote(user)} '
         f'{shlex.quote(server_id)} {shlex.quote(host_name)} {shlex.quote(identity.token)}'
     )
-    return _privileged_shell(command)
+    return _privileged_shell(command, timeout=180)
+
+
+def prepare_virtual_hid() -> str:
+    """Install the pinned Virtual HID package/daemon without waiting for UI approval."""
+    script = _resource_script('install-virtual-hid.sh')
+    command = f'/bin/bash {shlex.quote(str(script))} --prepare'
+    return _privileged_shell(command, timeout=90)
+
+
+def finalize_virtual_hid() -> str:
+    """Finish daemon startup + real keyboard/mouse self-test after extension approval."""
+    script = _resource_script('install-virtual-hid.sh')
+    command = f'/bin/bash {shlex.quote(str(script))} --finalize'
+    return _privileged_shell(command, timeout=90)
+
+
+def virtual_hid_state() -> dict[str, str | bool]:
+    """Read only the fast Virtual HID state used by Setup Assistant polling."""
+    virtual_hid_launch = _run(['/bin/launchctl', 'print', f'system/{VIRTUAL_HID_LABEL}'], timeout=5)
+    pqrs_virtual_hid_launch = _run(
+        ['/bin/launchctl', 'print', 'system/org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon'],
+        timeout=5,
+    )
+    sysext = _run(['/usr/bin/systemextensionsctl', 'list'], timeout=8)
+    sysext_text = (sysext.stdout or '') + '\n' + (sysext.stderr or '')
+    extension_line = ''
+    for raw in sysext_text.splitlines():
+        if VIRTUAL_HID_EXTENSION_ID in raw:
+            extension_line = raw.strip()
+    installed = VIRTUAL_HID_MANAGER.is_file() and VIRTUAL_HID_DAEMON.is_file()
+    daemon_loaded = virtual_hid_launch.returncode == 0 or pqrs_virtual_hid_launch.returncode == 0
+    extension_ready = bool(extension_line and 'activated enabled' in extension_line.lower())
+    return {
+        'virtual_hid_installed': installed,
+        'virtual_hid_daemon_loaded': daemon_loaded,
+        'virtual_hid_extension_ready': extension_ready,
+        'virtual_hid_extension_state': extension_line,
+    }
+
+
+def request_virtual_hid_activation(*, force: bool = False) -> int:
+    """Submit DriverKit activation from the logged-in Aqua user, never from root."""
+    if not VIRTUAL_HID_MANAGER.is_file():
+        raise RuntimeError('Virtual HID manager is not installed yet.')
+    action = 'forceActivate' if force else 'activate'
+    proc = subprocess.Popen(
+        [str(VIRTUAL_HID_MANAGER), action],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        cwd='/',
+        start_new_session=True,
+    )
+    return int(proc.pid)
 
 
 def uninstall_unattended_access() -> str:
@@ -223,6 +278,19 @@ def admin_component_state() -> dict[str, str | bool]:
     virtual_hid_installed = VIRTUAL_HID_MANAGER.is_file() and VIRTUAL_HID_DAEMON.is_file()
     virtual_hid_daemon_loaded = virtual_hid_launch.returncode == 0 or pqrs_virtual_hid_launch.returncode == 0
     virtual_hid_extension_ready = bool(VIRTUAL_HID_EXTENSION_ID in sysext_text and 'activated enabled' in sysext_text.lower())
+    virtual_hid_input_ready = bool(virtual_hid_installed and virtual_hid_daemon_loaded and virtual_hid_extension_ready)
+    virtual_hid_input_detail = 'fast-state-only'
+    if files_ok and ADMIN_HELPER.is_file():
+        root_status = _run(['/usr/bin/sudo', '-n', str(ADMIN_HELPER), 'status'], timeout=15)
+        if root_status.returncode == 0:
+            root_values: dict[str, str] = {}
+            for raw in (root_status.stdout or '').splitlines():
+                key, sep, value = raw.partition('=')
+                if sep and key:
+                    root_values[key.strip()] = value.strip()
+            if 'virtual_hid_input_ready' in root_values:
+                virtual_hid_input_ready = root_values['virtual_hid_input_ready'] == '1'
+                virtual_hid_input_detail = root_values.get('virtual_hid_input_detail', '') or 'root-selftest'
     # systemsetup itself requires administrator privileges even for queries on current macOS.
     # Try it first, then fall back to a localhost SSH reachability probe so the GUI status
     # does not prompt for an administrator password merely to refresh the page.
@@ -250,7 +318,8 @@ def admin_component_state() -> dict[str, str | bool]:
         'virtual_hid_installed': virtual_hid_installed,
         'virtual_hid_daemon_loaded': virtual_hid_daemon_loaded,
         'virtual_hid_extension_ready': virtual_hid_extension_ready,
-        'virtual_hid_input_ready': bool(virtual_hid_installed and virtual_hid_daemon_loaded and virtual_hid_extension_ready),
+        'virtual_hid_input_ready': virtual_hid_input_ready,
+        'virtual_hid_input_detail': virtual_hid_input_detail,
         'release_signing_mode': signing_mode,
         # verify_release_app() only returns developer-id when the embedded
         # all-Macs provisioning profile and both managed pre-login entitlements

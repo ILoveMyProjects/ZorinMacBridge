@@ -147,9 +147,9 @@ def run_terminal_setup() -> int:
         print('PRELOGIN_NOTE=Virtual HID input is ready, but LoginWindow capture has not been physically verified for this exact build.')
     elif prelogin_state == 'NOT_READY':
         if not state.get('virtual_hid_input_ready'):
-            print('PRELOGIN_NOTE=Virtual HID keyboard/mouse is not active yet. Use Enable / Repair and complete the one-time Driver Extensions approval if macOS requests it.')
+            print('PRELOGIN_NOTE=Virtual HID keyboard/mouse is not active yet. Run the GUI Setup Assistant; it will request activation, open Driver Extensions if macOS requires approval, and keep checking automatically.')
         else:
-            print('PRELOGIN_NOTE=Virtual HID is ready, but the LoginWindow agent is not ready. Use Enable / Repair.')
+            print('PRELOGIN_NOTE=Virtual HID is ready, but the LoginWindow agent is not ready. Run the GUI Setup Assistant to repair ZMB services automatically.')
     if missing:
         print('REQUIRED_SETUP_BEGIN')
         for item in missing:

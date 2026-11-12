@@ -36,7 +36,7 @@ Deleting the local signing state causes a new identity to be generated and can t
 
 Machine matching uses a persistent `server_id` UUID as a discovery handle, while trust is enforced by the pinned desktop TLS certificate fingerprint and the pinned SSH host key. The current DHCP IP address is not treated as identity. Network-interface MAC addresses are deliberately not used as trust anchors.
 
-P0 is disabled until the Mac user explicitly chooses **Enable / Repair** and authorizes the install locally with an administrator password. The root LaunchDaemon does not listen on a TCP/UDP socket. Network administration uses the operating system's Remote Login (SSH) service.
+P0 is disabled until the Mac user runs Setup Assistant (or explicitly chooses **Enable / Repair**) and authorizes the local installation with an administrator password. The root LaunchDaemon does not listen on a TCP/UDP socket. Network administration uses the operating system's Remote Login (SSH) service.
 
 The Zorin client generates a dedicated Ed25519 key per paired Mac. The Mac stores it in `authorized_keys` with `restrict` and a forced command pointing to `/usr/local/libexec/zmb-admin-ssh`. That gateway accepts only the documented ZorinMacBridge administration commands and rejects arbitrary shell commands. The root helper is exposed through a narrow sudoers allow-list.
 
