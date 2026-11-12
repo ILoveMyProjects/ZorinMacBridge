@@ -236,7 +236,8 @@ linux_gui = (ROOT / "linux_client_gtk.py").read_text(encoding="utf-8")
 system_page = (ROOT / "zmb_system_page.py").read_text(encoding="utf-8")
 admin_installer = (ROOT / "native/macos/admin/install-admin.sh").read_text(encoding="utf-8")
 assert "--terminal-setup" in mac_gui
-assert "--terminal-setup" in install_macos
+assert "--setup-assistant" in install_macos
+assert '/usr/bin/open "$DEST" --args --setup-assistant' in install_macos
 assert "systemsetup -setremotelogin on" in admin_installer
 assert 'REMOTE_LOGIN_STATE="manual_required"' in admin_installer
 assert 'You do NOT need to reinstall P0' in terminal_setup

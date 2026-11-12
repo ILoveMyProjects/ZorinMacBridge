@@ -85,6 +85,17 @@ def uninstall_unattended_access() -> str:
     return _privileged_shell(command)
 
 
+def clean_uninstall_zmb(*, keep_user_config: bool = False) -> str:
+    """Remove ZMB-owned macOS components while preserving unrelated SSH/system state."""
+    user = current_short_user()
+    script = _resource_script('uninstall-zmb.sh')
+    mode = 'keep-config' if keep_user_config else 'full-clean'
+    command = (
+        f'/bin/bash {shlex.quote(str(script))} {shlex.quote(user)} {shlex.quote(mode)}'
+    )
+    return _privileged_shell(command, timeout=180)
+
+
 def _read_key_value_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     try:

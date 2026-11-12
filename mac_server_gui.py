@@ -21,7 +21,7 @@ from mac_server import (
 )
 from discovery import LanAdvertiser
 from resources import resource_path, set_tk_icon
-from mac_admin_setup import (admin_component_state, install_unattended_access,
+from mac_admin_setup import (admin_component_state, clean_uninstall_zmb, install_unattended_access,
                              ssh_host_fingerprints, uninstall_unattended_access)
 from mac_requirements import (evaluate_prelogin_requirements, evaluate_setup_requirements, missing_setup_requirements, prelogin_readiness_state)
 from tray_icon import TrayController
@@ -208,6 +208,248 @@ def private_ipv4_addresses() -> list[str]:
     return found
 
 
+class _SetupAssistant:
+    """Guided local setup UI. It orchestrates existing setup actions only."""
+
+    def __init__(self, gui: "ServerGUI") -> None:
+        self.gui = gui
+        self.window = tk.Toplevel(gui.root)
+        self.window.title('ZorinMacBridge Setup Assistant')
+        self.window.geometry('760x560')
+        self.window.minsize(700, 520)
+        self.window.transient(gui.root)
+        set_tk_icon(self.window, 'assets/server.png')
+        self.window.protocol('WM_DELETE_WINDOW', self.close)
+        self.step = 0
+        self.steps = [
+            ('Welcome', self._welcome),
+            ('Session password', self._password),
+            ('macOS permissions', self._permissions),
+            ('System services', self._system_services),
+            ('Startup', self._startup),
+            ('Finish', self._finish),
+        ]
+
+        shell = ttk.Frame(self.window, padding=18)
+        shell.pack(fill='both', expand=True)
+        ttk.Label(shell, text='Setup Assistant', font=('', 20, 'bold')).pack(anchor='w')
+        self.step_var = tk.StringVar()
+        ttk.Label(shell, textvariable=self.step_var).pack(anchor='w', pady=(3, 12))
+        ttk.Separator(shell).pack(fill='x', pady=(0, 12))
+        self.body = ttk.Frame(shell)
+        self.body.pack(fill='both', expand=True)
+        nav = ttk.Frame(shell)
+        nav.pack(fill='x', pady=(12, 0))
+        self.back_btn = ttk.Button(nav, text='Back', command=self.back)
+        self.back_btn.pack(side='left')
+        ttk.Button(nav, text='Check again', command=self.refresh).pack(side='left', padx=(8, 0))
+        self.next_btn = ttk.Button(nav, text='Continue', command=self.next)
+        self.next_btn.pack(side='right')
+        self.show_step()
+
+    def close(self) -> None:
+        try:
+            self.window.destroy()
+        finally:
+            self.gui._setup_assistant = None
+
+    def _clear(self) -> None:
+        for child in self.body.winfo_children():
+            child.destroy()
+
+    def _title(self, text: str, subtitle: str = '') -> None:
+        ttk.Label(self.body, text=text, font=('', 16, 'bold')).pack(anchor='w')
+        if subtitle:
+            ttk.Label(self.body, text=subtitle, wraplength=680, justify='left').pack(anchor='w', pady=(6, 16))
+
+    def _status_label(self, variable: tk.StringVar) -> None:
+        ttk.Label(self.body, textvariable=variable, wraplength=680, justify='left').pack(fill='x', anchor='w', pady=(4, 10))
+
+    def _welcome(self) -> None:
+        self._title(
+            'Welcome to ZorinMacBridge',
+            'This assistant configures only ZorinMacBridge. It will guide you through the session password, '
+            'macOS permissions, unattended access, Virtual HID readiness and startup settings.',
+        )
+        ttk.Label(
+            self.body,
+            text='You can close this assistant at any time and return later from Maintenance → Run Setup Assistant.',
+            wraplength=680,
+        ).pack(anchor='w')
+
+    def _password(self) -> None:
+        self._title(
+            'ZorinMacBridge session password',
+            'This is the password used by the Zorin client to authenticate to ZMB. It is separate from your macOS login password.',
+        )
+        status = 'Configured — you may leave the field blank.' if self.gui.saved_password is not None else 'Not configured yet.'
+        ttk.Label(self.body, text=status, font=('', 11, 'bold')).pack(anchor='w', pady=(0, 10))
+        row = ttk.Frame(self.body)
+        row.pack(fill='x')
+        entry = ttk.Entry(row, textvariable=self.gui.password_var, show='•')
+        entry.pack(side='left', fill='x', expand=True)
+        ttk.Checkbutton(row, text='Show', variable=self.gui.show_password_var, command=self.gui.toggle_password).pack(side='left', padx=(8, 0))
+        ttk.Checkbutton(
+            self.body,
+            text='Remember a salted password verifier on this Mac',
+            variable=self.gui.remember_password_var,
+        ).pack(anchor='w', pady=(8, 8))
+        ttk.Button(self.body, text='Save password', command=self.gui.save_setup_password).pack(anchor='w')
+
+    def _permissions(self) -> None:
+        self._title(
+            'macOS permissions',
+            'Grant Screen Recording for video and Accessibility/input permission for normal logged-in mouse and keyboard control.',
+        )
+        self._status_label(self.gui.screen_permission_var)
+        actions = ttk.Frame(self.body)
+        actions.pack(fill='x', pady=(0, 12))
+        ttk.Button(actions, text='Request Screen Recording', command=self.gui.request_screen_recording_access).pack(side='left')
+        ttk.Button(actions, text='Open settings', command=self.gui.open_screen_settings).pack(side='left', padx=(8, 0))
+        self._status_label(self.gui.input_permission_var)
+        actions2 = ttk.Frame(self.body)
+        actions2.pack(fill='x')
+        ttk.Button(actions2, text='Request Mouse/Keyboard Access', command=self.gui.request_input_access).pack(side='left')
+        ttk.Button(actions2, text='Open settings', command=self.gui.open_accessibility_settings).pack(side='left', padx=(8, 0))
+        ttk.Label(self.body, text='macOS may require you to quit and reopen the app after changing a permission.', wraplength=680).pack(anchor='w', pady=(16, 0))
+
+    def _system_services(self) -> None:
+        self._title(
+            'Unattended access and LoginWindow support',
+            'Install or repair the ZMB-owned system helper. Administrator authorization is requested by macOS. '
+            'Remote Login remains a normal macOS setting and the helper opens no custom administration port.',
+        )
+        self._status_label(self.gui.admin_status_var)
+        actions = ttk.Frame(self.body)
+        actions.pack(fill='x')
+        ttk.Button(actions, text='Install / Repair ZMB services', command=self.gui.enable_unattended_access).pack(side='left')
+        ttk.Button(actions, text='Open Remote Login Settings', command=self.gui.open_remote_login_settings).pack(side='left', padx=(8, 0))
+        ttk.Button(actions, text='Copy SSH fingerprint', command=self.gui.copy_ssh_fingerprint).pack(side='left', padx=(8, 0))
+        ttk.Label(
+            self.body,
+            text='If the Virtual HID Driver Extension needs approval, macOS controls that approval. '
+                 'After approving it in System Settings, use “Check again”.',
+            wraplength=680,
+        ).pack(anchor='w', pady=(16, 0))
+
+    def _startup(self) -> None:
+        self._title(
+            'Startup behavior',
+            'For unattended operation, ZMB should launch when you log in and start its server automatically.',
+        )
+        ttk.Checkbutton(
+            self.body,
+            text='Launch ZorinMacBridge Server when this macOS user logs in',
+            variable=self.gui.launch_at_login_var,
+            command=self.gui._startup_settings_changed,
+        ).pack(anchor='w', pady=(4, 8))
+        ttk.Checkbutton(
+            self.body,
+            text='Automatically start the server when the app launches',
+            variable=self.gui.auto_start_var,
+            command=self.gui._startup_settings_changed,
+        ).pack(anchor='w')
+        ttk.Button(self.body, text='Use recommended startup settings', command=self.gui.enable_recommended_startup).pack(anchor='w', pady=(16, 0))
+
+    def _finish(self) -> None:
+        self._title(
+            'Final verification',
+            'The status below is generated by the same existing readiness checks used by the main application.',
+        )
+        self._status_label(self.gui.required_setup_var)
+        actions = ttk.Frame(self.body)
+        actions.pack(fill='x')
+        ttk.Button(actions, text='Refresh status', command=self.gui.refresh_required_setup).pack(side='left')
+        ttk.Button(actions, text='Fix next REQUIRED item', command=self.gui.fix_next_required_item).pack(side='left', padx=(8, 0))
+        ttk.Button(actions, text='Start server', command=self.gui.start).pack(side='left', padx=(8, 0))
+
+    def refresh(self) -> None:
+        self.gui.refresh_required_setup()
+        self.show_step(rebuild=True)
+
+    def show_step(self, rebuild: bool = True) -> None:
+        if rebuild:
+            self._clear()
+        title, builder = self.steps[self.step]
+        self.step_var.set(f'Step {self.step + 1} of {len(self.steps)} · {title}')
+        builder()
+        self.back_btn.configure(state='normal' if self.step else 'disabled')
+        self.next_btn.configure(text='Finish' if self.step == len(self.steps) - 1 else 'Continue')
+        if self.step in {2, 3, 5}:
+            self.gui.refresh_required_setup()
+
+    def back(self) -> None:
+        if self.step > 0:
+            self.step -= 1
+            self.show_step()
+
+    def next(self) -> None:
+        if self.step == 1 and self.gui.password_var.get().strip():
+            if not self.gui.save_setup_password(show_success=False):
+                return
+        if self.step >= len(self.steps) - 1:
+            self.close()
+            return
+        self.step += 1
+        self.show_step()
+
+
+class _UninstallDialog:
+    def __init__(self, gui: "ServerGUI") -> None:
+        self.gui = gui
+        self.window = tk.Toplevel(gui.root)
+        self.window.title('Uninstall ZorinMacBridge')
+        self.window.geometry('620x410')
+        self.window.resizable(False, False)
+        self.window.transient(gui.root)
+        self.window.grab_set()
+        set_tk_icon(self.window, 'assets/server.png')
+        self.mode = tk.StringVar(value='full-clean')
+        frame = ttk.Frame(self.window, padding=18)
+        frame.pack(fill='both', expand=True)
+        ttk.Label(frame, text='Uninstall ZorinMacBridge', font=('', 18, 'bold')).pack(anchor='w')
+        ttk.Label(
+            frame,
+            text='Choose whether a future reinstall should start completely fresh or reuse this Mac’s ZMB configuration.',
+            wraplength=560,
+        ).pack(anchor='w', pady=(6, 16))
+        ttk.Radiobutton(
+            frame,
+            text='Full clean uninstall — remove ZMB application, services, pairing state and local ZMB configuration',
+            variable=self.mode,
+            value='full-clean',
+        ).pack(anchor='w', pady=(4, 8))
+        ttk.Radiobutton(
+            frame,
+            text='Remove application and services, but keep ZMB user configuration for reinstall',
+            variable=self.mode,
+            value='keep-config',
+        ).pack(anchor='w', pady=(4, 14))
+        ttk.Label(
+            frame,
+            text='Remote Login, unrelated SSH keys and the shared Karabiner DriverKit VirtualHIDDevice package are not removed.',
+            wraplength=560,
+        ).pack(anchor='w', pady=(0, 16))
+        ttk.Separator(frame).pack(fill='x', pady=(0, 14))
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill='x')
+        ttk.Button(buttons, text='Cancel', command=self.window.destroy).pack(side='right')
+        ttk.Button(buttons, text='Uninstall…', command=self.confirm).pack(side='right', padx=(0, 8))
+
+    def confirm(self) -> None:
+        full_clean = self.mode.get() == 'full-clean'
+        warning = (
+            'This will remove all ZorinMacBridge application data from this Mac. A future install will start fresh.'
+            if full_clean else
+            'This will remove the ZorinMacBridge application and system services, but keep the current user configuration.'
+        )
+        if not messagebox.askyesno('Confirm uninstall', warning + '\n\nContinue?', parent=self.window):
+            return
+        self.window.grab_release()
+        self.window.destroy()
+        self.gui.clean_uninstall(full_clean=full_clean)
+
+
 class ServerGUI:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -250,6 +492,7 @@ class ServerGUI:
         self.thread: threading.Thread | None = None
         self.advertiser: LanAdvertiser | None = None
         self.tray = None
+        self._setup_assistant: _SetupAssistant | None = None
 
         self._build(ips)
         self._build_menu()
@@ -413,118 +656,302 @@ class ServerGUI:
         )
 
     def _build(self, ips: list[str]) -> None:
-        self.root.geometry('820x900')
-        outer = ttk.Frame(self.root, padding=16)
+        self.root.geometry('920x680')
+        self.root.minsize(820, 600)
+        outer = ttk.Frame(self.root, padding=14)
         outer.pack(fill='both', expand=True)
 
-        ttk.Label(outer, text='ZorinMacBridge Server', font=('', 20, 'bold')).grid(row=0, column=0, columnspan=3, sticky='w')
-        ttk.Label(outer, text='LAN-only macOS server with ScreenCaptureKit + H.264 streaming.').grid(row=1, column=0, columnspan=3, sticky='w', pady=(4, 16))
+        header = ttk.Frame(outer)
+        header.pack(fill='x', pady=(0, 10))
+        title_box = ttk.Frame(header)
+        title_box.pack(side='left', fill='x', expand=True)
+        ttk.Label(title_box, text='ZorinMacBridge Server', font=('', 20, 'bold')).pack(anchor='w')
+        ttk.Label(title_box, text=f'macOS host · version {current_version()}').pack(anchor='w', pady=(2, 0))
+        header_actions = ttk.Frame(header)
+        header_actions.pack(side='right')
+        self.start_btn = ttk.Button(header_actions, text='Start', command=self.start)
+        self.start_btn.pack(side='left')
+        self.stop_btn = ttk.Button(header_actions, text='Stop', command=self.stop, state='disabled')
+        self.stop_btn.pack(side='left', padx=(6, 0))
+        ttk.Label(header_actions, textvariable=self.status_var, font=('', 10, 'bold')).pack(side='left', padx=(10, 0))
 
-        ttk.Label(outer, text='Mac LAN IP').grid(row=2, column=0, sticky='w', pady=4)
-        self.ip_box = ttk.Combobox(outer, textvariable=self.bind_var, values=ips, width=28)
-        self.ip_box.grid(row=2, column=1, sticky='ew', pady=4)
+        self.notebook = ttk.Notebook(outer)
+        self.notebook.pack(fill='both', expand=True)
+        self.overview_tab = ttk.Frame(self.notebook, padding=14)
+        self.connection_tab = ttk.Frame(self.notebook, padding=14)
+        self.setup_tab = ttk.Frame(self.notebook, padding=14)
+        self.recovery_tab = ttk.Frame(self.notebook, padding=14)
+        self.logs_tab = ttk.Frame(self.notebook, padding=10)
+        self.maintenance_tab = ttk.Frame(self.notebook, padding=14)
+        self.notebook.add(self.overview_tab, text='Overview')
+        self.notebook.add(self.connection_tab, text='Connection')
+        self.notebook.add(self.setup_tab, text='Setup')
+        self.notebook.add(self.recovery_tab, text='Recovery')
+        self.notebook.add(self.logs_tab, text='Logs')
+        self.notebook.add(self.maintenance_tab, text='Maintenance')
 
-        ttk.Label(outer, text='Port').grid(row=3, column=0, sticky='w', pady=4)
-        ttk.Entry(outer, textvariable=self.port_var, width=12).grid(row=3, column=1, sticky='w', pady=4)
-
-        ttk.Label(outer, text='Shared folder').grid(row=4, column=0, sticky='w', pady=4)
-        ttk.Entry(outer, textvariable=self.share_var).grid(row=4, column=1, sticky='ew', pady=4)
-        share_actions = ttk.Frame(outer)
-        share_actions.grid(row=4, column=2, padx=(8, 0), pady=4)
-        ttk.Button(share_actions, text='Open', command=self.open_shared_folder).pack(side='left')
-        ttk.Button(share_actions, text='Choose…', command=self.choose_share).pack(side='left', padx=(6, 0))
-
-        ttk.Label(outer, text='ZorinMacBridge session password').grid(row=5, column=0, sticky='w', pady=4)
-        self.password_entry = ttk.Entry(outer, textvariable=self.password_var, show='•')
-        self.password_entry.grid(row=5, column=1, sticky='ew', pady=4)
-        ttk.Checkbutton(outer, text='Show', variable=self.show_password_var, command=self.toggle_password).grid(row=5, column=2, padx=(8, 0), pady=4)
-        note = ('Saved verifier available — leave blank to reuse it. This is separate from your macOS login password.' if self.saved_password else 'Create a separate ZMB password; only a salted verifier is stored. Do not use your macOS login password.')
-        ttk.Label(outer, text=note).grid(row=6, column=1, columnspan=2, sticky='w', pady=(0, 2))
-        ttk.Checkbutton(outer, text='Remember password verifier on this Mac', variable=self.remember_password_var).grid(row=7, column=1, columnspan=2, sticky='w', pady=(0, 6))
-
-        ttk.Label(outer, text='TLS fingerprint').grid(row=8, column=0, sticky='nw', pady=(8, 4))
-        fp = ttk.Entry(outer, textvariable=self.fp_var, state='readonly')
-        fp.grid(row=8, column=1, sticky='ew', pady=(8, 4))
-        ttk.Button(outer, text='Copy', command=self.copy_fp).grid(row=8, column=2, padx=(8, 0), pady=(8, 4))
-
-        ttk.Checkbutton(
-            outer,
-            text='Advertise this Mac to ZorinMacBridge clients on the local LAN while the server is running',
-            variable=self.advertise_var,
-        ).grid(row=9, column=0, columnspan=3, sticky='w', pady=(8, 2))
-        ttk.Checkbutton(
-            outer, text='Launch ZorinMacBridge Server when this macOS user logs in',
-            variable=self.launch_at_login_var, command=self._startup_settings_changed,
-        ).grid(row=10, column=0, columnspan=3, sticky='w', pady=(2, 2))
-        ttk.Checkbutton(
-            outer, text='Automatically start the server when the app launches',
-            variable=self.auto_start_var, command=self._startup_settings_changed,
-        ).grid(row=11, column=0, columnspan=3, sticky='w', pady=(2, 6))
-
-        required = ttk.LabelFrame(outer, text='Required setup for normal Aqua operation', padding=8)
-        required.grid(row=12, column=0, columnspan=3, sticky='ew', pady=(2, 8))
+        # Overview — only status and the next useful actions.
+        overview = self.overview_tab
+        ttk.Label(overview, text='Server overview', font=('', 15, 'bold')).pack(anchor='w')
+        ttk.Label(
+            overview,
+            text='Use Setup Assistant for first installation. Detailed network and maintenance controls live in their own tabs.',
+            wraplength=780,
+        ).pack(anchor='w', pady=(4, 12))
+        summary = ttk.LabelFrame(overview, text='Required setup for normal Aqua operation', padding=12)
+        summary.pack(fill='x', pady=(0, 12))
         self._required_setup_label = tk.Label(
-            required,
+            summary,
             textvariable=self.required_setup_var,
             justify='left',
             anchor='w',
             fg='#c62828',
             font=('', 10, 'bold'),
-            wraplength=690,
+            wraplength=760,
         )
-        self._required_setup_label.grid(row=0, column=0, columnspan=3, sticky='ew')
-        ttk.Button(required, text='Fix next REQUIRED item', command=self.fix_next_required_item).grid(row=1, column=0, sticky='w', pady=(8, 0))
-        ttk.Button(required, text='Refresh REQUIRED setup', command=self.refresh_required_setup).grid(row=1, column=1, sticky='w', padx=(8, 0), pady=(8, 0))
-        ttk.Button(required, text='Open Remote Login Settings', command=self.open_remote_login_settings).grid(row=1, column=2, sticky='e', padx=(8, 0), pady=(8, 0))
-        required.columnconfigure(0, weight=1)
+        self._required_setup_label.pack(fill='x')
+        overview_actions = ttk.Frame(summary)
+        overview_actions.pack(fill='x', pady=(10, 0))
+        ttk.Button(overview_actions, text='Run Setup Assistant', command=self.open_setup_assistant).pack(side='left')
+        ttk.Button(overview_actions, text='Fix next REQUIRED item', command=self.fix_next_required_item).pack(side='left', padx=(8, 0))
+        ttk.Button(overview_actions, text='Refresh', command=self.refresh_required_setup).pack(side='left', padx=(8, 0))
+        server_box = ttk.LabelFrame(overview, text='Quick actions', padding=12)
+        server_box.pack(fill='x')
+        ttk.Button(server_box, text='Open Shared Folder', command=self.open_shared_folder).pack(side='left')
+        ttk.Button(server_box, text='Check for updates', command=self.check_updates).pack(side='left', padx=(8, 0))
+        ttk.Button(server_box, text='Show Logs', command=lambda: self.notebook.select(self.logs_tab)).pack(side='left', padx=(8, 0))
 
-        perms = ttk.LabelFrame(outer, text='macOS permissions', padding=8)
-        perms.grid(row=13, column=0, columnspan=3, sticky='ew', pady=(2, 6))
+        # Connection.
+        connection = self.connection_tab
+        connection.columnconfigure(1, weight=1)
+        ttk.Label(connection, text='Connection', font=('', 15, 'bold')).grid(row=0, column=0, columnspan=3, sticky='w', pady=(0, 12))
+        ttk.Label(connection, text='Mac LAN IP').grid(row=1, column=0, sticky='w', pady=5)
+        self.ip_box = ttk.Combobox(connection, textvariable=self.bind_var, values=ips, width=28)
+        self.ip_box.grid(row=1, column=1, sticky='ew', pady=5)
+        ttk.Label(connection, text='Port').grid(row=2, column=0, sticky='w', pady=5)
+        ttk.Entry(connection, textvariable=self.port_var, width=12).grid(row=2, column=1, sticky='w', pady=5)
+        ttk.Label(connection, text='Shared folder').grid(row=3, column=0, sticky='w', pady=5)
+        ttk.Entry(connection, textvariable=self.share_var).grid(row=3, column=1, sticky='ew', pady=5)
+        share_actions = ttk.Frame(connection)
+        share_actions.grid(row=3, column=2, padx=(8, 0), pady=5)
+        ttk.Button(share_actions, text='Open', command=self.open_shared_folder).pack(side='left')
+        ttk.Button(share_actions, text='Choose…', command=self.choose_share).pack(side='left', padx=(6, 0))
+        ttk.Label(connection, text='ZMB session password').grid(row=4, column=0, sticky='w', pady=(12, 5))
+        self.password_entry = ttk.Entry(connection, textvariable=self.password_var, show='•')
+        self.password_entry.grid(row=4, column=1, sticky='ew', pady=(12, 5))
+        ttk.Checkbutton(connection, text='Show', variable=self.show_password_var, command=self.toggle_password).grid(row=4, column=2, padx=(8, 0), pady=(12, 5))
+        password_note = ('Saved verifier available — leave blank to reuse it.' if self.saved_password else 'Set a separate ZMB password of at least 12 characters; your macOS password is not used here.')
+        ttk.Label(connection, text=password_note, wraplength=650).grid(row=5, column=1, columnspan=2, sticky='w')
+        ttk.Checkbutton(connection, text='Remember password verifier on this Mac', variable=self.remember_password_var).grid(row=6, column=1, columnspan=2, sticky='w', pady=(5, 8))
+        ttk.Button(connection, text='Save password', command=self.save_setup_password).grid(row=7, column=1, sticky='w', pady=(0, 10))
+        ttk.Label(connection, text='TLS fingerprint').grid(row=8, column=0, sticky='w', pady=5)
+        ttk.Entry(connection, textvariable=self.fp_var, state='readonly').grid(row=8, column=1, sticky='ew', pady=5)
+        ttk.Button(connection, text='Copy', command=self.copy_fp).grid(row=8, column=2, padx=(8, 0), pady=5)
+        ttk.Checkbutton(
+            connection,
+            text='Advertise this Mac to ZMB clients on the local LAN while the server is running',
+            variable=self.advertise_var,
+        ).grid(row=9, column=0, columnspan=3, sticky='w', pady=(14, 5))
+        ttk.Checkbutton(
+            connection,
+            text='Launch ZorinMacBridge Server when this macOS user logs in',
+            variable=self.launch_at_login_var,
+            command=self._startup_settings_changed,
+        ).grid(row=10, column=0, columnspan=3, sticky='w', pady=5)
+        ttk.Checkbutton(
+            connection,
+            text='Automatically start the server when the app launches',
+            variable=self.auto_start_var,
+            command=self._startup_settings_changed,
+        ).grid(row=11, column=0, columnspan=3, sticky='w', pady=5)
+
+        # Setup.
+        setup = self.setup_tab
+        ttk.Label(setup, text='Setup', font=('', 15, 'bold')).pack(anchor='w')
+        ttk.Label(setup, text='Permissions and system components required by ZorinMacBridge.', wraplength=780).pack(anchor='w', pady=(4, 12))
+        ttk.Button(setup, text='Run Setup Assistant', command=self.open_setup_assistant).pack(anchor='w', pady=(0, 12))
+        perms = ttk.LabelFrame(setup, text='macOS permissions', padding=10)
+        perms.pack(fill='x', pady=(0, 12))
         ttk.Label(perms, textvariable=self.screen_permission_var).grid(row=0, column=0, sticky='w')
-        ttk.Button(perms, text='Request Screen Recording Access', command=self.request_screen_recording_access).grid(row=0, column=1, padx=(12, 0), sticky='e')
-        ttk.Button(perms, text='Settings', command=self.open_screen_settings).grid(row=0, column=2, padx=(8, 0), sticky='e')
-        ttk.Label(perms, textvariable=self.input_permission_var).grid(row=1, column=0, sticky='w', pady=(6, 0))
-        ttk.Button(perms, text='Request Mouse/Keyboard Access', command=self.request_input_access).grid(row=1, column=1, padx=(12, 0), pady=(6, 0), sticky='e')
-        ttk.Button(perms, text='Settings', command=self.open_accessibility_settings).grid(row=1, column=2, padx=(8, 0), pady=(6, 0), sticky='e')
-        ttk.Label(perms, textvariable=self.signing_var).grid(row=2, column=0, columnspan=3, sticky='w', pady=(8, 0))
-        permission_actions = ttk.Frame(perms)
-        permission_actions.grid(row=3, column=0, columnspan=3, sticky='ew', pady=(8, 0))
-        ttk.Button(permission_actions, text='Refresh permission status', command=self.refresh_permission_status).pack(side='left')
-        ttk.Button(permission_actions, text='Restart app', command=self.restart_app).pack(side='left', padx=(8, 0))
+        ttk.Button(perms, text='Request Screen Recording Access', command=self.request_screen_recording_access).grid(row=0, column=1, padx=(12, 0))
+        ttk.Button(perms, text='Settings', command=self.open_screen_settings).grid(row=0, column=2, padx=(8, 0))
+        ttk.Label(perms, textvariable=self.input_permission_var).grid(row=1, column=0, sticky='w', pady=(8, 0))
+        ttk.Button(perms, text='Request Mouse/Keyboard Access', command=self.request_input_access).grid(row=1, column=1, padx=(12, 0), pady=(8, 0))
+        ttk.Button(perms, text='Settings', command=self.open_accessibility_settings).grid(row=1, column=2, padx=(8, 0), pady=(8, 0))
+        ttk.Label(perms, textvariable=self.signing_var).grid(row=2, column=0, columnspan=3, sticky='w', pady=(10, 0))
         perms.columnconfigure(0, weight=1)
+        system = ttk.LabelFrame(setup, text='System services', padding=10)
+        system.pack(fill='x')
+        ttk.Label(system, textvariable=self.admin_status_var, wraplength=750).pack(anchor='w')
+        sys_actions = ttk.Frame(system)
+        sys_actions.pack(fill='x', pady=(10, 0))
+        ttk.Button(sys_actions, text='Install / Repair', command=self.enable_unattended_access).pack(side='left')
+        ttk.Button(sys_actions, text='Remote Login Settings', command=self.open_remote_login_settings).pack(side='left', padx=(8, 0))
+        ttk.Button(sys_actions, text='Refresh', command=self.refresh_admin_status).pack(side='left', padx=(8, 0))
 
-        admin = ttk.LabelFrame(outer, text='Unattended access / recovery', padding=8)
-        admin.grid(row=14, column=0, columnspan=3, sticky='ew', pady=(2, 6))
-        ttk.Label(admin, textvariable=self.admin_status_var, wraplength=650).grid(row=0, column=0, columnspan=3, sticky='w')
+        # Recovery.
+        recovery = self.recovery_tab
+        ttk.Label(recovery, text='Recovery', font=('', 15, 'bold')).pack(anchor='w')
         ttk.Label(
-            admin,
-            text='One-time local setup. Installs a root LaunchDaemon with no network listener; remote administration uses macOS SSH with a restricted per-device key.',
-            wraplength=650,
-        ).grid(row=1, column=0, columnspan=3, sticky='w', pady=(4, 6))
-        ttk.Button(admin, text='Enable / Repair', command=self.enable_unattended_access).grid(row=2, column=0, sticky='w')
-        ttk.Button(admin, text='Copy SSH fingerprint', command=self.copy_ssh_fingerprint).grid(row=2, column=1, padx=(8, 0), sticky='w')
-        ttk.Button(admin, text='Disable P0', command=self.disable_unattended_access).grid(row=2, column=2, padx=(8, 0), sticky='w')
-        admin.columnconfigure(0, weight=1)
+            recovery,
+            text='Repair ZMB-owned unattended/startup components without changing capture, TLS, wake or input backends.',
+            wraplength=780,
+        ).pack(anchor='w', pady=(4, 12))
+        admin = ttk.LabelFrame(recovery, text='Unattended access / recovery', padding=10)
+        admin.pack(fill='x')
+        ttk.Label(admin, textvariable=self.admin_status_var, wraplength=750).pack(anchor='w')
+        recovery_actions = ttk.Frame(admin)
+        recovery_actions.pack(fill='x', pady=(10, 0))
+        ttk.Button(recovery_actions, text='Enable / Repair', command=self.enable_unattended_access).pack(side='left')
+        ttk.Button(recovery_actions, text='Copy SSH fingerprint', command=self.copy_ssh_fingerprint).pack(side='left', padx=(8, 0))
+        ttk.Button(recovery_actions, text='Disable P0 only', command=self.disable_unattended_access).pack(side='left', padx=(8, 0))
+        ttk.Button(recovery_actions, text='Refresh', command=self.refresh_admin_status).pack(side='left', padx=(8, 0))
+        ttk.Label(
+            recovery,
+            text='“Disable P0 only” leaves the desktop application and normal macOS Remote Login unchanged.',
+            wraplength=780,
+        ).pack(anchor='w', pady=(12, 0))
 
-        buttons = ttk.Frame(outer)
-        buttons.grid(row=15, column=0, columnspan=3, sticky='ew', pady=(8, 8))
-        self.start_btn = ttk.Button(buttons, text='Start server', command=self.start)
-        self.start_btn.pack(side='left')
-        self.stop_btn = ttk.Button(buttons, text='Stop server', command=self.stop, state='disabled')
-        self.stop_btn.pack(side='left', padx=(8, 0))
-        ttk.Label(buttons, textvariable=self.status_var).pack(side='right')
+        # Logs.
+        logs = self.logs_tab
+        log_actions = ttk.Frame(logs)
+        log_actions.pack(fill='x', pady=(0, 8))
+        ttk.Label(log_actions, text='Logs', font=('', 15, 'bold')).pack(side='left')
+        ttk.Button(log_actions, text='Clear', command=self.clear_logs).pack(side='right')
+        ttk.Button(log_actions, text='Copy all', command=self.copy_logs).pack(side='right', padx=(0, 6))
+        ttk.Button(log_actions, text='Save…', command=self.save_logs).pack(side='right', padx=(0, 6))
+        self.log = tk.Text(logs, height=20, wrap='word', state='disabled')
+        self.log.pack(fill='both', expand=True)
 
-        note = ('Screen Recording is required for video. Accessibility is required for mouse/keyboard control.\n'
-                'Normal Aqua Desktop readiness is separate from optional LoginWindow verification after reboot.\n'
-                'Use only on a trusted LAN. Do not expose ZorinMacBridge or SSH directly to the public Internet.')
-        ttk.Label(outer, text=note, wraplength=700).grid(row=16, column=0, columnspan=3, sticky='w', pady=(4, 8))
+        # Maintenance.
+        maintenance = self.maintenance_tab
+        ttk.Label(maintenance, text='Maintenance', font=('', 15, 'bold')).pack(anchor='w')
+        ttk.Label(
+            maintenance,
+            text='Update, rerun setup, or remove ZorinMacBridge from this Mac.',
+            wraplength=780,
+        ).pack(anchor='w', pady=(4, 14))
+        maintenance_actions = ttk.Frame(maintenance)
+        maintenance_actions.pack(fill='x')
+        ttk.Button(maintenance_actions, text='Check for updates', command=self.check_updates).pack(side='left')
+        ttk.Button(maintenance_actions, text='Run Setup Assistant', command=self.open_setup_assistant).pack(side='left', padx=(8, 0))
+        ttk.Button(maintenance_actions, text='Repair unattended access', command=self.enable_unattended_access).pack(side='left', padx=(8, 0))
+        danger = ttk.LabelFrame(maintenance, text='Uninstall', padding=12)
+        danger.pack(fill='x', pady=(22, 0))
+        ttk.Label(
+            danger,
+            text='Full clean uninstall removes the ZMB app, ZMB-owned launch jobs, helpers, pairing state and local ZMB configuration. '
+                 'Remote Login, unrelated SSH keys and the shared Virtual HID driver package are preserved.',
+            wraplength=750,
+        ).pack(anchor='w')
+        ttk.Button(danger, text='Uninstall ZorinMacBridge…', command=self.open_uninstall_dialog).pack(anchor='w', pady=(12, 0))
 
-        self.log = tk.Text(outer, height=12, wrap='word', state='disabled')
-        self.log.grid(row=17, column=0, columnspan=3, sticky='nsew')
-        outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(17, weight=1)
-
+        footer = ttk.Label(
+            outer,
+            text='Use only on a trusted LAN. ZorinMacBridge and SSH should not be exposed directly to the public Internet.',
+            wraplength=850,
+        )
+        footer.pack(fill='x', pady=(8, 0))
         self.root.protocol('WM_DELETE_WINDOW', self.on_close)
+
+    def open_setup_assistant(self) -> None:
+        if self._setup_assistant is not None:
+            try:
+                self._setup_assistant.window.deiconify()
+                self._setup_assistant.window.lift()
+                self._setup_assistant.window.focus_force()
+                return
+            except Exception:
+                self._setup_assistant = None
+        self._setup_assistant = _SetupAssistant(self)
+
+    def save_setup_password(self, *, show_success: bool = True) -> bool:
+        password = self.password_var.get()
+        if not password:
+            if self.saved_password is not None:
+                if show_success:
+                    messagebox.showinfo('Session password', 'A ZorinMacBridge session password verifier is already configured.')
+                return True
+            messagebox.showerror('Session password', 'Enter a ZorinMacBridge session password first.')
+            return False
+        if len(password) < 12:
+            messagebox.showerror('Session password', 'Use a session password with at least 12 characters.')
+            return False
+        if not self.remember_password_var.get():
+            messagebox.showwarning(
+                'Session password',
+                'Setup requires a saved verifier for unattended/reboot operation. Enable “Remember password verifier on this Mac”.',
+            )
+            return False
+        self.saved_password = save_server_password(password)
+        self.password_var.set('')
+        self._log('Session password verifier saved by Setup Assistant; plaintext password was not stored.')
+        self._update_required_setup()
+        if show_success:
+            messagebox.showinfo('Session password', 'ZorinMacBridge session password verifier saved.')
+        return True
+
+    def enable_recommended_startup(self) -> None:
+        self.launch_at_login_var.set(True)
+        self.auto_start_var.set(True)
+        self._startup_settings_changed()
+        self._update_required_setup()
+
+    def clear_logs(self) -> None:
+        self.log.configure(state='normal')
+        self.log.delete('1.0', 'end')
+        self.log.configure(state='disabled')
+
+    def copy_logs(self) -> None:
+        text = self.log.get('1.0', 'end-1c')
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+
+    def save_logs(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title='Save ZorinMacBridge logs',
+            defaultextension='.txt',
+            filetypes=[('Text files', '*.txt'), ('All files', '*.*')],
+            initialfile='ZorinMacBridge-Server.log.txt',
+        )
+        if not path:
+            return
+        Path(path).write_text(self.log.get('1.0', 'end-1c') + '\n', encoding='utf-8')
+
+    def open_uninstall_dialog(self) -> None:
+        _UninstallDialog(self)
+
+    def clean_uninstall(self, *, full_clean: bool) -> None:
+        self.status_var.set('Uninstalling…')
+        keep_config = not full_clean
+
+        def worker() -> None:
+            try:
+                output = clean_uninstall_zmb(keep_user_config=keep_config)
+                self.root.after(0, lambda out=output: done(out, None))
+            except Exception as exc:
+                self.root.after(0, lambda err=str(exc): done('', err))
+
+        def done(output: str, error: str | None) -> None:
+            if error:
+                self.status_var.set('Stopped' if not (self.thread and self.thread.is_alive()) else 'Running')
+                self._log('Full uninstall failed: ' + error)
+                messagebox.showerror('Uninstall ZorinMacBridge', 'Uninstall failed.\n\n' + error)
+                return
+            if output:
+                self._log(output)
+            messagebox.showinfo(
+                'ZorinMacBridge removed',
+                'ZorinMacBridge was removed from this Mac.\n\n'
+                + ('Local ZMB configuration was also removed.' if full_clean else 'Local ZMB configuration was kept for reinstall.')
+                + '\n\nRemote Login and the shared Virtual HID driver were left unchanged.',
+            )
+            try:
+                self.root.destroy()
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _current_required_setup(self):
         return evaluate_setup_requirements(
@@ -616,9 +1043,11 @@ class ServerGUI:
         keys = {item.key for item in missing}
 
         if keys & {'p0_status', 'p0_installed', 'p0_daemon', 'update_daemon'}:
+            self.notebook.select(self.setup_tab)
             self.enable_unattended_access()
             return
         if 'remote_login' in keys or 'ssh_transport' in keys:
+            self.notebook.select(self.setup_tab)
             self.open_remote_login_settings()
             messagebox.showwarning(
                 'REQUIRED: Remote Login',
@@ -632,12 +1061,15 @@ class ServerGUI:
             self.enable_unattended_access()
             return
         if 'screen_recording' in keys:
+            self.notebook.select(self.setup_tab)
             self.request_screen_recording_access()
             return
         if 'accessibility' in keys:
+            self.notebook.select(self.setup_tab)
             self.request_input_access()
             return
         if 'session_password' in keys:
+            self.notebook.select(self.connection_tab)
             try:
                 self.password_entry.focus_set()
             except Exception:
@@ -1342,6 +1774,8 @@ def main() -> None:
 
     root = tk.Tk()
     gui = ServerGUI(root)
+    if '--setup-assistant' in sys.argv:
+        root.after(300, gui.open_setup_assistant)
     if bootstrap_error:
         gui._log('Persistent local code-identity migration failed: ' + bootstrap_error)
         root.after(

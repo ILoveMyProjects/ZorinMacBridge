@@ -134,9 +134,10 @@ if [ "$APP_ONLY" -eq 0 ]; then
     echo "Create/publish the v0.14.0 release first, then run this installer again." >&2
     exit 65
   fi
-  echo "Configuring unattended access, macOS Remote Login (SSH), and the ZorinMacBridge session password…"
-  "$DEST/Contents/MacOS/ZorinMacBridge Server" --terminal-setup
+  echo "Opening the ZorinMacBridge Setup Assistant…"
+  echo "The remaining steps are completed in the app; macOS will request administrator approval only when needed."
+  /usr/bin/open "$DEST" --args --setup-assistant
 else
   echo
-  echo "Skipped unattended/SSH setup because --app-only was used."
+  echo "Skipped Setup Assistant because --app-only was used."
 fi

@@ -1,5 +1,7 @@
 # macOS code signing
 
+> **0.15.46 note:** The macOS UI/installer was reorganized without changing the input backend.
+>
 > **0.15.45 input update:** LoginWindow keyboard/mouse readiness is independent of the older in-app CoreHID capability gate. The release bundles a pinned, separately signed DriverKit virtual-HID package; ZMB talks to its root-only daemon using client protocol v7. The older managed-signing sections below remain as compatibility/history for release identity and capture diagnostics.
 
 ZorinMacBridge has two macOS capability tiers. Starting with 0.15.26, official tagged releases always preserve a working Aqua artifact: the workflow upgrades it to managed Developer ID/provisioning when those credentials validate, and otherwise publishes the Aqua/ad-hoc fallback instead of failing the whole release.

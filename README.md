@@ -14,7 +14,6 @@ The remote session does **not** require a vendor cloud, relay, account, telemetr
 
 > **Status:** experimental. This project is still under active development and has not received an independent security audit.
 
-> **User-requested note:** `jestes jbaa scedrksa kurwa jbanadizdkeo`
 
 > **Release history:** version-by-version changes live only in [`CHANGELOG.md`](CHANGELOG.md). README documents the current project state, setup and usage.
 
@@ -73,11 +72,22 @@ Copy and paste one command on the Mac:
 curl -fsSL https://raw.githubusercontent.com/ILoveMyProjects/ZorinMacBridge/master/install-macos.sh | bash
 ```
 
-The macOS server supports **Apple Silicon (arm64) only**. The installer verifies the Mac architecture, downloads the arm64 `.dmg`, verifies SHA-256, and installs **ZorinMacBridge Server** into `/Applications`. Intel Macs are not supported.
+The macOS server supports **Apple Silicon (arm64) only**. The installer verifies the Mac architecture, downloads the arm64 `.dmg`, verifies SHA-256, installs **ZorinMacBridge Server** into `/Applications`, and then opens the graphical **Setup Assistant**. Intel Macs are not supported.
+
+The Setup Assistant keeps first-time configuration inside the Mac application: it guides you through the ZMB session password, Screen Recording, mouse/keyboard permission, unattended access/Remote Login, Virtual HID readiness and startup settings. Administrator approval is requested by macOS only when a system component needs it.
 
 Normal logged-in Aqua operation keeps the stable per-Mac local application identity used by existing installs. Reboot-to-LoginWindow input is handled independently by a bundled, signed driver-backed virtual HID keyboard and pointing device installed during **Enable / Repair**.
 
 For LoginWindow, ScreenCaptureKit/VideoToolbox remains the video path. Keyboard and mouse events still arrive over the existing authenticated ZMB control connection, but the Mac now terminates them as real virtual HID reports through the root-only virtual-HID service. The DriverKit backend is selected before the older CoreHID/IOHIDSystem/IOHIDUserDevice/Quartz fallbacks. The first setup submits the driver-extension activation request; if macOS asks for one-time Driver Extensions approval, approve it and reboot once. Physical readiness is verified separately on real hardware.
+
+## macOS maintenance and clean reinstall
+
+Open **Maintenance → Uninstall ZorinMacBridge…** to remove ZMB from the Mac. Two modes are available:
+
+- **Full clean uninstall** removes the application, ZMB-owned launch jobs/helpers, ZMB administration pairing entries and the current user’s ZMB configuration, so the next installation starts fresh.
+- **Keep configuration** removes the application and ZMB-owned system services while retaining the current user’s ZMB settings for reinstall.
+
+For safety, uninstall does **not** disable normal macOS Remote Login, remove unrelated SSH keys, or remove the shared Karabiner DriverKit VirtualHIDDevice package because other software may use those system components.
 
 ## Remote desktop architecture
 
@@ -118,14 +128,13 @@ Quality does **not** change resolution or frame rate. The fixed bitrate presets 
 
 ### First setup on the Mac
 
-1. Install **ZorinMacBridge Server**.
-2. Open it locally once.
-3. In the macOS server window, use **Request Screen Recording Access** if the status says *Not granted*, then approve **ZorinMacBridge Server** in macOS. capture stays inside that same app process.
-4. Use **Request Mouse/Keyboard Access** if input control is not granted. The app requests permission for synthetic Core Graphics events and opens the relevant macOS privacy pane when needed.
-5. Enter a session password of at least 12 characters.
-6. Keep **Remember password verifier on this Mac** enabled.
-7. Click **Start server**.
-8. If you want unattended recovery, use **Enable / Repair** in the **Unattended access / recovery** section and keep the shown SSH fingerprint for the first Zorin pairing.
+1. Install **ZorinMacBridge Server**. The normal installer opens the **Setup Assistant** automatically.
+2. Follow the wizard through the ZMB session password, Screen Recording, mouse/keyboard permission, system services/Remote Login and startup settings.
+3. When macOS opens a privacy or Driver Extensions pane, approve the requested ZorinMacBridge/Virtual HID item and return to the wizard.
+4. Use **Check again** until the final verification page reports the required normal-Aqua setup as ready.
+5. Start the server from the wizard or from **Overview**.
+
+The main Mac window is organized into **Overview**, **Connection**, **Setup**, **Recovery**, **Logs** and **Maintenance** tabs. You can rerun the Setup Assistant at any time from Setup or Maintenance.
 
 The Mac stores only a salted PBKDF2 password verifier; it does not store the plaintext session password.
 
@@ -154,7 +163,7 @@ ZorinMacBridge uses two different credentials:
 - **ZorinMacBridge session password** — an app-specific password for the normal Desktop connection. Create it on the Mac during command-line installation or in the Server window. It should be different from your macOS login password. The Mac stores only a salted PBKDF2 verifier.
 - **macOS account password** — the normal password you use to log in/unlock the Mac. It is used only once by **System → Pair / Configure** to authenticate the first SSH connection and install the restricted Ed25519 device key. The Zorin client does not save this password.
 
-`install-macos.sh` now performs unattended setup by default: it enables Remote Login (SSH), installs/repairs P0, verifies that SSH was enabled, and prompts for the ZorinMacBridge session password. Use `./install-macos.sh --app-only` only when you intentionally want to install the app without P0/SSH setup.
+`install-macos.sh` now opens the graphical Setup Assistant after installing the verified application. The wizard performs the same ZMB setup actions from the GUI instead of prompting through the installer terminal. Use `./install-macos.sh --app-only` only when you intentionally want to install the app without opening the assistant. The legacy `--terminal-setup` application CLI remains available for compatibility and diagnostics.
 
 
 ### Desktop trust is part of System pairing

@@ -1,3 +1,11 @@
+# 0.15.46 — macOS GUI & Setup Assistant
+
+- Reorganized the macOS server into six tabs: Overview, Connection, Setup, Recovery, Logs and Maintenance.
+- Added a guided Setup Assistant for the ZMB session password, macOS permissions, unattended access, Virtual HID readiness and startup settings.
+- Changed the default macOS installer handoff: after the verified app is installed, it opens the GUI Setup Assistant instead of running terminal setup. The legacy `--terminal-setup` CLI remains available for compatibility.
+- Added a Maintenance uninstall flow with two choices: full clean ZMB removal or app/services removal while keeping user configuration. The cleanup preserves macOS Remote Login, unrelated SSH keys and the shared Karabiner DriverKit VirtualHIDDevice package.
+- Added log actions (clear, copy, save) and moved existing controls into focused tabs without changing capture, TLS, wake, input dispatch, virtual-HID protocol or LoginWindow handoff behavior.
+
 # 0.15.45 — DriverKit activation/readiness recovery
 
 - Fixes the physical 0.15.44 failure where the virtual-HID daemon socket was reachable but DriverKit still reported `keyboard=False` and `pointing=False`; ZMB no longer treats daemon-socket presence as device readiness.
