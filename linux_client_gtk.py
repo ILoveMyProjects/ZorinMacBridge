@@ -653,6 +653,9 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self.picture.add_controller(click)
 
         scroll = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.BOTH_AXES)
+        # Gtk.Picture can sit under gesture controllers. Capture scroll before
+        # child/ancestor handling so both wheel and touchpad events reach ZMB.
+        scroll.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         scroll.connect('scroll', self._gtk_scroll)
         self.picture.add_controller(scroll)
 
@@ -1945,15 +1948,22 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                 self._log('INFO', f'Pre-login mouse TX: action=button-up button={button} x={pos[0]:.3f} y={pos[1]:.3f}.')
 
     def _gtk_scroll(self, _controller, dx, dy):
+        # Log the receipt of a GTK wheel gesture separately from network send:
+        # no TX log must never be mistaken for a Mac-side dispatch failure.
+        now = time.monotonic()
         if not self._remote_input_ready():
+            if now - self._last_scroll_tx_log_at >= 2.0:
+                self._last_scroll_tx_log_at = now
+                self._log('INFO', f'Mouse scroll GTK RX blocked: dx={dx:.3f} dy={dy:.3f}; '
+                                  f'connected={self.connected} capture={self.capture_input_var.get()}.')
             return False
         sx, sy = self._scroll_accumulator.feed(dx, dy)
         if sx or sy:
             self._enqueue(pack_packet(SCROLL, __import__('struct').pack('!ii', sx, sy)))
-            now = time.monotonic()
-            if now - self._last_scroll_tx_log_at >= 2.0:
-                self._last_scroll_tx_log_at = now
-                self._log('INFO', f'Mouse scroll TX: dx={sx} dy={sy} prelogin={self.prelogin_session}.')
+        if now - self._last_scroll_tx_log_at >= 2.0:
+            self._last_scroll_tx_log_at = now
+            self._log('INFO', f'Mouse scroll GTK RX: dx={dx:.3f} dy={dy:.3f}; '
+                              f'TX dx={sx} dy={sy}; prelogin={self.prelogin_session}.')
         return True
 
     @staticmethod

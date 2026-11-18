@@ -1,3 +1,13 @@
+# 0.15.50 — Scroll input delivery and Linux DEB packaging repair
+
+- Installs `zmb_scroll_input.py` with the Linux GTK client. In 0.15.49 the source was present but its omission from `.deb` caused `ModuleNotFoundError` at startup.
+- Validates direct first-party imports against the staged package files, and repeats validation against an extracted final `.deb` to catch packaging omissions before publication.
+- Runs GTK client import smoke tests from a temporary directory outside the source checkout, using only the staged/extracted package library on `PYTHONPATH`.
+- Makes the remote-picture GTK scroll controller run in CAPTURE phase; logs incoming GTK scroll values even when no integer packet is sent or input capture is disabled.
+- Targets macOS Aqua Quartz scroll events at the last known pointer location sent by the remote client; falls back to WindowServer cursor query when unavailable or the selected display changes.
+- Leaves pre-login DriverKit input, input wire protocol, wake/display, TLS, and capture unchanged. Physical scroll delivery on macOS is not claimed PASS without a live test; GTK layout warnings remain separate.
+- A standalone generated `.deb` can be structurally checked on Linux without GTK dependencies; an actual GUI launch still requires a Zorin runtime.
+
 # 0.15.49 — Scroll input & sleeping-display wake
 
 - GTK4 now accepts both discrete wheel and smooth touchpad scroll deltas, accumulating fractional motion instead of rounding small deltas to zero. Resets accumulation on new sessions and logs rate-limited scroll transmissions.

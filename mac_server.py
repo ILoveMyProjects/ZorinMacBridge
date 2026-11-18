@@ -463,6 +463,10 @@ class MacInput:
         self.cg.CGEventSetLocation.restype = None
         self.held_buttons: set[int] = set()
         self.held_modifiers: set[str] = set()
+        # Last position sent by the remote client, not a possibly stale
+        # WindowServer pointer query, is the intended target for remote scroll.
+        self._remote_cursor_position: CGPoint | None = None
+        self._remote_cursor_display: int | None = None
 
     def _combined_session_flags(self) -> int:
         # kCGEventSourceStateCombinedSessionState == 0.  Querying this state is
@@ -516,6 +520,8 @@ class MacInput:
         else:
             etype, button = self.MOUSE_MOVED, 0
         self._post(self.cg.CGEventCreateMouseEvent(None, etype, CGPoint(x, y), button))
+        self._remote_cursor_position = CGPoint(x, y)
+        self._remote_cursor_display = active_input_display()
 
     def button(self, button_num: int, down: bool, nx: float, ny: float) -> None:
         self.move(nx, ny)
@@ -532,6 +538,8 @@ class MacInput:
         x = bounds.origin.x + min(1.0, max(0.0, nx)) * bounds.size.width
         y = bounds.origin.y + min(1.0, max(0.0, ny)) * bounds.size.height
         self._post(self.cg.CGEventCreateMouseEvent(None, etype, CGPoint(x, y), cg_button))
+        self._remote_cursor_position = CGPoint(x, y)
+        self._remote_cursor_display = active_input_display()
         if down:
             self.held_buttons.add(button_num)
         else:
@@ -548,7 +556,10 @@ class MacInput:
         # Without an explicit location CGEventCreateScrollWheelEvent defaults
         # to an unrelated coordinate (often 0,0); the intended window beneath
         # the user's cursor does not receive the scroll on some macOS sessions.
-        position = self._cursor_location()
+        current_display = active_input_display()
+        position = getattr(self, '_remote_cursor_position', None)
+        if position is None or getattr(self, '_remote_cursor_display', None) != current_display:
+            position = self._cursor_location()
         if position is not None:
             self.cg.CGEventSetLocation(event, position)
         self._post(event, with_flags=True)

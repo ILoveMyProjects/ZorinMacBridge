@@ -28,7 +28,9 @@ def test_runtime_modules_are_packaged_and_verified() -> None:
 
 def test_release_smoke_imports_from_staged_package_tree() -> None:
     text = WORKFLOW.read_text(encoding='utf-8')
-    assert 'PYTHONPATH="$APP" /usr/bin/python3 -c "import linux_client_gtk;' in text
+    assert 'PYTHONPATH="$STAGED_APP" /usr/bin/python3 -c "import linux_client_gtk;' in text
+    assert 'SMOKE_CWD=' in text
+    assert 'scripts/verify-linux-deb-staging.py' in text
 
 
 def test_dmg_is_built_and_published() -> None:
