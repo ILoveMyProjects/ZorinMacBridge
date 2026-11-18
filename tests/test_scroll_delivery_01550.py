@@ -38,17 +38,21 @@ inp.held_buttons = set()
 inp.held_modifiers = set()
 inp._remote_cursor_position = None
 inp._remote_cursor_display = None
-inp._post = lambda *args, **kwargs: None
+posted = []
+inp._post = lambda event, **kwargs: posted.append((event, dict(kwargs)))
 inp._bounds = lambda: mac_server.CGRect(mac_server.CGPoint(20, 40), mac_server.CGSize(200, 100))
 inp._cursor_location = lambda: mac_server.CGPoint(999, 999)
 with patch.object(mac_server, 'active_input_display', return_value=42):
     inp.move(.5, .5)
     inp.scroll(0, -3)
 assert cg.locations == [(123, 120, 90)], cg.locations
+assert posted[-1] == (123, {'with_flags': True, 'tap': mac_server.MacInput.SESSION_TAP}), posted
+assert mac_server.MacInput.SESSION_TAP == 1
 # Changing remote displays invalidates the last mouse sample, not the old target.
 with patch.object(mac_server, 'active_input_display', return_value=84):
     inp.scroll(0, -2)
 assert cg.locations[-1] == (123, 999, 999), cg.locations
+assert posted[-1][1].get('tap') == 1
 
 # Exercise actual GTK handler body with a fake window without loading libadwaita.
 module = ast.parse((ROOT / 'linux_client_gtk.py').read_text(encoding='utf-8'))

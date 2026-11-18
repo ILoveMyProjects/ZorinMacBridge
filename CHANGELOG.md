@@ -1,3 +1,10 @@
+# 0.15.51 — Aqua scroll Session Event Tap fix
+
+- Routes only Aqua scroll-wheel events through `kCGSessionEventTap` instead of `kCGHIDEventTap`; mouse movement, clicks and keyboard keep their existing injection path.
+- Keeps the existing GTK scroll capture, fractional accumulation, wire packet format and pre-login DriverKit wheel handling unchanged.
+- Adds a regression check that verifies wheel events use tap `1` while ordinary mouse events still use the default HID tap.
+- This change matches the CoreGraphics scroll injection pattern used by Chromium Remote Desktop on macOS. Static tests verify event construction/routing, but physical scrolling still requires verification on the target Mac.
+
 # 0.15.50 — Scroll input delivery and Linux DEB packaging repair
 
 - Installs `zmb_scroll_input.py` with the Linux GTK client. In 0.15.49 the source was present but its omission from `.deb` caused `ModuleNotFoundError` at startup.

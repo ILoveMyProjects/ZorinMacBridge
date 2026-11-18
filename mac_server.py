@@ -404,6 +404,7 @@ class MacInput:
     OTHER_UP = 26
     OTHER_DRAGGED = 27
     HID_TAP = 0
+    SESSION_TAP = 1
 
     BUTTONS = {1: 0, 2: 2, 3: 1}
     KEYCODES = {
@@ -497,12 +498,12 @@ class MacInput:
             flags |= self.MOD_FLAGS.get(key, 0)
         return flags
 
-    def _post(self, event, *, with_flags: bool = False) -> None:
+    def _post(self, event, *, with_flags: bool = False, tap: int | None = None) -> None:
         if not event:
             return
         if with_flags:
             self.cg.CGEventSetFlags(event, ctypes.c_uint64(self._flags()))
-        self.cg.CGEventPost(self.HID_TAP, event)
+        self.cg.CGEventPost(self.HID_TAP if tap is None else int(tap), event)
         self.cf.CFRelease(event)
 
     def move(self, nx: float, ny: float) -> None:
@@ -562,7 +563,12 @@ class MacInput:
             position = self._cursor_location()
         if position is not None:
             self.cg.CGEventSetLocation(event, position)
-        self._post(event, with_flags=True)
+        # Scroll events are session-level input.  Posting them at the HID tap
+        # works inconsistently on current macOS even when mouse move/button
+        # injection succeeds.  Keep the proven HID tap for pointer/keyboard
+        # and route only wheel events through kCGSessionEventTap, matching
+        # remote-desktop implementations such as Chromium.
+        self._post(event, with_flags=True, tap=self.SESSION_TAP)
 
     def key(self, keysym: str, down: bool) -> None:
         code = self.KEYCODES.get(keysym)

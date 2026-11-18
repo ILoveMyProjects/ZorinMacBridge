@@ -42,7 +42,7 @@ mac_input.scroll(0, 0)
 assert posts == []
 mac_input.scroll(2, -3)
 assert quartz.locations == [(123, 42, 77)]
-assert posts == [(123, {'with_flags': True})]
+assert posts == [(123, {'with_flags': True, 'tap': mac_server.MacInput.SESSION_TAP})]
 assert quartz.created[0][3].value == -3
 assert quartz.created[0][4].value == 2
 
