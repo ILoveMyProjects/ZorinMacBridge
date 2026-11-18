@@ -405,6 +405,7 @@ class MacInput:
     OTHER_DRAGGED = 27
     HID_TAP = 0
     SESSION_TAP = 1
+    PIXEL_SCROLL_UNIT = 0
 
     BUTTONS = {1: 0, 2: 2, 3: 1}
     KEYCODES = {
@@ -549,26 +550,18 @@ class MacInput:
     def scroll(self, dx: int, dy: int) -> None:
         if not (dx or dy):
             return
+        # Match the macOS remote-input path used by Chromium Remote Desktop:
+        # wheel deltas are pixel units, created with the default event source,
+        # and posted at the session tap.  Do not override event location or
+        # modifier flags here; CoreGraphics routes the wheel event using the
+        # current session pointer state.
         event = self.cg.CGEventCreateScrollWheelEvent(
-            None, ctypes.c_uint32(1), ctypes.c_uint32(2), ctypes.c_int32(dy), ctypes.c_int32(dx)
+            None, ctypes.c_uint32(self.PIXEL_SCROLL_UNIT), ctypes.c_uint32(2),
+            ctypes.c_int32(dy), ctypes.c_int32(dx)
         )
         if not event:
             raise RuntimeError('CoreGraphics could not create scroll wheel event')
-        # Without an explicit location CGEventCreateScrollWheelEvent defaults
-        # to an unrelated coordinate (often 0,0); the intended window beneath
-        # the user's cursor does not receive the scroll on some macOS sessions.
-        current_display = active_input_display()
-        position = getattr(self, '_remote_cursor_position', None)
-        if position is None or getattr(self, '_remote_cursor_display', None) != current_display:
-            position = self._cursor_location()
-        if position is not None:
-            self.cg.CGEventSetLocation(event, position)
-        # Scroll events are session-level input.  Posting them at the HID tap
-        # works inconsistently on current macOS even when mouse move/button
-        # injection succeeds.  Keep the proven HID tap for pointer/keyboard
-        # and route only wheel events through kCGSessionEventTap, matching
-        # remote-desktop implementations such as Chromium.
-        self._post(event, with_flags=True, tap=self.SESSION_TAP)
+        self._post(event, tap=self.SESSION_TAP)
 
     def key(self, keysym: str, down: bool) -> None:
         code = self.KEYCODES.get(keysym)
@@ -1826,7 +1819,8 @@ def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, prelogin_lea
                         now_scroll = time.monotonic()
                         if now_scroll - last_scroll_rx_log_at >= 2.0:
                             last_scroll_rx_log_at = now_scroll
-                            log(f'[control] scroll RX dx={dx} dy={dy} dispatch=SUBMITTED_UNVERIFIED')
+                            scroll_dispatch = 'PRELOGIN_SUBMITTED_UNVERIFIED' if prelogin else 'SESSION_PIXEL_SUBMITTED_UNVERIFIED'
+                            log(f'[control] scroll RX dx={dx} dy={dy} dispatch={scroll_dispatch}')
                     except Exception as exc:
                         log(f'[control] scroll event rejected: {type(exc).__name__}: {exc}')
                 elif kind == KEY:

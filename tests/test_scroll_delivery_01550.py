@@ -45,13 +45,14 @@ inp._cursor_location = lambda: mac_server.CGPoint(999, 999)
 with patch.object(mac_server, 'active_input_display', return_value=42):
     inp.move(.5, .5)
     inp.scroll(0, -3)
-assert cg.locations == [(123, 120, 90)], cg.locations
-assert posted[-1] == (123, {'with_flags': True, 'tap': mac_server.MacInput.SESSION_TAP}), posted
+assert cg.locations == [], cg.locations
+assert posted[-1] == (123, {'tap': mac_server.MacInput.SESSION_TAP}), posted
 assert mac_server.MacInput.SESSION_TAP == 1
-# Changing remote displays invalidates the last mouse sample, not the old target.
+# Scroll routing follows the current session pointer; changing display does not
+# synthesize a separate wheel-event location.
 with patch.object(mac_server, 'active_input_display', return_value=84):
     inp.scroll(0, -2)
-assert cg.locations[-1] == (123, 999, 999), cg.locations
+assert cg.locations == [], cg.locations
 assert posted[-1][1].get('tap') == 1
 
 # Exercise actual GTK handler body with a fake window without loading libadwaita.

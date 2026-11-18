@@ -21,7 +21,7 @@ s2 = ScrollAccumulator(scale=3.0)
 assert sum(s2.feed(0, 0.2)[1] for _ in range(10)) == -6
 assert s2.feed(-10000, 0)[0] == 127  # packet emission is clamped
 
-# Quartz wheel events should target the actual Mac cursor, not position (0,0).
+# Aqua wheel events now match the session-level pixel injection path.
 class FakeQuartz:
     def __init__(self):
         self.created = []
@@ -41,8 +41,9 @@ mac_input._post = lambda event, **kw: posts.append((event, kw))
 mac_input.scroll(0, 0)
 assert posts == []
 mac_input.scroll(2, -3)
-assert quartz.locations == [(123, 42, 77)]
-assert posts == [(123, {'with_flags': True, 'tap': mac_server.MacInput.SESSION_TAP})]
+assert quartz.locations == []
+assert posts == [(123, {'tap': mac_server.MacInput.SESSION_TAP})]
+assert quartz.created[0][1].value == 0
 assert quartz.created[0][3].value == -3
 assert quartz.created[0][4].value == 2
 
@@ -82,7 +83,7 @@ assert "self._wake_display_for_video_async(reason='aqua-session-connected')" in 
 assert 'now - self._last_display_wake_at) < 30.0' in client
 assert 'wake_sleeping_display_before_capture(log=log)' in server
 assert 'CGDisplayIsAsleep' in server
-assert 'dispatch=SUBMITTED_UNVERIFIED' in server
-assert 'CGEventSetLocation(event, position)' in server
+assert 'SESSION_PIXEL_SUBMITTED_UNVERIFIED' in server
+assert 'PIXEL_SCROLL_UNIT = 0' in server
 assert 'if not self.prelogin_session:' in client
 print('scroll/wake 0.15.49 regression tests: OK')

@@ -528,8 +528,21 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         var content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        if content.displays.isEmpty {
+            // A physical display can already be waking in CoreGraphics while
+            // ScreenCaptureKit still publishes an empty display list.  Treat
+            // that as a bounded startup race, not an immediate stream failure.
+            log("display-wait=screen-capture-kit")
+            for attempt in 1...50 where content.displays.isEmpty {
+                try await Task.sleep(nanoseconds: 100_000_000)
+                content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                if !content.displays.isEmpty {
+                    log("display-ready-after-wake attempts=\(attempt)")
+                }
+            }
+        }
         guard !content.displays.isEmpty else {
-            throw NSError(domain: "ZorinMacBridge", code: 1, userInfo: [NSLocalizedDescriptionKey: "No display available for ScreenCaptureKit"])
+            throw NSError(domain: "ZorinMacBridge", code: 1, userInfo: [NSLocalizedDescriptionKey: "No display available for ScreenCaptureKit after wake wait"])
         }
 
         let display: SCDisplay

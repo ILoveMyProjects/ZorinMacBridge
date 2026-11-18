@@ -1,3 +1,11 @@
+# 0.15.52 — Aqua pixel-scroll injection & wake/capture race fix
+
+- Makes normal Aqua scrolling match Chromium Remote Desktop's macOS CoreGraphics injection shape: `kCGScrollEventUnitPixel`, two wheel axes, `kCGSessionEventTap`, default event source, and no synthetic wheel-event location/flag overrides.
+- Keeps the existing ZMB scroll packet, GTK capture path, pointer movement/clicks, keyboard injection and pre-login DriverKit path unchanged.
+- Treats an empty initial ScreenCaptureKit display list after display wake as a bounded startup race: Aqua capture now retries shareable-content discovery for up to 5 seconds before failing.
+- Adds regression coverage that rejects the old line-unit/location/flags wheel path and verifies the ScreenCaptureKit wake retry is bounded.
+- Physical macOS scroll delivery and wake-from-display-sleep remain runtime verification items until tested on the target MacBook.
+
 # 0.15.51 — Aqua scroll Session Event Tap fix
 
 - Routes only Aqua scroll-wheel events through `kCGSessionEventTap` instead of `kCGHIDEventTap`; mouse movement, clicks and keyboard keep their existing injection path.
