@@ -69,6 +69,7 @@ from zmb_projects_page import ProjectsController
 from zmb_shutdown import arm_hard_exit_watchdog
 from zmb_session_lifecycle import reconnect_delay_seconds
 from zmb_client_runtime import initialize_client_runtime_state
+from zmb_scroll_input import ScrollAccumulator
 
 # GTK4 and the GTK3 AppIndicator backend cannot live in the same process.
 # Prefer pystray's Xorg backend as a best-effort tray icon under X11/XWayland.
@@ -221,6 +222,8 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         self._wake_connect_busy = False
         self._display_wake_busy = False
         self._last_display_wake_at = 0.0
+        self._scroll_accumulator = ScrollAccumulator()
+        self._last_scroll_tx_log_at = 0.0
         self._closing = False
 
         self._build_native_ui()
@@ -649,7 +652,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         click.connect('released', self._gtk_released)
         self.picture.add_controller(click)
 
-        scroll = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.BOTH_AXES | Gtk.EventControllerScrollFlags.DISCRETE)
+        scroll = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.BOTH_AXES)
         scroll.connect('scroll', self._gtk_scroll)
         self.picture.add_controller(scroll)
 
@@ -1440,9 +1443,9 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         threading.Thread(target=worker, daemon=True, name='zmb-wake-connect').start()
         return True
 
-    def _wake_display_for_video_async(self) -> None:
+    def _wake_display_for_video_async(self, *, reason: str = 'capture-unavailable') -> None:
         now = time.monotonic()
-        if self._display_wake_busy or (now - self._last_display_wake_at) < 2.0:
+        if self._display_wake_busy or (now - self._last_display_wake_at) < 30.0:
             return
         sid = str(self.selected_server_id or '').strip()
         host = str(self.ip_var.get() or '').strip()
@@ -1452,8 +1455,11 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
             return
         self._display_wake_busy = True
         self._last_display_wake_at = now
-        self.status_var.set('Mac display is asleep — waking screen…')
-        self._log('INFO', 'ScreenCaptureKit reported no display; requesting one-shot display wake through paired P0.')
+        if reason == 'capture-unavailable':
+            self.status_var.set('Mac display unavailable — requesting wake…')
+            self._log('INFO', 'ScreenCaptureKit reported no display; requesting one-shot display wake through paired P0.')
+        else:
+            self._log('INFO', f'Display wake: requesting bounded user activity via paired P0 (reason={reason}).')
 
         def worker():
             try:
@@ -1469,7 +1475,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                 self._log('WARNING', 'Display wake action failed: ' + error)
             else:
                 self.status_var.set('Mac display wake requested — waiting for video…')
-                self._log('INFO', 'Display wake action accepted; video channel will retry without disconnecting control.')
+                self._log('INFO', f'Display wake accepted (reason={reason}); preserving control/input and video channels.')
             return False
 
         threading.Thread(target=worker, daemon=True, name='zmb-display-wake').start()
@@ -1522,6 +1528,7 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
         # the window remains physically fullscreen, which would otherwise disable all
         # local exit paths (button/Esc/Alt+Esc).
         self.mouse_buttons_down = set()
+        self._scroll_accumulator.reset()
         self.remember_credentials_active = bool(self.remember_credentials_var.get())
         if not self.selected_server_id:
             self.selected_server_id = f'{ip}:{port}'
@@ -1716,6 +1723,11 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                     else:
                         self.status_var.set('Connected — view only')
                     self._log('INFO', 'Desktop session connected' + (' (macOS login window).' if self.prelogin_session else '.'))
+                    if not self.prelogin_session:
+                        # ScreenCaptureKit can produce valid black video frames when
+                        # macOS turned the physical screen off; no capture exception
+                        # is raised. Wake once at connection, not on every frame.
+                        self._wake_display_for_video_async(reason='aqua-session-connected')
                     self._refresh_fullscreen_bar()
                     self._refresh_files_state()
                     if not self.prelogin_session:
@@ -1933,13 +1945,15 @@ class ClientWindow(Adw.ApplicationWindow, CoreClient):
                 self._log('INFO', f'Pre-login mouse TX: action=button-up button={button} x={pos[0]:.3f} y={pos[1]:.3f}.')
 
     def _gtk_scroll(self, _controller, dx, dy):
-        if self._remote_input_ready():
-            sx = int(round(-dx * 3))
-            sy = int(round(-dy * 3))
-            if sx or sy:
-                self._enqueue(pack_packet(SCROLL, __import__('struct').pack('!ii', sx, sy)))
-                if self.prelogin_session:
-                    self._log('INFO', f'Pre-login mouse TX: action=scroll dx={sx} dy={sy}.')
+        if not self._remote_input_ready():
+            return False
+        sx, sy = self._scroll_accumulator.feed(dx, dy)
+        if sx or sy:
+            self._enqueue(pack_packet(SCROLL, __import__('struct').pack('!ii', sx, sy)))
+            now = time.monotonic()
+            if now - self._last_scroll_tx_log_at >= 2.0:
+                self._last_scroll_tx_log_at = now
+                self._log('INFO', f'Mouse scroll TX: dx={sx} dy={sy} prelogin={self.prelogin_session}.')
         return True
 
     @staticmethod

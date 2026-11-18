@@ -82,6 +82,50 @@ VIDEO_REPLACEMENT_GRACE_SECONDS = 4.0
 VIDEO_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS = 35.0
 _PRELOGIN_SESSION_COORDINATOR = PreloginSessionCoordinator()
 
+_DISPLAY_WAKE_LOCK = threading.Lock()
+_LAST_DISPLAY_WAKE_AT = 0.0
+
+
+def wake_sleeping_display_before_capture(*, log=print) -> bool:
+    """Bounded user activity only for a physically sleeping main display.
+
+    A black desktop or password screen is not itself evidence of display sleep.
+    Never alter login/lock settings, and never block the video/TLS thread on
+    the caffeinate process. The paired client's wake-display action is a
+    separate fallback when CoreGraphics cannot report a sleeping display.
+    """
+    global _LAST_DISPLAY_WAKE_AT
+    try:
+        cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+        cg.CGMainDisplayID.argtypes = []
+        cg.CGMainDisplayID.restype = ctypes.c_uint32
+        cg.CGDisplayIsAsleep.argtypes = [ctypes.c_uint32]
+        cg.CGDisplayIsAsleep.restype = ctypes.c_bool
+        display_id = int(cg.CGMainDisplayID())
+        if not display_id or not bool(cg.CGDisplayIsAsleep(display_id)):
+            return False
+    except Exception as exc:
+        # An unavailable CoreGraphics symbol/ABI must never fail video auth.
+        log(f'[power] display sleep probe unavailable: {type(exc).__name__}: {exc}')
+        return False
+    now = time.monotonic()
+    with _DISPLAY_WAKE_LOCK:
+        if now - _LAST_DISPLAY_WAKE_AT < 30.0:
+            return False
+        _LAST_DISPLAY_WAKE_AT = now
+    try:
+        subprocess.Popen(
+            ['/usr/bin/caffeinate', '-u', '-t', '8'],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+    except OSError as exc:
+        log(f'[power] sleeping display wake request failed: {type(exc).__name__}: {exc}')
+        return False
+    log(f'[power] sleeping display {display_id} detected; nonblocking user-activity wake requested before capture')
+    return True
+
+
 
 def request_prelogin_handoff(user: str, *, log=print) -> PreloginControlLease | None:
     """Notify the active LoginWindow client that Aqua is taking over."""
@@ -415,6 +459,8 @@ class MacInput:
         self.cf.CFRelease.argtypes = [ctypes.c_void_p]
         self.cg.CGEventCreateScrollWheelEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32]
         self.cg.CGEventCreateScrollWheelEvent.restype = ctypes.c_void_p
+        self.cg.CGEventSetLocation.argtypes = [ctypes.c_void_p, CGPoint]
+        self.cg.CGEventSetLocation.restype = None
         self.held_buttons: set[int] = set()
         self.held_modifiers: set[str] = set()
 
@@ -492,10 +538,20 @@ class MacInput:
             self.held_buttons.discard(button_num)
 
     def scroll(self, dx: int, dy: int) -> None:
+        if not (dx or dy):
+            return
         event = self.cg.CGEventCreateScrollWheelEvent(
             None, ctypes.c_uint32(1), ctypes.c_uint32(2), ctypes.c_int32(dy), ctypes.c_int32(dx)
         )
-        self._post(event)
+        if not event:
+            raise RuntimeError('CoreGraphics could not create scroll wheel event')
+        # Without an explicit location CGEventCreateScrollWheelEvent defaults
+        # to an unrelated coordinate (often 0,0); the intended window beneath
+        # the user's cursor does not receive the scroll on some macOS sessions.
+        position = self._cursor_location()
+        if position is not None:
+            self.cg.CGEventSetLocation(event, position)
+        self._post(event, with_flags=True)
 
     def key(self, keysym: str, down: bool) -> None:
         code = self.KEYCODES.get(keysym)
@@ -622,6 +678,11 @@ class LoginWindowInput(MacInput):
         self.input_probe_results: list[dict[str, object]] = []
         self.last_nx = 0.5
         self.last_ny = 0.5
+        # DriverKit's pointing device sends relative deltas, not absolute
+        # positions. Never assume the real macOS cursor starts at the center
+        # of the captured display when reconnecting after a reboot.
+        self._pointer_reference_valid = False
+        self._pointer_display_id = active_input_display()
         self._state_callback = None
         self._event_callback = None
         self._channel_override = {'keyboard': '', 'pointer': ''}
@@ -1158,9 +1219,26 @@ class LoginWindowInput(MacInput):
         )
 
     def move(self, nx: float, ny: float) -> None:
+        nx = min(1.0, max(0.0, float(nx)))
+        ny = min(1.0, max(0.0, float(ny)))
+        if self.backend == 'driverkit':
+            display_id = active_input_display()
+            if not self._pointer_reference_valid or display_id != self._pointer_display_id:
+                # Baseline the first client position without synthesizing a
+                # jump from an arbitrary center-of-screen coordinate. Relative
+                # HID cannot discover/warp the physical cursor to an absolute
+                # location; the remaining visual offset is not claimed fixed.
+                self.last_nx, self.last_ny = nx, ny
+                self._pointer_reference_valid = True
+                self._pointer_display_id = display_id
+                self._emit_event(
+                    channel='pointer', action='baseline', backend='driverkit',
+                    rc=0, result='RELATIVE_BASELINE',
+                    detail='relative mouse baseline reset; absolute cursor position not verified',
+                )
+                return
         old_x, old_y = self._legacy_xy()
-        self.last_nx = min(1.0, max(0.0, float(nx)))
-        self.last_ny = min(1.0, max(0.0, float(ny)))
+        self.last_nx, self.last_ny = nx, ny
         new_x, new_y = self._legacy_xy()
         self._pointer_report(relative_delta=(new_x - old_x, new_y - old_y), action='move')
 
@@ -1687,6 +1765,7 @@ def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, prelogin_lea
         log('[control] CoreGraphics input initialized')
         clipboard = MacClipboard()
     reader = PacketReader()
+    last_scroll_rx_log_at = 0.0
     sock.settimeout(0.25)
     try:
         while True:
@@ -1727,6 +1806,10 @@ def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, prelogin_lea
                     dx, dy = struct.unpack('!ii', payload)
                     try:
                         inp.scroll(dx, dy)
+                        now_scroll = time.monotonic()
+                        if now_scroll - last_scroll_rx_log_at >= 2.0:
+                            last_scroll_rx_log_at = now_scroll
+                            log(f'[control] scroll RX dx={dx} dy={dy} dispatch=SUBMITTED_UNVERIFIED')
                     except Exception as exc:
                         log(f'[control] scroll event rejected: {type(exc).__name__}: {exc}')
                 elif kind == KEY:
@@ -1927,6 +2010,8 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
                     stat_frames = 0
                     stat_bytes = 0
     finally:
+        log(f'[video] teardown requested: frames={frames} prelogin={prelogin} '
+            f'runner_alive={runner.is_alive()} cancel={bool(cancel_event and cancel_event.is_set())}')
         # Release the Python video-owner lock before asking Swift to tear down.
         # zmb_streamer_stop must never be able to hold the next TLS video session
         # hostage if ScreenCaptureKit/VideoToolbox cleanup is slow.
@@ -1940,6 +2025,8 @@ def video_session(sock: ssl.SSLSocket, fps: float, max_width: int, bitrate: int,
         except Exception as exc:
             log(f'[video] native stop warning: {type(exc).__name__}: {exc}')
         runner.join(timeout=6.0)
+        log(f'[video] native runner join: exited={not runner.is_alive()} '
+            f'code={result.get("code", -999)}')
 
         def destroy_after_runner() -> None:
             try:
@@ -2273,6 +2360,10 @@ def handle_client(raw: socket.socket, addr, context: ssl.SSLContext, password: s
                         log(f'[desktop] physical display restore warning: {exc}')
                     set_active_input_display(0)
         elif role == 'video':
+            # A display can be asleep while TLS, control, and H.264 are otherwise
+            # healthy. Wake before starting native capture; do not classify a
+            # black image itself as sleep and never wait for caffeinate.
+            wake_sleeping_display_before_capture(log=log)
             fps, max_width, bitrate, quality, display_id, target_width, target_height = video_options_from_auth(auth, args)
             if prelogin:
                 display_id = 0

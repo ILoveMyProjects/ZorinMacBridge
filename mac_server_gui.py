@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import errno
+import faulthandler
 import pwd
 import re
 import subprocess
 import os
 import sys
+import queue
+import traceback
 import threading
 import time
 import tkinter as tk
@@ -31,6 +34,28 @@ from settings import (PasswordVerifier, configure_server_home, load_server_passw
                       persistent_server_id, save_server_password, update_server_settings)
 
 
+
+
+# Keep crash diagnostics local to the Mac. Python faulthandler cannot provide
+# the Swift/VideoToolbox stack (use macOS .ips for that) but does capture the
+# Python/Tk thread state if the interpreter aborts before logs are flushed.
+_FATAL_TRACE_FILE = None
+
+
+def _enable_gui_fatal_trace() -> None:
+    global _FATAL_TRACE_FILE
+    try:
+        folder = Path.home() / 'Library' / 'Logs' / 'ZorinMacBridge'
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path = folder / 'Server-python-fatal.log'
+        if path.exists() and path.stat().st_size > 2_000_000:
+            path.replace(folder / 'Server-python-fatal.previous.log')
+        _FATAL_TRACE_FILE = path.open('a', encoding='utf-8', buffering=1)
+        _FATAL_TRACE_FILE.write(f"\n=== ZMB GUI Python started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        faulthandler.enable(file=_FATAL_TRACE_FILE, all_threads=True)
+    except (OSError, RuntimeError):
+        # Diagnostics must not interfere with macOS permissions or startup.
+        pass
 
 
 _PRELOGIN_ADMIN_CONFIG = Path('/Library/Application Support/ZorinMacBridge/Admin/config')
@@ -490,8 +515,37 @@ class _UninstallDialog:
 
 
 class ServerGUI:
+    # Tkinter/Tcl must only be entered from the GUI thread. On macOS 27,
+    # calling root.after() from background workers can abort the Python
+    # interpreter in _tkinter.PythonCmd/PyEval_RestoreThread (SIGABRT).
+    def _post_ui(self, callback) -> None:
+        if not self._ui_closed:
+            self._ui_jobs.put(callback)
+
+    def _drain_ui_jobs(self) -> None:
+        if self._ui_closed:
+            return
+        for _ in range(100):
+            try:
+                callback = self._ui_jobs.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                callback()
+            except Exception:
+                traceback.print_exc()
+        if not self._ui_closed:
+            self.root.after(1 if not self._ui_jobs.empty() else 40, self._drain_ui_jobs)
+
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
+        self._ui_jobs: queue.SimpleQueue = queue.SimpleQueue()
+        self._ui_closed = False
+        self._diagnostic_lock = threading.Lock()
+        self._diagnostic_path = Path.home() / 'Library' / 'Logs' / 'ZorinMacBridge' / 'Server-GUI.log'
+        # Install exactly one repeating Tk timer on the GUI thread. Workers
+        # only append Python callbacks to the queue; no worker touches Tcl.
+        self.root.after(40, self._drain_ui_jobs)
         root.title('ZorinMacBridge Server')
         root.geometry('720x560')
         root.minsize(680, 520)
@@ -553,6 +607,7 @@ class ServerGUI:
                 ('Check for updates', self.check_updates),
                 ('Quit', self.on_close),
             ],
+            post_callback=self._post_ui,
         )
         self.tray.start()
         try:
@@ -600,9 +655,9 @@ class ServerGUI:
         def worker() -> None:
             try:
                 info = check_for_updates()
-                self.root.after(0, lambda: self._show_update_result(info))
+                self._post_ui(lambda: self._show_update_result(info))
             except Exception as exc:
-                self.root.after(0, lambda error=str(exc): self._show_update_error(error))
+                self._post_ui(lambda error=str(exc): self._show_update_error(error))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -633,14 +688,14 @@ class ServerGUI:
 
         def progress(message: str) -> None:
             self._log('Updater: ' + message)
-            self.root.after(0, lambda m=message: self.status_var.set(m))
+            self._post_ui(lambda m=message: self.status_var.set(m))
 
         def worker() -> None:
             try:
                 result = install_update(info, progress=progress)
-                self.root.after(0, lambda: self._update_installed(result))
+                self._post_ui(lambda: self._update_installed(result))
             except Exception as exc:
-                self.root.after(0, lambda error=str(exc): self._show_update_install_error(error))
+                self._post_ui(lambda error=str(exc): self._show_update_install_error(error))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -971,9 +1026,9 @@ class ServerGUI:
         def worker() -> None:
             try:
                 output = clean_uninstall_zmb(keep_user_config=keep_config)
-                self.root.after(0, lambda out=output: done(out, None))
+                self._post_ui(lambda out=output: done(out, None))
             except Exception as exc:
-                self.root.after(0, lambda err=str(exc): done('', err))
+                self._post_ui(lambda err=str(exc): done('', err))
 
         def done(output: str, error: str | None) -> None:
             if error:
@@ -990,7 +1045,7 @@ class ServerGUI:
                 + '\n\nRemote Login and the shared Virtual HID driver were left unchanged.',
             )
             try:
-                self.root.destroy()
+                self.on_close()
             except Exception:
                 pass
 
@@ -1188,9 +1243,9 @@ class ServerGUI:
         def worker() -> None:
             try:
                 state = admin_component_state()
-                self.root.after(0, lambda st=state: decide(st))
+                self._post_ui(lambda st=state: decide(st))
             except Exception as exc:
-                self.root.after(0, lambda err=str(exc): deliver(False, err))
+                self._post_ui(lambda err=str(exc): deliver(False, err))
 
         def decide(state: dict[str, object]) -> None:
             self._last_admin_state = dict(state)
@@ -1225,9 +1280,9 @@ class ServerGUI:
             def state_worker() -> None:
                 try:
                     state = admin_component_state()
-                    self.root.after(0, lambda st=state: verified(st, detail))
+                    self._post_ui(lambda st=state: verified(st, detail))
                 except Exception as exc:
-                    self.root.after(0, lambda err=str(exc): deliver(False, err))
+                    self._post_ui(lambda err=str(exc): deliver(False, err))
             threading.Thread(target=state_worker, daemon=True).start()
 
         def verified(state: dict[str, object], detail: str) -> None:
@@ -1290,9 +1345,9 @@ class ServerGUI:
                 if not state.get('virtual_hid_installed'):
                     output = prepare_virtual_hid()
                     state = virtual_hid_state()
-                self.root.after(0, lambda st=state, out=output: prepared(st, out))
+                self._post_ui(lambda st=state, out=output: prepared(st, out))
             except Exception as exc:
-                self.root.after(0, lambda err=str(exc): failed('Virtual HID preparation failed: ' + err))
+                self._post_ui(lambda err=str(exc): failed('Virtual HID preparation failed: ' + err))
 
         def prepared(state: dict[str, object], output: str) -> None:
             if token != self._virtual_hid_repair_serial:
@@ -1321,9 +1376,9 @@ class ServerGUI:
             def worker() -> None:
                 try:
                     state = virtual_hid_state()
-                    self.root.after(0, lambda st=state: polled(st))
+                    self._post_ui(lambda st=state: polled(st))
                 except Exception as exc:
-                    self.root.after(0, lambda err=str(exc): failed('Virtual HID status check failed: ' + err))
+                    self._post_ui(lambda err=str(exc): failed('Virtual HID status check failed: ' + err))
 
             threading.Thread(target=worker, daemon=True).start()
 
@@ -1353,13 +1408,13 @@ class ServerGUI:
                 for attempt in range(2):
                     try:
                         output = finalize_virtual_hid()
-                        self.root.after(0, lambda out=output: finalized(out))
+                        self._post_ui(lambda out=output: finalized(out))
                         return
                     except Exception as exc:
                         last_error = str(exc)
                         if attempt == 0:
                             time.sleep(2.0)
-                self.root.after(0, lambda err=last_error: failed('Virtual HID finalization failed: ' + err))
+                self._post_ui(lambda err=last_error: failed('Virtual HID finalization failed: ' + err))
 
             threading.Thread(target=worker, daemon=True).start()
 
@@ -1396,7 +1451,7 @@ class ServerGUI:
                 state = None
                 error = str(exc)
             try:
-                self.root.after(0, lambda: done(token, state, error))
+                self._post_ui(lambda: done(token, state, error))
             except Exception:
                 pass
 
@@ -1448,9 +1503,9 @@ class ServerGUI:
         def worker() -> None:
             try:
                 output = install_unattended_access()
-                self.root.after(0, lambda out=output: done(out, None))
+                self._post_ui(lambda out=output: done(out, None))
             except Exception as exc:
-                self.root.after(0, lambda err=str(exc): done('', err))
+                self._post_ui(lambda err=str(exc): done('', err))
 
         def done(output: str, error: str | None) -> None:
             if error:
@@ -1474,7 +1529,7 @@ class ServerGUI:
                         state = admin_component_state()
                     except Exception:
                         state = {}
-                    self.root.after(0, lambda st=state: after_state(st, ok, detail))
+                    self._post_ui(lambda st=state: after_state(st, ok, detail))
 
                 threading.Thread(target=state_worker, daemon=True).start()
 
@@ -1511,9 +1566,9 @@ class ServerGUI:
         def worker() -> None:
             try:
                 output = uninstall_unattended_access()
-                self.root.after(0, lambda out=output: done(out, None))
+                self._post_ui(lambda out=output: done(out, None))
             except Exception as exc:
-                self.root.after(0, lambda err=str(exc): done('', err))
+                self._post_ui(lambda err=str(exc): done('', err))
 
         def done(output: str, error: str | None) -> None:
             if error:
@@ -1542,7 +1597,7 @@ class ServerGUI:
                 text = ''
                 error = str(exc)
             try:
-                self.root.after(0, lambda: done(text, error))
+                self._post_ui(lambda: done(text, error))
             except Exception:
                 pass
 
@@ -1683,7 +1738,7 @@ class ServerGUI:
         def worker() -> None:
             signing = self._code_signing_mode()
             try:
-                self.root.after(0, lambda: done(token, signing))
+                self._post_ui(lambda: done(token, signing))
             except Exception:
                 pass
 
@@ -1739,6 +1794,18 @@ class ServerGUI:
         self.root.clipboard_append(self.fp_var.get())
 
     def _log(self, msg: str) -> None:
+        # Persist before scheduling Tk work, so a native crash leaves the last
+        # application action visible even when the GUI window disappears.
+        try:
+            with self._diagnostic_lock:
+                self._diagnostic_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                if self._diagnostic_path.exists() and self._diagnostic_path.stat().st_size > 2_000_000:
+                    self._diagnostic_path.replace(self._diagnostic_path.with_suffix('.previous.log'))
+                with self._diagnostic_path.open('a', encoding='utf-8') as output:
+                    output.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg.rstrip()}\n")
+        except OSError:
+            pass
+
         def write():
             self.log.configure(state='normal')
             self.log.insert('end', msg.rstrip() + '\n')
@@ -1751,7 +1818,7 @@ class ServerGUI:
             self.log.see('end')
             self.log.configure(state='disabled')
         try:
-            self.root.after(0, write)
+            self._post_ui(write)
         except Exception:
             pass
 
@@ -1813,8 +1880,8 @@ class ServerGUI:
         self.status_var.set('Starting…')
 
         def ready(fp: str) -> None:
-            self.root.after(0, lambda: self.fp_var.set(fp))
-            self.root.after(0, lambda: self.status_var.set('Running'))
+            self._post_ui(lambda: self.fp_var.set(fp))
+            self._post_ui(lambda: self.status_var.set('Running'))
             if advertise and self.stop_event is not None and not self.stop_event.is_set():
                 try:
                     self.advertiser = LanAdvertiser(bind, port, current_version(), self.server_id)
@@ -1831,9 +1898,9 @@ class ServerGUI:
                 )
             except Exception as exc:
                 self._log(f'ERROR: {exc}')
-                self.root.after(0, lambda error=str(exc): messagebox.showerror('Server error', error))
+                self._post_ui(lambda error=str(exc): messagebox.showerror('Server error', error))
             finally:
-                self.root.after(0, self._stopped_ui)
+                self._post_ui(self._stopped_ui)
 
         self.thread = threading.Thread(target=worker, daemon=True)
         self.thread.start()
@@ -1860,6 +1927,7 @@ class ServerGUI:
         self.stop_btn.configure(state='disabled')
 
     def on_close(self) -> None:
+        self._ui_closed = True
         self._stop_advertiser()
         if self.stop_event is not None:
             self.stop_event.set()
@@ -2082,6 +2150,7 @@ def main() -> None:
     except Exception as exc:
         bootstrap_error = f'{type(exc).__name__}: {exc}'
 
+    _enable_gui_fatal_trace()
     root = tk.Tk()
     gui = ServerGUI(root)
     if '--setup-assistant' in sys.argv:

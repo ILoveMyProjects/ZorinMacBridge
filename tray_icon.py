@@ -10,11 +10,13 @@ class TrayController:
     Failure to create a tray icon must never prevent the main GUI from running.
     """
 
-    def __init__(self, root, title: str, icon_path: Path, items: list[tuple[str, Callable[[], None]]]) -> None:
+    def __init__(self, root, title: str, icon_path: Path, items: list[tuple[str, Callable[[], None]]],
+                 post_callback: Callable[[Callable[[], None]], None] | None = None) -> None:
         self.root = root
         self.title = title
         self.icon_path = icon_path
         self.items = items
+        self.post_callback = post_callback
         self.icon = None
 
     def start(self) -> bool:
@@ -36,7 +38,10 @@ class TrayController:
             def invoke(callback):
                 def wrapped(_icon=None, _item=None):
                     try:
-                        self.root.after(0, callback)
+                        if self.post_callback is not None:
+                            self.post_callback(callback)
+                        else:
+                            self.root.after(0, callback)
                     except Exception:
                         pass
                 return wrapped

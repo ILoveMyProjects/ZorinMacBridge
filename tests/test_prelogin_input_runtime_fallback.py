@@ -169,7 +169,10 @@ def run():
         inp0=make_input(lib0,states0,vhid_rc=0)
         assert inp0.backend=='driverkit'
         assert not any(c[0] in ('corehid_open','legacy_open_backend') for c in lib0.calls)
-        inp0.key('Shift_L',True); inp0.key('a',True); inp0.move(.55,.45)
+        inp0.key('Shift_L',True); inp0.key('a',True)
+        inp0.move(.55,.45)  # Establish relative HID baseline after reconnect.
+        assert not any(c[0]=='pointing' and (c[2] or c[3]) for c in inp0._test_virtual_hid.calls)
+        inp0.move(.56,.46)  # Subsequent movement is a real relative report.
         assert ('keyboard',2,()) in inp0._test_virtual_hid.calls
         assert ('keyboard',2,(4,)) in inp0._test_virtual_hid.calls
         assert any(c[0]=='pointing' and (c[2] or c[3]) for c in inp0._test_virtual_hid.calls)

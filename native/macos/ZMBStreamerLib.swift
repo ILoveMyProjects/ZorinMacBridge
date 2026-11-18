@@ -492,17 +492,28 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         activeTask?.cancel()
         if let reason { log(reason) }
 
-        // Signal runBlocking immediately.  ScreenCaptureKit and VideoToolbox
-        // cleanup are best-effort and must never block zmb_streamer_stop(),
-        // otherwise a dead native teardown prevents the next video session.
+        // The native runner may return before teardown. Retain the streamer via
+        // the encoder callback refcon until *after* VideoToolbox is drained and
+        // invalidated; otherwise a late callback dereferences freed Swift memory.
+        // Keep this work off the caller so a stuck Apple API cannot block the
+        // next TLS video connection.
         done.signal()
-        DispatchQueue.global(qos: .utility).async {
+        DispatchQueue.global(qos: .utility).async { [self] in
+            log("encoder-teardown=begin")
             if let activeStream {
-                activeStream.stopCapture(completionHandler: nil)
+                let stopped = DispatchSemaphore(value: 0)
+                activeStream.stopCapture { _ in stopped.signal() }
+                let result = stopped.wait(timeout: .now() + 2.0)
+                if result != .success { log("encoder-teardown=stream-stop-timeout") }
             }
+            // No SCStream sample callback may enqueue another VT frame after
+            // draining the serial sample queue. This is deliberately after
+            // stopCapture and before completing outstanding encoded frames.
+            sampleQueue.sync { }
             if let activeCompression {
-                VTCompressionSessionInvalidate(activeCompression)
+                retireEncoder(activeCompression)
             }
+            log("encoder-teardown=complete")
         }
     }
 
@@ -680,7 +691,10 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
             return value
         }
         if let activeCompression {
-            VTCompressionSessionInvalidate(activeCompression)
+            // A rejected pre-login candidate can still have asynchronous VT
+            // callbacks. Complete and invalidate before releasing the owner.
+            sampleQueue.sync { }
+            retireEncoder(activeCompression)
         }
         // Drain writes already queued by the rejected candidate without ever
         // waiting unboundedly on a stale pipe.  This prevents a late access unit
@@ -943,8 +957,22 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         return true
     }
 
+    private func retireEncoder(_ session: VTCompressionSession) {
+        // VTCompressionOutputCallback receives an unmanaged refcon. Keep one
+        // +1 retain per encoder alive until the final callback is delivered.
+        // CompleteFrames can block on macOS's remote encoder, so callers must
+        // invoke this from teardown, never the networking/control thread.
+        let completed = VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+        if completed != noErr { log("encoder-teardown=complete-frames-error status=\(completed)") }
+        VTCompressionSessionInvalidate(session)
+        Unmanaged.passUnretained(self).release()
+    }
+
     private func createEncoder(width: Int32, height: Int32) throws {
         var session: VTCompressionSession?
+        // VideoToolbox may call us on a separate queue after the initiating
+        // request has returned. The callback's refcon MUST own this object.
+        let callbackOwner = Unmanaged.passRetained(self)
         let status = VTCompressionSessionCreate(
             allocator: kCFAllocatorDefault,
             width: width,
@@ -961,10 +989,11 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
                 let owner = Unmanaged<H264ScreenStreamer>.fromOpaque(refcon).takeUnretainedValue()
                 owner.handleEncoded(sampleBuffer)
             },
-            refcon: Unmanaged.passUnretained(self).toOpaque(),
+            refcon: callbackOwner.toOpaque(),
             compressionSessionOut: &session
         )
         guard status == noErr, let session else {
+            callbackOwner.release()
             throw NSError(domain: "ZorinMacBridge", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "VTCompressionSessionCreate failed: \(status)"])
         }
 
@@ -981,12 +1010,18 @@ final class H264ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: NSNumber(value: 2.0))
         let prep = VTCompressionSessionPrepareToEncodeFrames(session)
         guard prep == noErr else {
-            VTCompressionSessionInvalidate(session)
+            retireEncoder(session)
             throw NSError(domain: "ZorinMacBridge", code: Int(prep), userInfo: [NSLocalizedDescriptionKey: "VTCompressionSessionPrepareToEncodeFrames failed: \(prep)"])
         }
         stateLock.lock()
-        compression = session
+        let stopped = finished
+        if !stopped { compression = session }
         stateLock.unlock()
+        if stopped {
+            retireEncoder(session)
+            throw CancellationError()
+        }
+        log("encoder-ready width=\(width) height=\(height) bitrate=\(bitrate)")
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {

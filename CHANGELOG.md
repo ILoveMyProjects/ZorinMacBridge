@@ -1,3 +1,23 @@
+# 0.15.49 — Scroll input & sleeping-display wake
+
+- GTK4 now accepts both discrete wheel and smooth touchpad scroll deltas, accumulating fractional motion instead of rounding small deltas to zero. Resets accumulation on new sessions and logs rate-limited scroll transmissions.
+- Aqua CoreGraphics scroll events now carry the actual current cursor location and modifier flags instead of being posted without a target location. Adds throttled receive/dispatch-submission logging. Submitting an event is not proof that the application consumed it.
+- On an authenticated Aqua Desktop connection the Linux client requests one bounded display wake via the existing paired P0 action, even if ScreenCaptureKit sends valid black frames. Retains existing video-only wake/error handling and a 30-second rate limit; this does not repeatedly trigger on black pixels.
+- The Mac server independently probes CGDisplayIsAsleep before starting native video and, only if asleep, makes a nonblocking caffeinate -u user activity request (also rate-limited). LoginWindow login/lock policies and system power settings remain unchanged.
+- No changes to DriverKit input protocol, pre-login HID reports, capture/VideoToolbox encoder lifecycle, TLS, pairing or network packet formats.
+- macOS physical display wake and scroll delivery still require testing on the real Mac; static Python tests do not prove system approval or actual window scroll.
+
+# 0.15.48 — VideoToolbox / macOS GUI Crash Hardening
+
+- Hardens the in-process VideoToolbox callback ownership after physical 0.15.47 SIGSEGV: each compression session retains the Swift streamer for the lifetime of its callback refcon; shutdown stops ScreenCaptureKit, drains the serial capture queue, completes outstanding VT frames, invalidates the encoder, and only then releases that retain.
+- Keeps native encoder teardown off the network thread, retaining the existing fast video-replacement contract and logging encoder lifetime stages.
+- Routes macOS Server GUI worker notifications and tray actions through a Python queue drained strictly on Tk's main thread instead of invoking Tcl `root.after()` from background workers; guards callbacks after window close.
+- Writes bounded local diagnostics to `~/Library/Logs/ZorinMacBridge/Server-GUI.log` and installs Python faulthandler output in `Server-python-fatal.log` for future fatal Tk/Python process aborts.
+- Avoids the arbitrary initial center-of-screen motion when DriverKit relative-pointer input starts or the selected display changes. This is a safe relative-motion rebaseline, **not verified absolute cursor synchronization**.
+- Adds dedicated regression tests for callback-retain teardown ordering, main-thread-only Tk dispatch, and relative pointer rebaseline; updates the old input test to match the corrected initial-motion contract.
+- No intentional changes to pre-login DriverKit protocol/device injection, TLS, pairing, wake or network wire protocol.
+- **Not physically verified:** macOS 27 Swift compilation/VideoToolbox runtime, Tk SIGABRT recovery and exact physical LoginWindow pointer alignment; these require Mac-side testing.
+
 # 0.15.47 — Automatic P0 / Virtual HID Setup Recovery
 
 - Fixes the long-standing first-install failure where Setup Assistant ran the entire privileged P0 installer behind one 120-second AppleScript timeout and reported `P0 installation failed` while DriverKit activation or Remote Login setup was still waiting on macOS.
