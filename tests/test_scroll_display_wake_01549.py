@@ -26,7 +26,7 @@ class FakeQuartz:
     def __init__(self):
         self.created = []
         self.locations = []
-    def CGEventCreateScrollWheelEvent(self, *args):
+    def CGEventCreateScrollWheelEvent2(self, *args):
         self.created.append(args)
         return 123
     def CGEventSetLocation(self, event, position):
@@ -83,7 +83,7 @@ assert "self._wake_display_for_video_async(reason='aqua-session-connected')" in 
 assert 'now - self._last_display_wake_at) < 30.0' in client
 assert 'wake_sleeping_display_before_capture(log=log)' in server
 assert 'CGDisplayIsAsleep' in server
-assert 'SESSION_PIXEL_SUBMITTED_UNVERIFIED' in server
+assert 'SESSION_PIXEL_EVENT2_SUBMITTED_UNVERIFIED' in server
 assert 'PIXEL_SCROLL_UNIT = 0' in server
 assert 'if not self.prelogin_session:' in client
 print('scroll/wake 0.15.49 regression tests: OK')

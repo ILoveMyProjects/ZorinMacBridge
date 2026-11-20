@@ -11,7 +11,7 @@ class FakeQuartz:
     def __init__(self):
         self.created = []
         self.locations = []
-    def CGEventCreateScrollWheelEvent(self, *args):
+    def CGEventCreateScrollWheelEvent2(self, *args):
         self.created.append(args)
         return 123
     def CGEventSetLocation(self, *args):
@@ -38,7 +38,7 @@ server = (ROOT / 'mac_server.py').read_text(encoding='utf-8')
 swift = (ROOT / 'native/macos/ZMBStreamerLib.swift').read_text(encoding='utf-8')
 assert 'PIXEL_SCROLL_UNIT = 0' in server
 assert 'self._post(event, tap=self.SESSION_TAP)' in server
-assert 'SESSION_PIXEL_SUBMITTED_UNVERIFIED' in server
+assert 'SESSION_PIXEL_EVENT2_SUBMITTED_UNVERIFIED' in server
 scroll_block = server.split('    def scroll(self, dx: int, dy: int) -> None:', 1)[1].split('    def key(', 1)[0]
 assert 'CGEventSetLocation' not in scroll_block
 assert 'with_flags=True' not in scroll_block

@@ -1,3 +1,9 @@
+## 0.15.53 - Aqua scroll fixed-signature CoreGraphics path
+
+- Replaces the variadic `CGEventCreateScrollWheelEvent` ctypes call on Apple Silicon with fixed-signature `CGEventCreateScrollWheelEvent2`.
+- Keeps pixel units and `kCGSessionEventTap`; mouse movement, buttons, keyboard, DriverKit/LoginWindow input, video and wake behavior are unchanged.
+- Adds a distinct `SESSION_PIXEL_EVENT2_SUBMITTED_UNVERIFIED` runtime marker and regression coverage so the deployed path is identifiable in Mac logs.
+
 # 0.15.52 — Aqua pixel-scroll injection & wake/capture race fix
 
 - Makes normal Aqua scrolling match Chromium Remote Desktop's macOS CoreGraphics injection shape: `kCGScrollEventUnitPixel`, two wheel axes, `kCGSessionEventTap`, default event source, and no synthetic wheel-event location/flag overrides.

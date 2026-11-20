@@ -459,8 +459,15 @@ class MacInput:
         self.cg.CGEventSetFlags.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
         self.cg.CGEventKeyboardSetUnicodeString.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_uint16)]
         self.cf.CFRelease.argtypes = [ctypes.c_void_p]
-        self.cg.CGEventCreateScrollWheelEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32]
-        self.cg.CGEventCreateScrollWheelEvent.restype = ctypes.c_void_p
+        # Use the fixed-signature CoreGraphics API. The older scroll constructor
+        # is variadic; Apple ARM64 uses a distinct variadic ABI and Python ctypes
+        # explicitly warns about that calling convention. Event2 removes that
+        # ABI boundary entirely while producing the same Quartz wheel event.
+        self.cg.CGEventCreateScrollWheelEvent2.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+            ctypes.c_int32, ctypes.c_int32, ctypes.c_int32,
+        ]
+        self.cg.CGEventCreateScrollWheelEvent2.restype = ctypes.c_void_p
         self.cg.CGEventSetLocation.argtypes = [ctypes.c_void_p, CGPoint]
         self.cg.CGEventSetLocation.restype = None
         self.held_buttons: set[int] = set()
@@ -555,9 +562,9 @@ class MacInput:
         # and posted at the session tap.  Do not override event location or
         # modifier flags here; CoreGraphics routes the wheel event using the
         # current session pointer state.
-        event = self.cg.CGEventCreateScrollWheelEvent(
+        event = self.cg.CGEventCreateScrollWheelEvent2(
             None, ctypes.c_uint32(self.PIXEL_SCROLL_UNIT), ctypes.c_uint32(2),
-            ctypes.c_int32(dy), ctypes.c_int32(dx)
+            ctypes.c_int32(dy), ctypes.c_int32(dx), ctypes.c_int32(0)
         )
         if not event:
             raise RuntimeError('CoreGraphics could not create scroll wheel event')
@@ -1819,7 +1826,7 @@ def control_session(sock: ssl.SSLSocket, *, prelogin: bool = False, prelogin_lea
                         now_scroll = time.monotonic()
                         if now_scroll - last_scroll_rx_log_at >= 2.0:
                             last_scroll_rx_log_at = now_scroll
-                            scroll_dispatch = 'PRELOGIN_SUBMITTED_UNVERIFIED' if prelogin else 'SESSION_PIXEL_SUBMITTED_UNVERIFIED'
+                            scroll_dispatch = 'PRELOGIN_SUBMITTED_UNVERIFIED' if prelogin else 'SESSION_PIXEL_EVENT2_SUBMITTED_UNVERIFIED'
                             log(f'[control] scroll RX dx={dx} dy={dy} dispatch={scroll_dispatch}')
                     except Exception as exc:
                         log(f'[control] scroll event rejected: {type(exc).__name__}: {exc}')

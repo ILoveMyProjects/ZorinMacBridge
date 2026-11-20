@@ -24,7 +24,7 @@ class FakeQuartz:
         self.locations = []
     def CGEventCreateMouseEvent(self, *args):
         return 45
-    def CGEventCreateScrollWheelEvent(self, *args):
+    def CGEventCreateScrollWheelEvent2(self, *args):
         self.created.append(args)
         return 123
     def CGEventSetLocation(self, event, position):
